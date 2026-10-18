@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Proof Check Bench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a test bench. Left rail holds input and the trip verdict; results stack on the right as slips. */
+:root {
+  --paper: #f6f7fb; --sheet: #ffffff; --ink: #1b2131; --muted: #5a6378; --rule: #d8dcea;
+  --slip: #3345a6; --slip-soft: #e8ebf8; --code-bg: #eef0f7;
+  --ok: #1d7a4b; --ok-soft: #e3f3ea; --warn: #9a6200; --warn-soft: #fbf0dc; --no: #b0281f; --no-soft: #fbe6e4;
+  --f-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #10131b; --sheet: #171b26; --ink: #e5e8f1; --muted: #9ba3b9; --rule: #2b3244;
+    --slip: #93a1f2; --slip-soft: #1f2640; --code-bg: #0c0f16;
+    --ok: #62c38f; --ok-soft: #16291f; --warn: #e2ab4c; --warn-soft: #2d2412; --no: #f08a80; --no-soft: #331a18; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #10131b; --sheet: #171b26; --ink: #e5e8f1; --muted: #9ba3b9; --rule: #2b3244;
+  --slip: #93a1f2; --slip-soft: #1f2640; --code-bg: #0c0f16;
+  --ok: #62c38f; --ok-soft: #16291f; --warn: #e2ab4c; --warn-soft: #2d2412; --no: #f08a80; --no-soft: #331a18; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink); font: 400 1rem/1.5 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1, h2, h3 { font-family: var(--f-display); margin: 0; line-height: 1.15; text-wrap: balance; }
+p { margin: 0; }
+button, select { font: inherit; }
+:focus-visible { outline: 2px solid var(--slip); outline-offset: 2px; }
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.label { font: 600 0.7rem/1.2 var(--f-mono); letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); }
+
+header.bar { max-width: 76rem; margin: 0 auto; padding-block: 1.4rem 1rem; display: flex; flex-wrap: wrap; gap: 0.8rem 1.5rem; align-items: center; justify-content: space-between; }
+header.bar h1 { font-size: 1.7rem; font-weight: 700; letter-spacing: -0.01em; }
+header.bar h1 small { display: block; font: 400 0.95rem/1.4 var(--f-body); color: var(--muted); letter-spacing: 0; margin-top: 0.2rem; }
+.controls { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: 0.45rem; font: 600 0.78rem/1 var(--f-mono); border: 1px solid currentColor; border-radius: 999px; padding: 0.4rem 0.75rem; white-space: nowrap; }
+.chip::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: currentColor; }
+.chip.ok { color: var(--ok); } .chip.no { color: var(--no); } .chip.wait { color: var(--muted); }
+select { background: var(--sheet); color: var(--ink); border: 1px solid var(--rule); border-radius: 8px; padding: 0.4rem 0.6rem; }
+
+main { max-width: 76rem; margin: 0 auto; padding-block: 0 3rem; display: grid; grid-template-columns: minmax(0, 22rem) minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+@media (max-width: 52rem) { main { grid-template-columns: minmax(0, 1fr); } }
+.rail { display: flex; flex-direction: column; gap: 1rem; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 1rem); }
+@media (max-width: 52rem) { .rail { position: static; } }
+
+.drop { border: 2px dashed var(--slip); border-radius: 12px; background: var(--sheet); padding: 1.4rem 1.2rem; display: flex; flex-direction: column; gap: 0.8rem; align-items: center; text-align: center; transition: background 0.15s; }
+.drop.over { background: var(--slip-soft); }
+.drop h2 { font-size: 1.15rem; }
+.drop-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; }
+.btn { border: 1px solid var(--slip); background: var(--slip); color: var(--sheet); border-radius: 8px; padding: 0.5rem 0.9rem; font-weight: 600; cursor: pointer; }
+.btn.ghost { background: transparent; color: var(--slip); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn:not(:disabled):hover { filter: brightness(1.08); }
+
+.panel { background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; padding: 1rem 1.1rem; display: flex; flex-direction: column; gap: 0.7rem; }
+.panel h2 { font-size: 1.05rem; }
+.verdict { border-radius: 8px; padding: 0.8rem 0.9rem; display: flex; flex-direction: column; gap: 0.4rem; }
+.verdict.pass { background: var(--ok-soft); } .verdict.review { background: var(--warn-soft); } .verdict.fail { background: var(--no-soft); } .verdict.idle { background: var(--code-bg); }
+.verdict b { font: 700 1.25rem/1.1 var(--f-display); }
+.verdict.pass b { color: var(--ok); } .verdict.review b { color: var(--warn); } .verdict.fail b { color: var(--no); }
+.verdict ul { margin: 0; padding-left: 1.1rem; font-size: 0.93rem; display: flex; flex-direction: column; gap: 0.2rem; }
+.totals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
+.totals div { display: flex; flex-direction: column; gap: 0.15rem; }
+.totals b { font: 600 1.1rem/1.1 var(--f-mono); font-variant-numeric: tabular-nums; }
+
+.results { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+.empty { border: 1px solid var(--rule); border-radius: 12px; background: var(--sheet); padding: 2rem 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
+.empty h2 { font-size: 1.25rem; }
+
+.card { background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; display: grid; grid-template-columns: 11rem minmax(0, 1fr); overflow: hidden; }
+@media (max-width: 36rem) { .card { grid-template-columns: minmax(0, 1fr); } }
+.card .thumb { background: var(--code-bg); display: flex; flex-direction: column; gap: 0.4rem; padding: 0.8rem; align-items: center; justify-content: center; }
+.card .thumb img { max-width: 100%; max-height: 14rem; border-radius: 4px; display: block; }
+.card .thumb .label { text-align: center; }
+.card .body { padding: 1rem 1.2rem; display: flex; flex-direction: column; gap: 0.8rem; min-width: 0; }
+.card .head { display: flex; flex-wrap: wrap; gap: 0.5rem 0.8rem; align-items: center; justify-content: space-between; }
+.card .name { font-weight: 600; overflow-wrap: anywhere; }
+.kind { display: inline-flex; gap: 0.5rem; align-items: baseline; font: 600 0.85rem/1 var(--f-mono); border-radius: 999px; padding: 0.4rem 0.75rem; background: var(--slip-soft); color: var(--slip); }
+.kind.other { background: var(--code-bg); color: var(--muted); }
+.kind span { font-weight: 400; opacity: 0.85; }
+.note { font-size: 0.9rem; color: var(--muted); }
+
+.readings { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0.8rem; }
+.reading { border-top: 3px solid var(--slip); padding-top: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
+.reading.unsure { border-top-color: var(--warn); }
+.reading .value { font: 600 1.6rem/1.1 var(--f-mono); font-variant-numeric: tabular-nums; }
+.reading .value.missing { font-size: 1.1rem; line-height: 1.6; color: var(--muted); }
+.reading .flag { font: 600 0.72rem/1 var(--f-mono); color: var(--warn); }
+.meter { display: grid; grid-template-columns: 3.6rem minmax(0, 1fr) 2.6rem; gap: 0.4rem; align-items: center; font: 400 0.75rem/1.2 var(--f-mono); color: var(--muted); }
+.meter .track { height: 6px; border-radius: 3px; background: var(--code-bg); overflow: hidden; }
+.meter .fill { height: 100%; background: var(--ok); border-radius: 3px; }
+.meter .fill.low { background: var(--warn); }
+.meter .pct { text-align: right; font-variant-numeric: tabular-nums; }
+
+details { border-top: 1px solid var(--rule); padding-top: 0.6rem; }
+summary { cursor: pointer; font-size: 0.9rem; color: var(--slip); font-weight: 600; }
+.table-wrap { overflow-x: auto; margin-top: 0.6rem; }
+table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font: 600 0.68rem/1.2 var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+td.mono { white-space: nowrap; }
+.foot { display: flex; flex-wrap: wrap; gap: 0.3rem 1.2rem; font: 400 0.78rem/1.3 var(--f-mono); color: var(--muted); }
+
+.spinner { width: 1.1rem; height: 1.1rem; border: 2px solid var(--rule); border-top-color: var(--slip); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading { display: flex; gap: 0.6rem; align-items: center; color: var(--muted); }
+.error { background: var(--no-soft); color: var(--no); border-radius: 8px; padding: 0.7rem 0.9rem; font-size: 0.93rem; }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } .drop { transition: none; } }
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <h1>Proof Check Bench<small>Is it a bill or a geotagged photo, and what time does it show? Answers from TypeSafe Jev.</small></h1>
+  <div class="controls">
+    <span id="key" class="chip wait">Checking API key…</span>
+    <label class="label" for="model">Model</label>
+    <select id="model">
+      <option value="jev-latest">jev-latest (1.13)</option>
+      <option value="jev-preview">jev-preview (1.14)</option>
+    </select>
+  </div>
+</header>
+
+<main>
+  <aside class="rail">
+    <div class="drop" id="drop">
+      <h2>Drop bills or truck photos here</h2>
+      <p class="muted">JPEG or PNG. Each image is checked on its own, one or two Jev requests each.</p>
+      <div class="drop-actions">
+        <button class="btn" id="choose" type="button">Choose images</button>
+        <button class="btn ghost" id="samples" type="button">Try the two samples</button>
+      </div>
+      <input id="file" type="file" accept="image/jpeg,image/png" multiple hidden>
+    </div>
+
+    <section class="panel" aria-live="polite">
+      <h2>Trip check</h2>
+      <div id="verdict" class="verdict idle"><b>Waiting for a pair</b><p class="muted">Add one bill and one geotagged photo. The photo's date and time must fall within the bill's time in and time out.</p></div>
+      <p class="note">Readings below <span class="mono">80%</span> confidence count as unsure and send the trip to review.</p>
+    </section>
+
+    <section class="panel">
+      <div class="totals">
+        <div><span class="label">Images</span><b id="t-images">0</b></div>
+        <div><span class="label">Tokens</span><b id="t-tokens">0</b></div>
+        <div><span class="label">Cost</span><b id="t-cost">$0</b></div>
+      </div>
+      <button class="btn ghost" id="clear" type="button" disabled>Clear results</button>
+    </section>
+  </aside>
+
+  <section class="results" id="results" aria-live="polite">
+    <div class="empty" id="empty">
+      <h2>No images checked yet</h2>
+      <p class="muted">Drop images on the left, or try the two samples: a weighbridge slip photographed sideways, and a truck photo with a GPS stamp. Each result shows what kind of image Jev thinks it is, the times it read, and how sure it is of each.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+const THRESHOLD = 0.8;
+const KIND_LABEL = { bill: "Bill", geotagged_photo: "Geotagged photo", other: "Other" };
+const ROTATE_LABEL = { 90: "rotated 90° counter-clockwise", 180: "rotated 180°", 270: "rotated 90° clockwise" };
+const items = [];
+let nextId = 1;
+
+const $ = (id) => document.getElementById(id);
+const pct = (x) => Math.round(x * 100) + "%";
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function loadStatus() {
+  const chip = $("key");
+  try {
+    const status = await (await fetch("/api/status")).json();
+    chip.className = "chip " + (status.key_set ? "ok" : "no");
+    chip.textContent = status.key_set ? "API key found" : "No API key";
+    chip.title = status.key_set ? "" : "Set TYPESAFE_API_KEY or save it in " + status.key_file + ", then restart app.py";
+  } catch {
+    chip.className = "chip no";
+    chip.textContent = "Server not running";
+  }
+}
+
+function readAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addFiles(files) {
+  for (const file of files) {
+    if (!/^image\/(jpeg|png)$/.test(file.type)) {
+      items.unshift({ id: nextId++, name: file.name, status: "error", error: "Only JPEG and PNG images can be checked. Convert this file first." });
+      continue;
+    }
+    const item = { id: nextId++, name: file.name, status: "pending", preview: await readAsDataURL(file) };
+    items.unshift(item);
+    check(item);
+  }
+  render();
+}
+
+async function check(item) {
+  try {
+    const response = await fetch("/api/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: item.name, data: item.preview, model: $("model").value }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "The server returned " + response.status + ".");
+    item.result = body;
+    item.status = "done";
+  } catch (error) {
+    item.status = "error";
+    item.error = error.message === "Failed to fetch" ? "Couldn't reach app.py. Check that it's still running." : error.message;
+  }
+  render();
+}
+
+function reading(result, key) {
+  return result.readings.find((r) => r.key === key);
+}
+
+function minutes(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function tripVerdict() {
+  const done = items.filter((i) => i.status === "done");
+  const bill = done.find((i) => i.result.kind.choice === "bill");
+  const photo = done.find((i) => i.result.kind.choice === "geotagged_photo");
+  if (!bill || !photo) return null;
+
+  const timeIn = reading(bill.result, "time_in"), timeOut = reading(bill.result, "time_out"), billDate = reading(bill.result, "bill_date");
+  const photoTime = reading(photo.result, "photo_time"), photoDate = reading(photo.result, "photo_date");
+  const pair = `${bill.name} + ${photo.name}`;
+  const missing = [timeIn, timeOut, billDate, photoTime, photoDate].filter((r) => r.missing);
+  if (missing.length) {
+    return { status: "review", title: "Needs a person to check", pair,
+      reasons: ["Not shown or unreadable: " + missing.map((r) => r.label).join(", ")] };
+  }
+  const reasons = [];
+  const sameDate = billDate.value === photoDate.value;
+  reasons.push(sameDate ? `Same date: ${photoDate.value}` : `Dates differ: bill ${billDate.value}, photo ${photoDate.value}`);
+  const t = minutes(photoTime.value);
+  const inWindow = minutes(timeIn.value) <= t && t <= minutes(timeOut.value);
+  reasons.push(inWindow
+    ? `Photo time ${photoTime.value} is between ${timeIn.value} and ${timeOut.value}`
+    : `Photo time ${photoTime.value} is outside ${timeIn.value} to ${timeOut.value}`);
+  const unsure = [timeIn, timeOut, billDate, photoTime, photoDate].filter((r) => r.min_confidence < THRESHOLD);
+  if (bill.result.kind.confidence < THRESHOLD) unsure.push({ label: "bill type" });
+  if (photo.result.kind.confidence < THRESHOLD) unsure.push({ label: "photo type" });
+  if (unsure.length) reasons.push("Unsure readings: " + unsure.map((r) => r.label).join(", "));
+
+  const status = unsure.length ? "review" : sameDate && inWindow ? "pass" : "fail";
+  const title = { pass: "Same trip", review: "Needs a person to check", fail: "Doesn't match" }[status];
+  return { status, title, reasons, pair };
+}
+
+function meter(part) {
+  const low = part.confidence < THRESHOLD;
+  return `<div class="meter" title="Top options: ${esc(part.top.slice(0, 3).map(([k, p]) => k + " " + pct(p)).join(", "))}">
+    <span>${esc(part.id.split("_").pop())}</span>
+    <span class="track"><span class="fill${low ? " low" : ""}" style="width:${pct(part.confidence)}"></span></span>
+    <span class="pct">${pct(part.confidence)}</span></div>`;
+}
+
+function cardHTML(item) {
+  const thumb = item.result ? item.result.sent_image : item.preview;
+  const thumbNote = item.result ? (item.result.rotated ? "As sent, after rotating" : "As sent") : "";
+  let body;
+  if (item.status === "pending") {
+    body = `<div class="loading"><span class="spinner" aria-hidden="true"></span>Asking Jev…</div>`;
+  } else if (item.status === "error") {
+    body = `<div class="error">${esc(item.error)}</div>`;
+  } else {
+    const r = item.result;
+    const k = r.kind;
+    const rows = Object.entries(r.answers).map(([q, a]) =>
+      `<tr><td class="mono">${esc(q)}</td><td class="mono">${esc(a.choice)}</td><td class="mono">${pct(a.confidence)}</td>
+       <td class="mono">${esc(a.top.slice(0, 3).map(([o, p]) => o + " " + pct(p)).join(" · "))}</td></tr>`).join("");
+    const readings = r.readings.map((rd) => {
+      const unsure = rd.missing || rd.min_confidence < THRESHOLD;
+      return `<div class="reading${unsure ? " unsure" : ""}"><span class="label">${esc(rd.label)}</span>
+        <span class="value${rd.missing ? " missing" : ""}">${esc(rd.value ?? "not shown")}</span>${rd.missing ? `<span class="flag">Not shown or unreadable</span>` : unsure ? `<span class="flag">Unsure</span>` : ""}
+        ${rd.parts.map(meter).join("")}</div>`;
+    }).join("");
+    body = `
+      <div class="head">
+        <span class="kind${k.choice === "other" ? " other" : ""}">${esc(KIND_LABEL[k.choice] || k.choice)} <span>${pct(k.confidence)} sure</span></span>
+      </div>
+      ${r.rotated ? `<p class="note">Jev found the image wasn't upright, so it was ${esc(ROTATE_LABEL[r.rotated])} and checked again.</p>` : ""}
+      ${readings ? `<div class="readings">${readings}</div>` : `<p class="note">Not a bill or a geotagged photo, so no times were read.</p>`}
+      <details><summary>All ${Object.keys(r.answers).length} answers</summary>
+        <div class="table-wrap"><table><thead><tr><th>Question</th><th>Answer</th><th>Confidence</th><th>Top options</th></tr></thead><tbody>${rows}</tbody></table></div>
+      </details>
+      <div class="foot"><span>${esc(r.model)}</span><span>${r.requests} request${r.requests > 1 ? "s" : ""}</span><span>${r.input_tokens.toLocaleString()} input tokens</span><span>$${r.cost_usd.toFixed(6)}</span></div>`;
+  }
+  return `<article class="card">
+    <div class="thumb">${thumb ? `<img src="${thumb}" alt="${esc(item.name)}">` : ""}${thumbNote ? `<span class="label">${thumbNote}</span>` : ""}</div>
+    <div class="body"><span class="name">${esc(item.name)}</span>${body}</div></article>`;
+}
+
+function render() {
+  $("empty").hidden = items.length > 0;
+  $("results").querySelectorAll(".card").forEach((el) => el.remove());
+  $("results").insertAdjacentHTML("beforeend", items.map(cardHTML).join(""));
+
+  const done = items.filter((i) => i.status === "done");
+  $("t-images").textContent = done.length;
+  $("t-tokens").textContent = done.reduce((s, i) => s + i.result.input_tokens, 0).toLocaleString();
+  $("t-cost").textContent = "$" + done.reduce((s, i) => s + i.result.cost_usd, 0).toFixed(5);
+  $("clear").disabled = items.length === 0;
+
+  const v = tripVerdict(), el = $("verdict");
+  if (!v) {
+    el.className = "verdict idle";
+    el.innerHTML = `<b>Waiting for a pair</b><p class="muted">Add one bill and one geotagged photo. The photo's date and time must fall within the bill's time in and time out.</p>`;
+  } else {
+    el.className = "verdict " + v.status;
+    el.innerHTML = `<b>${esc(v.title)}</b><span class="label">${esc(v.pair)}</span><ul>${v.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
+  }
+}
+
+$("choose").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", (e) => { addFiles([...e.target.files]); e.target.value = ""; });
+$("samples").addEventListener("click", async () => {
+  const files = await Promise.all(["bill", "photo"].map(async (name) =>
+    new File([await (await fetch(`/samples/${name}.png`)).blob()], `sample-${name}.png`, { type: "image/png" })));
+  addFiles(files);
+});
+$("clear").addEventListener("click", () => { items.length = 0; render(); });
+const drop = $("drop");
+["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", (e) => addFiles([...e.dataTransfer.files]));
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("drop", (e) => e.preventDefault());
+
+loadStatus();
+</script>
+</body>
+</html>

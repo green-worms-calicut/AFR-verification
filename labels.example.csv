@@ -1,0 +1,4 @@
+file,kind,time_in,time_out,bill_date,photo_time,photo_date
+samples/bill.png,bill,03:09,08:57,15/10/2026,,
+samples/photo.png,geotagged_photo,,,,04:09,15/10/2026
+samples/analog-1042.jpg,other,,,,,
