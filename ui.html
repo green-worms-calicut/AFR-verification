@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
 <style>
-/* Layout: a test bench. Left rail holds the vehicle number and the two proof slots; the verdict and each image's answers stack on the right. */
+/* Layout: a test bench. Left rail holds the trip, timing limits and the three image zones; the verdict and each kind of image stack on the right. */
 :root {
   --paper: #f6f7fb; --sheet: #ffffff; --ink: #1b2131; --muted: #5a6378; --rule: #d8dcea;
   --slip: #3345a6; --slip-soft: #e8ebf8; --code-bg: #eef0f7;
@@ -65,21 +65,15 @@ main { max-width: 76rem; margin: 0 auto; padding-block: 0 3rem; display: grid; g
 .plate-input { width: 100%; background: var(--paper); color: var(--ink); border: 2px solid var(--rule); border-radius: 8px; padding: 0.55rem 0.7rem; font: 600 1.4rem/1.2 var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; }
 .plate-input:focus { border-color: var(--slip); outline: none; }
 .plate-input.bad { border-color: var(--no); }
-.times { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.7rem; }
-.times label { display: flex; flex-direction: column; gap: 0.3rem; }
+.limits { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7rem; align-items: end; }
+.limits label { display: flex; flex-direction: column; gap: 0.3rem; }
 .time-input { width: 100%; background: var(--paper); color: var(--ink); border: 2px solid var(--rule); border-radius: 8px; padding: 0.45rem 0.6rem; font: 600 1.1rem/1.2 var(--f-mono); }
 .time-input:focus { border-color: var(--slip); outline: none; }
 .time-input.bad { border-color: var(--no); }
+.quantity { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.7rem; }
 .hint { font-size: 0.88rem; color: var(--muted); }
 .hint.bad { color: var(--no); }
 
-.slots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.7rem; }
-.slot { border: 2px dashed var(--slip); border-radius: 10px; background: var(--paper); min-height: 9.5rem; padding: 0.6rem; display: flex; flex-direction: column; gap: 0.45rem; align-items: center; justify-content: center; text-align: center; cursor: pointer; transition: background 0.15s; }
-.slot.over { background: var(--slip-soft); }
-.slot.filled { border-style: solid; border-color: var(--rule); cursor: default; }
-.slot img { max-width: 100%; max-height: 7rem; border-radius: 4px; display: block; }
-.slot b { font: 600 0.95rem/1.2 var(--f-display); }
-.slot .name { font: 400 0.72rem/1.2 var(--f-mono); color: var(--muted); overflow-wrap: anywhere; }
 .linkbtn { background: none; border: 0; padding: 0; color: var(--slip); font-weight: 600; font-size: 0.85rem; cursor: pointer; text-decoration: underline; }
 
 .btn { border: 1px solid var(--slip); background: var(--slip); color: var(--sheet); border-radius: 8px; padding: 0.55rem 0.9rem; font-weight: 600; cursor: pointer; }
@@ -96,10 +90,10 @@ main { max-width: 76rem; margin: 0 auto; padding-block: 0 3rem; display: grid; g
 .results { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
 .verdict { border-radius: 12px; padding: 1.1rem 1.2rem; display: flex; flex-direction: column; gap: 0.8rem; border: 1px solid var(--rule); background: var(--sheet); }
 .verdict.pass { background: var(--ok-soft); border-color: transparent; } .verdict.review { background: var(--warn-soft); border-color: transparent; }
-.verdict.fail { background: var(--no-soft); border-color: transparent; }
+.verdict.fail, .verdict.problem { background: var(--no-soft); border-color: transparent; }
 .verdict-head { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; align-items: baseline; justify-content: space-between; }
 .verdict-head b { font: 700 1.6rem/1.1 var(--f-display); }
-.verdict.pass .verdict-head b { color: var(--ok); } .verdict.review .verdict-head b { color: var(--warn); } .verdict.fail .verdict-head b { color: var(--no); }
+.verdict.pass .verdict-head b { color: var(--ok); } .verdict.review .verdict-head b { color: var(--warn); } .verdict.fail .verdict-head b, .verdict.problem .verdict-head b { color: var(--no); }
 .verdict-head .mono { font-size: 1.05rem; font-weight: 600; letter-spacing: 0.06em; }
 .groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 0.9rem 1.2rem; }
 .group { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
@@ -168,13 +162,44 @@ td.mono { white-space: nowrap; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading { display: flex; gap: 0.6rem; align-items: center; color: var(--muted); }
 .error { background: var(--no-soft); color: var(--no); border-radius: 8px; padding: 0.7rem 0.9rem; font-size: 0.93rem; }
-@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } .slot { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } .zone { transition: none; } }
+.limits { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.trip-pick { display: flex; flex-direction: column; gap: 0.3rem; }
+.trip-pick select { width: 100%; }
+.zone { display: flex; flex-direction: column; gap: 0.4rem; border-radius: 10px; padding: 0.35rem; margin: -0.35rem; transition: background 0.15s; }
+.zone.over { background: var(--slip-soft); }
+.zone-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
+.zone-head b { font: 600 0.95rem/1.2 var(--f-display); }
+.thumbs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.45rem; }
+.tile { position: relative; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; background: var(--paper); display: flex; flex-direction: column; min-width: 0; }
+.tile img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; display: block; }
+.tile span { font: 400 0.66rem/1.3 var(--f-mono); color: var(--muted); padding: 0.2rem 0.35rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .x { position: absolute; top: 0.25rem; right: 0.25rem; width: 1.4rem; height: 1.4rem; border-radius: 50%; border: 0; background: rgb(0 0 0 / 0.6); color: #fff; cursor: pointer; font-weight: 700; line-height: 1; }
+.add-tile { border: 2px dashed var(--slip); border-radius: 8px; display: grid; place-items: center; color: var(--slip); font-weight: 600; font-size: 0.85rem; min-height: 5.5rem; background: none; cursor: pointer; }
+.verdict.problem { background: var(--no-soft); border-color: transparent; }
+.verdict.problem .verdict-head b { color: var(--no); }
+.timeline { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 0.5rem; padding-top: 0.9rem; }
+.timeline::before { content: ""; position: absolute; left: 0; right: 0; top: 0.35rem; height: 3px; background: var(--rule); border-radius: 2px; }
+.event { position: relative; display: flex; flex-direction: column; gap: 0.1rem; font-size: 0.85rem; min-width: 0; }
+.event::before { content: ""; position: absolute; top: -0.85rem; left: 0; width: 0.75rem; height: 0.75rem; border-radius: 50%; background: var(--ok); }
+.event.bad::before { background: var(--no); }
+.event b { font: 600 1.15rem/1.1 var(--f-mono); }
+.event.bad b, .event.bad span { color: var(--no); }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: 1rem; }
+.shot { display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; }
+.shot .thumb-btn img { width: 100%; max-height: 15rem; object-fit: contain; background: var(--code-bg); border-radius: 6px; display: block; }
+.shot .kv { font-size: 0.83rem; color: var(--muted); }
+.shot .kv b { color: var(--ink); font-family: var(--f-mono); font-weight: 600; }
+.shot .check { font-size: 0.85rem; }
+.tags { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.tag { display: inline-block; font: 600 0.68rem/1.2 var(--f-mono); border-radius: 999px; padding: 0.25rem 0.5rem; background: var(--slip-soft); color: var(--slip); }
+.tag.no { background: var(--no-soft); color: var(--no); } .tag.ok { background: var(--ok-soft); color: var(--ok); }
 </style>
 </head>
 <body>
 
 <header class="bar">
-  <h1>Proof Check Bench<small>Does the vehicle photo and weigh bill match the vehicle number? Answers from TypeSafe Jev.</small></h1>
+  <h1>Proof Check Bench<small>Does a trip's proof hold up: loading photos, unloading photos and weigh bills? Answers from TypeSafe Jev.</small></h1>
   <div class="controls">
     <span id="key" class="chip wait">Checking API key…</span>
     <label class="label" for="model">Model</label>
@@ -188,26 +213,35 @@ td.mono { white-space: nowrap; }
 <main>
   <aside class="rail">
     <section class="panel">
-      <h2><label for="vehicle"><span class="step">1</span>Vehicle number</label></h2>
-      <input id="vehicle" class="plate-input" type="text" placeholder="KL05AF9341" autocomplete="off" spellcheck="false" maxlength="20">
+      <h2><span class="step">1</span>Trip</h2>
+      <label class="trip-pick" id="trip-pick" hidden><span class="label">Load a trip from trips/</span>
+        <select id="trip"><option value="">Choose a trip…</option></select></label>
+      <label class="label" for="vehicle">Vehicle number</label>
+      <input id="vehicle" class="plate-input" type="text" placeholder="KL57AB8815" autocomplete="off" spellcheck="false" maxlength="20">
       <p id="vehicle-hint" class="hint">The number the trip was planned with. Spaces and hyphens don't matter.</p>
-      <div class="times">
-        <label><span class="label">Arrival</span><input id="arrival" class="time-input" type="time"></label>
-        <label><span class="label">End</span><input id="end" class="time-input" type="time"></label>
+      <label class="quantity"><span class="label">Quantity (kg)</span><input id="quantity" class="time-input" type="text" inputmode="decimal" placeholder="480" autocomplete="off"></label>
+      <p id="quantity-hint" class="hint">The disposal quantity. The final slip's net weight must be the same.</p>
+      <p id="typed-from" class="note" hidden></p>
+    </section>
+
+    <section class="panel">
+      <h2>Timing limits <span class="muted" style="font-weight:400">(minutes)</span></h2>
+      <div class="limits">
+        <label><span class="label">Tare to gross, at least</span><input id="min_gap_tare_first" class="time-input" type="text" inputmode="numeric" value="60" autocomplete="off"></label>
+        <label><span class="label">Clock slack</span><input id="clock_slack" class="time-input" type="text" inputmode="numeric" value="5" autocomplete="off"></label>
       </div>
-      <p id="times-hint" class="hint">The photo must be taken between these times. The bill's times aren't used, since the vehicle can be weighed before loading.</p>
+      <p id="limits-hint" class="hint"></p>
     </section>
 
     <section class="panel">
       <h2><span class="step">2</span>Proof images</h2>
-      <div class="slots">
-        <div class="slot" data-slot="photo" tabindex="0" role="button" aria-label="Add vehicle photo"></div>
-        <div class="slot" data-slot="bill" tabindex="0" role="button" aria-label="Add weigh bill"></div>
-      </div>
-      <input id="file" type="file" accept="image/jpeg,image/png" hidden>
+      <div class="zone" data-role="loading"></div>
+      <div class="zone" data-role="unloading"></div>
+      <div class="zone" data-role="bill"></div>
+      <input id="file" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png,.heic" multiple hidden>
       <div class="actions">
         <button class="btn" id="check" type="button" disabled>Check</button>
-        <button class="btn ghost" id="samples" type="button">Try the samples</button>
+        <button class="btn ghost" id="clear" type="button">Clear</button>
       </div>
     </section>
 
@@ -228,7 +262,8 @@ td.mono { white-space: nowrap; }
   <div class="viewer-bar">
     <h2 id="viewer-title"></h2>
     <div class="actions">
-      <button class="btn ghost" id="v-switch" type="button"></button>
+      <button class="btn ghost" id="v-prev" type="button">‹ Previous</button>
+      <button class="btn ghost" id="v-next" type="button">Next ›</button>
       <button class="btn ghost" id="v-rotate" type="button">Rotate</button>
       <button class="btn ghost" id="v-zoom" type="button">Zoom in</button>
       <button class="btn ghost" id="v-close" type="button">Close</button>
@@ -241,18 +276,23 @@ td.mono { white-space: nowrap; }
 </dialog>
 
 <script>
-const SLOT = {
-  photo: { title: "Vehicle photo", empty: "With a GPS stamp and the number plate in view" },
-  bill: { title: "Weigh bill", empty: "The weighbridge slip for this trip" },
+const ROLES = ["loading", "unloading", "bill"];
+const ROLE = {
+  loading: { title: "Loading photos", one: "Loading photo", empty: "After the tare weighing, with GPS stamps" },
+  unloading: { title: "Unloading photos", one: "Unloading photo", empty: "After the gross weighing, at the plant" },
+  bill: { title: "Weigh bills", one: "Weigh bill", empty: "The first and final slips" },
 };
-const GROUPS = [["photo", "Vehicle photo"], ["bill", "Weigh bill"], ["trip", "Trip"]];
-const TRIP_KEYS = new Set(["same_date", "in_window"]);
+const GROUPS = [["loading", "Loading photos"], ["unloading", "Unloading photos"], ["bill", "Weigh bills"], ["times", "Times"], ["trips", "Other trips"]];
+const LIMITS = ["min_gap_tare_first", "clock_slack"];
+const FLAGGED = new Set(["problem", "review"]);
 const ICON = { pass: "✓", fail: "✕", review: "?" };
-const ROTATE_LABEL = { 90: "rotated 90° counter-clockwise", 180: "rotated 180°", 270: "rotated 90° clockwise" };
+const ROTATE_LABEL = { 90: "Rotated 90° counter-clockwise", 180: "Rotated 180°", 270: "Rotated 90° clockwise" };
+const SLIP = { both_weights: "Final slip", one_weight: "First slip", not_shown: "Weights unreadable" };
 
-// decision: what a person chose after reviewing a "Needs a person to check" verdict, "pass" or "fail". Kept on this page only.
-const state = { files: { photo: null, bill: null }, status: "idle", result: null, decision: null, error: null, totals: { requests: 0, tokens: 0, cost: 0 } };
-const viewer = { slot: null, img: null, angle: 0, zoomed: false };
+// decision: what a person chose after reviewing a flagged verdict, "pass" or "fail". Kept on this page only.
+const state = { files: { loading: [], unloading: [], bill: [] }, tripId: null, typedFrom: null, status: "idle", result: null,
+                decision: null, error: null, totals: { requests: 0, tokens: 0, cost: 0 } };
+const viewer = { list: [], at: 0, img: null, angle: 0, zoomed: false };
 let picking = null;
 
 const $ = (id) => document.getElementById(id);
@@ -260,8 +300,14 @@ const pct = (x) => Math.round(x * 100) + "%";
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const vehicleNumber = () => $("vehicle").value.replace(/[\s.\-]/g, "").toUpperCase();
 const validNumber = () => /^[A-Z0-9]{4,12}$/.test(vehicleNumber());
-// Both times or neither. An incomplete time input reports "".
-const validTimes = () => !$("arrival").value === !$("end").value;
+// Kilograms, like check_proof.parse_quantity: blank, or a number above 0 with an optional "kg".
+const quantity = () => $("quantity").value.replace(/,/g, "").trim();
+const validQuantity = () => !quantity() || (/^\d+(\.\d+)?\s*(kgs?)?\.?$/i.test(quantity()) && parseFloat(quantity()) > 0);
+// Whole minutes, like check_proof.parse_limits: blank keeps the default.
+const validLimit = (id) => /^\s*\d{0,4}\s*$/.test($(id).value);
+const validLimits = () => LIMITS.every(validLimit);
+const imageCount = () => ROLES.reduce((n, role) => n + state.files[role].length, 0);
+const LIMITS_HINT = "Tare to gross: the weighings must be at least this far apart, since loading happens in between. Clock slack: how far a photo's clock may be off the weighbridge's.";
 
 async function loadStatus() {
   const chip = $("key");
@@ -274,6 +320,30 @@ async function loadStatus() {
     chip.className = "chip no";
     chip.textContent = "Server not running";
   }
+}
+
+async function loadTrips() {
+  try {
+    const trips = await (await fetch("/api/trips")).json();
+    if (!trips.length) return;
+    $("trip").insertAdjacentHTML("beforeend", trips.map((t) => {
+      const c = t.counts;
+      return `<option value="${esc(t.id)}">${esc(t.name)} · ${esc(t.vehicle_number ?? "no number")} · ${c.loading}+${c.unloading}+${c.bill}</option>`;
+    }).join(""));
+    $("trip-pick").hidden = false;
+  } catch { /* no trips/ folder: the picker stays hidden */ }
+}
+
+async function pickTrip(id) {
+  if (!id) return;
+  const trip = await (await fetch(`/api/trips/${encodeURIComponent(id)}`)).json();
+  for (const role of ROLES) state.files[role] = trip.images[role].map((f) => ({ name: f.name, data: f.data }));
+  $("vehicle").value = trip.typed.vehicle_number ?? "";
+  $("quantity").value = trip.typed.quantity ?? "";
+  for (const id of LIMITS) $(id).value = trip.typed[id] ?? $(id).defaultValue;
+  state.tripId = trip.id;
+  state.typedFrom = trip.typed_from;
+  changed();
 }
 
 function readAsDataURL(file) {
@@ -291,14 +361,18 @@ function changed() {
   render();
 }
 
-async function setFile(slot, file) {
-  if (!/^image\/(jpeg|png)$/.test(file.type)) {
-    state.status = "error";
-    state.error = `${file.name}: only JPEG and PNG images can be checked. Convert this file first.`;
-    render();
-    return;
+async function addFiles(role, files) {
+  for (const file of files) {
+    if (!/\.(jpe?g|png|heic)$/i.test(file.name) && !/^image\/(jpeg|png)$/.test(file.type)) {
+      state.status = "error";
+      state.error = `${file.name}: only JPEG and PNG images can be checked. Convert this file first.`;
+      render();
+      return;
+    }
+    // The .heic files seen so far are really JPEGs: label them so the browser shows them.
+    const data = (await readAsDataURL(file)).replace(/^data:[^;]*;/, /\.heic$/i.test(file.name) ? "data:image/jpeg;" : "$&");
+    state.files[role].push({ name: file.name, data });
   }
-  state.files[slot] = { name: file.name, data: await readAsDataURL(file) };
   changed();
 }
 
@@ -313,20 +387,18 @@ async function check() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         vehicle_number: vehicleNumber(),
-        arrival: $("arrival").value || null,
-        end: $("end").value || null,
+        quantity: quantity() || null,
+        ...Object.fromEntries(LIMITS.map((id) => [id, $(id).value.trim() || null])),
         model: $("model").value,
-        photo: state.files.photo?.data ?? null,
-        bill: state.files.bill?.data ?? null,
+        trip_id: state.tripId,
+        images: Object.fromEntries(ROLES.map((role) => [role, state.files[role]])),
       }),
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || "The server returned " + response.status + ".");
     state.result = body;
     state.status = "done";
-    for (const slot of Object.keys(SLOT)) {
-      const r = body[slot];
-      if (!r) continue;
+    for (const role of ROLES) for (const r of body.images[role]) {
       state.totals.requests += r.requests;
       state.totals.tokens += r.input_tokens;
       state.totals.cost += r.cost_usd;
@@ -338,14 +410,12 @@ async function check() {
   render();
 }
 
-function slotHTML(slot) {
-  const f = state.files[slot];
-  if (!f) {
-    return `<b>${SLOT[slot].title}</b><span class="muted" style="font-size:0.82rem">${SLOT[slot].empty}</span>
-      <span class="linkbtn">Choose or drop</span>`;
-  }
-  return `<img src="${f.data}" alt="${esc(SLOT[slot].title)}"><b>${SLOT[slot].title}</b><span class="name">${esc(f.name)}</span>
-    <span><button class="linkbtn" type="button" data-act="replace">Replace</button> · <button class="linkbtn" type="button" data-act="remove">Remove</button></span>`;
+function zoneHTML(role) {
+  const files = state.files[role];
+  const tiles = files.map((f, i) => `<div class="tile"><img src="${f.data}" alt="${esc(f.name)}">
+      <span>${esc(f.name)}</span><button class="x" type="button" data-remove="${role}:${i}" aria-label="Remove ${esc(f.name)}">×</button></div>`).join("");
+  return `<div class="zone-head"><b>${ROLE[role].title}</b><span class="muted">${files.length || ROLE[role].empty}</span></div>
+    <div class="thumbs">${tiles}<button class="add-tile" type="button" data-add="${role}">+ Add</button></div>`;
 }
 
 function certainty(c) {
@@ -359,21 +429,29 @@ function checkHTML(c) {
     <span class="pct">${certainty(c)}</span></div>`;
 }
 
+function timelineHTML(events) {
+  if (!events.length) return "";
+  const oneDay = new Set(events.map((e) => e.date)).size === 1;
+  return `<div class="timeline">${events.map((e) => `<div class="event${e.bad ? " bad" : ""}"><b>${esc(e.time)}</b>
+    <span class="what-ev"><strong>${esc(e.what)}</strong></span>${oneDay ? "" : `<span class="muted">${esc(e.date)}</span>`}</div>`).join("")}</div>`;
+}
+
 function verdictHTML(r) {
   const v = r.verdict;
-  const groups = GROUPS.map(([key, title]) => {
-    const checks = key === "trip" ? v.checks.filter((c) => TRIP_KEYS.has(c.key))
-      : r[key] ? r[key].checks : null;
-    if (key === "trip" && !checks.length) return "";
-    const body = checks ? checks.map(checkHTML).join("") : `<p class="note">Not added.</p>`;
-    return `<div class="group"><span class="label">${title}</span>${body}</div>`;
+  const problems = v.checks.filter((c) => c.status === "fail");
+  const groups = [["problems", "Problems"], ...GROUPS].map(([key, title]) => {
+    const checks = key === "problems" ? problems : v.checks.filter((c) => c.group === key && c.status !== "fail");
+    return checks.length ? `<div class="group"><span class="label">${title}</span>${checks.map(checkHTML).join("")}</div>` : "";
   }).join("");
-  const waiting = v.status === "waiting" ? `<p class="note">Add the ${r.photo ? "weigh bill" : "vehicle photo"} and check again for a full verdict.</p>` : "";
   const status = state.decision || v.status;
   const title = state.decision ? (state.decision === "pass" ? "Accepted after review" : "Rejected after review") : v.title;
+  const l = r.limits;
   return `<section class="verdict ${status}">
-    <div class="verdict-head"><b>${esc(title)}</b><span class="mono">${esc(r.vehicle_number)}</span></div>
-    ${waiting}<div class="groups">${groups}</div>${reviewHTML(r)}</section>`;
+    <div class="verdict-head"><b>${esc(title)}</b><span class="mono">${esc(r.vehicle_number)}${r.trip_id ? " · trip " + esc(r.trip_id.split("/").pop()) : ""}</span></div>
+    <div class="groups">${groups}</div>
+    ${timelineHTML(v.timeline)}
+    <p class="note">Limits: tare to gross at least ${l.min_gap_tare_first} min, clock slack ${l.clock_slack} min. Quantity: ${r.quantity ? esc(r.quantity) + " kg" : "not typed"}.</p>
+    ${reviewHTML(r)}</section>`;
 }
 
 function decideButtons() {
@@ -382,15 +460,45 @@ function decideButtons() {
 }
 
 function reviewHTML(r) {
-  // A person decides only the trips Jev couldn't: "Needs a person to check".
-  if (r.verdict.status !== "review") return "";
-  const views = Object.keys(SLOT).filter((s) => r[s])
-    .map((s) => `<button class="btn ghost" type="button" data-view="${s}">View ${SLOT[s].title.toLowerCase()}</button>`).join("");
+  // Nothing is rejected automatically: a person decides every flagged trip.
+  if (!FLAGGED.has(r.verdict.status)) return "";
+  const view = `<button class="btn ghost" type="button" data-view="all">View all images</button>`;
   if (state.decision) {
-    return `<div class="decision"><p>A person ${state.decision === "pass" ? "accepted" : "rejected"} this trip. Jev's verdict was: Needs a person to check.</p>
-      <div class="actions">${views}<button class="btn ghost" type="button" data-decide="">Undo</button></div></div>`;
+    return `<div class="decision"><p>A person ${state.decision === "pass" ? "accepted" : "rejected"} this trip. Jev's verdict was: ${esc(r.verdict.title)}.</p>
+      <div class="actions">${view}<button class="btn ghost" type="button" data-decide="">Undo</button></div></div>`;
   }
-  return `<div class="decision"><p>Look at the images full size, then decide.</p><div class="actions">${views}</div>${decideButtons()}</div>`;
+  return `<div class="decision"><p>Look at the images full size, then decide.</p><div class="actions">${view}</div>${decideButtons()}</div>`;
+}
+
+function tagsHTML(r) {
+  const tags = [];
+  if (r.slot === "bill") {
+    const slip = r.answers.weigh_bill.yes < 0.5 ? "Not a slip: ignored" : SLIP[r.answers.slip_kind.choice];
+    tags.push(`<span class="tag${slip === "Final slip" ? " ok" : ""}">${esc(slip)}</span>`);
+  }
+  if (r.rotated) tags.push(`<span class="tag">${ROTATE_LABEL[r.rotated]}</span>`);
+  if (r.same_as) tags.push(`<span class="tag">Same file as ${esc(r.same_as)}</span>`);
+  for (const m of r.used_in ?? []) tags.push(`<span class="tag no">${m.exact ? "Same image" : "Looks like"} ${esc(m.trip.split("/").pop())} ${esc(m.name)}</span>`);
+  return tags.length ? `<div class="tags">${tags.join("")}</div>` : "";
+}
+
+function shotHTML(role, i, r) {
+  const readings = r.readings.filter((rd) => !rd.missing)
+    .map((rd) => `<p class="kv">${esc(rd.label)} <b>${esc(rd.value)}</b> <span class="muted">${pct(rd.min_confidence)}</span></p>`).join("");
+  const checks = [...r.checks].sort((a, b) => (a.status === "pass") - (b.status === "pass")).map(checkHTML).join("");
+  return `<div class="shot"><button class="thumb-btn" type="button" data-view="${role}:${i}" aria-label="View ${esc(r.name)} full size">
+      <img src="${r.sent_image}" alt="${esc(r.name)} as sent"></button>
+    <b class="mono" style="font-size:0.8rem">${esc(r.name)}</b>${tagsHTML(r)}${readings}
+    <details><summary>${r.checks.filter((c) => c.status !== "pass").length} to look at · ${r.checks.length} answers</summary>${checks}</details></div>`;
+}
+
+function roleCardHTML(role, results) {
+  if (!results.length) return "";
+  const tokens = results.reduce((n, r) => n + r.input_tokens, 0);
+  return `<article class="card" style="grid-template-columns:1fr"><div class="body">
+    <h3>${ROLE[role].title} <span class="muted" style="font-weight:400">(${results.length})</span></h3>
+    <div class="gallery">${results.map((r, i) => shotHTML(role, i, r)).join("")}</div>
+    <div class="foot"><span>${esc(results[0].model)}</span><span>${tokens.toLocaleString()} input tokens</span></div></div></article>`;
 }
 
 function decide(decision) {
@@ -399,20 +507,28 @@ function decide(decision) {
   render();
 }
 
-// Full-size viewer: the image as uploaded, turned the way it was sent to Jev, with what to check beside it.
-function openViewer(slot) {
+// Full-size viewer: each image as uploaded, turned the way it was sent to Jev, with what to check beside it.
+function openViewer(role, i) {
+  viewer.list = ROLES.flatMap((r) => state.files[r].map((_, j) => [r, j]));
+  viewer.at = Math.max(0, viewer.list.findIndex(([r, j]) => r === role && j === i));
+  showViewerImage();
+}
+
+function showViewerImage() {
+  const [role, i] = viewer.list[viewer.at];
   const img = new Image();
   img.onload = () => {
-    Object.assign(viewer, { slot, img, angle: (360 - state.result[slot].rotated) % 360, zoomed: false });
+    Object.assign(viewer, { img, angle: (360 - state.result.images[role][i].rotated) % 360, zoomed: false });
     drawViewer();
     if (!$("viewer").open) $("viewer").showModal();
   };
-  img.src = state.files[slot].data;
+  img.src = state.files[role][i].data;
 }
 
 function drawViewer() {
-  const { slot, img, angle, zoomed } = viewer;
-  const r = state.result, v = r.verdict, other = slot === "photo" ? "bill" : "photo";
+  const [role, i] = viewer.list[viewer.at];
+  const { img, angle, zoomed } = viewer;
+  const r = state.result, v = r.verdict, result = r.images[role][i];
   const canvas = $("v-canvas"), turned = angle % 180 !== 0;
   canvas.width = turned ? img.naturalHeight : img.naturalWidth;
   canvas.height = turned ? img.naturalWidth : img.naturalHeight;
@@ -425,51 +541,23 @@ function drawViewer() {
   const fitted = Math.min(stage.clientWidth / canvas.width, stage.clientHeight / canvas.height);
   canvas.classList.toggle("zoomed", zoomed);
   canvas.style.width = zoomed ? `${Math.round(canvas.width * Math.max(1, 2 * fitted))}px` : "";
-  canvas.setAttribute("aria-label", `${SLOT[slot].title}, ${canvas.width} × ${canvas.height} px`);
+  canvas.setAttribute("aria-label", `${result.name}, ${canvas.width} × ${canvas.height} px`);
 
-  $("viewer-title").textContent = `${SLOT[slot].title} · ${r.vehicle_number}`;
+  $("viewer-title").textContent = `${ROLE[role].one} · ${result.name} · ${viewer.at + 1} of ${viewer.list.length}`;
   $("v-zoom").textContent = zoomed ? "Fit" : "Zoom in";
-  $("v-switch").hidden = !r[other];
-  $("v-switch").textContent = other === "bill" ? "Show bill" : "Show photo";
+  $("v-prev").disabled = viewer.at === 0;
+  $("v-next").disabled = viewer.at === viewer.list.length - 1;
 
-  const toCheck = [...r[slot].checks, ...v.checks.filter((c) => TRIP_KEYS.has(c.key))].filter((c) => c.status !== "pass");
-  const readings = r[slot].readings.map((rd) => `<p>${esc(rd.label)}: <b class="mono">${esc(rd.value ?? "not shown")}</b>
-    <span class="muted">${rd.missing ? "" : pct(rd.min_confidence) + " sure"}</span></p>`).join("");
-  const trip = r.window ? `${r.window[0]} to ${r.window[1]}` : "not typed";
-  $("v-side").innerHTML = `<span class="label">To check</span>
-    ${toCheck.length ? toCheck.map(checkHTML).join("") : `<p class="note">Every check on this image passed.</p>`}
+  const tripFlags = v.flags.filter((c) => c.group === role || c.group === "times" || c.group === "trips");
+  const readings = result.readings.filter((rd) => !rd.missing).map((rd) => `<p>${esc(rd.label)}: <b class="mono">${esc(rd.value)}</b>
+    <span class="muted">${pct(rd.min_confidence)} sure</span></p>`).join("") || `<p class="note">No times or dates read.</p>`;
+  const own = result.checks.filter((c) => c.status !== "pass");
+  $("v-side").innerHTML = `${tagsHTML(result)}<span class="label">Trip flags to look at</span>
+    ${tripFlags.length ? tripFlags.map(checkHTML).join("") : `<p class="note">None for this kind of image.</p>`}
+    <span class="label">This image</span>${own.length ? own.map(checkHTML).join("") : `<p class="note">Every answer on this image passed.</p>`}
     <span class="label">Read by Jev</span>${readings}
-    <span class="label">Typed in</span><p>Vehicle <b class="mono">${esc(r.vehicle_number)}</b></p><p>Trip <b class="mono">${esc(trip)}</b></p>
-    ${v.status === "review" && !state.decision ? decideButtons() : ""}`;
-}
-
-function answersTable(answers) {
-  const rows = Object.entries(answers).map(([q, a]) => a.type === "noul"
-    ? `<tr><td class="mono">${esc(q)}</td><td class="mono">yes ${pct(a.yes)}</td><td class="mono">–</td><td class="mono">–</td></tr>`
-    : `<tr><td class="mono">${esc(q)}</td><td class="mono">${esc(a.choice)}</td><td class="mono">${pct(a.confidence)}</td>
-       <td class="mono">${esc(a.top.slice(0, 3).map(([o, p]) => o + " " + pct(p)).join(" · "))}</td></tr>`).join("");
-  return `<details><summary>All ${Object.keys(answers).length} answers</summary>
-    <div class="table-wrap"><table><thead><tr><th>Question</th><th>Answer</th><th>Confidence</th><th>Top options</th></tr></thead><tbody>${rows}</tbody></table></div>
-  </details>`;
-}
-
-function cardHTML(slot, r) {
-  const readings = r.readings.map((rd) => {
-    const unsure = rd.missing || rd.min_confidence < 0.8;
-    return `<div class="reading${unsure ? " unsure" : ""}"><span class="label">${esc(rd.label)}</span>
-      <span class="value${rd.missing ? " missing" : ""}">${esc(rd.value ?? "not shown")}</span>
-      <span class="${unsure ? "flag" : "muted mono"}" style="font-size:0.72rem">${rd.missing ? "Not shown or unreadable" : pct(rd.min_confidence) + " sure" + (unsure ? ", unsure" : "")}</span></div>`;
-  }).join("");
-  return `<article class="card">
-    <div class="thumb"><button class="thumb-btn" type="button" data-view="${slot}" aria-label="View ${esc(SLOT[slot].title.toLowerCase())} full size"><img src="${r.sent_image}" alt="${esc(SLOT[slot].title)} as sent"></button>
-      <span class="label">${r.rotated ? "As sent, after rotating" : "As sent"}</span><button class="linkbtn" type="button" data-view="${slot}">View full size</button></div>
-    <div class="body">
-      <h3>${SLOT[slot].title}</h3>
-      ${r.rotated ? `<p class="note">Jev found the image wasn't upright, so it was ${esc(ROTATE_LABEL[r.rotated])} and checked again.</p>` : ""}
-      <div class="readings">${readings}</div>
-      ${answersTable(r.answers)}
-      <div class="foot"><span>${esc(r.model)}</span><span>${r.requests} request${r.requests > 1 ? "s" : ""}</span><span>${r.input_tokens.toLocaleString()} input tokens</span><span>$${r.cost_usd.toFixed(6)}</span></div>
-    </div></article>`;
+    <span class="label">Typed in</span><p>Vehicle <b class="mono">${esc(r.vehicle_number)}</b></p><p>Quantity <b class="mono">${esc(r.quantity ? r.quantity + " kg" : "not typed")}</b></p>
+    ${FLAGGED.has(v.status) && !state.decision ? decideButtons() : ""}`;
 }
 
 function render() {
@@ -479,20 +567,21 @@ function render() {
   $("vehicle-hint").textContent = typed && !validNumber()
     ? "Use 4 to 12 letters and digits, such as KL05AF9341."
     : "The number the trip was planned with. Spaces and hyphens don't matter.";
-  for (const id of ["arrival", "end"]) $(id).classList.toggle("bad", !validTimes() && !$(id).value);
-  $("times-hint").classList.toggle("bad", !validTimes());
-  $("times-hint").textContent = validTimes()
-    ? "The photo must be taken between these times. The bill's times aren't used, since the vehicle can be weighed before loading."
-    : "Fill in both times, or neither. An end earlier than the arrival means the trip ran past midnight.";
+  $("quantity").classList.toggle("bad", !validQuantity());
+  $("quantity-hint").classList.toggle("bad", !validQuantity());
+  $("quantity-hint").textContent = validQuantity()
+    ? "The disposal quantity. The final slip's net weight must be the same."
+    : "Type the quantity in kilograms as a number, such as 480.";
+  $("typed-from").hidden = state.typedFrom !== "hand-read";
+  $("typed-from").textContent = "This trip has no trip.json, so the vehicle number and quantity are the hand-read values from truth.jsonl.";
+  for (const id of LIMITS) $(id).classList.toggle("bad", !validLimit(id));
+  $("limits-hint").classList.toggle("bad", !validLimits());
+  $("limits-hint").textContent = validLimits() ? LIMITS_HINT : "Type each limit as whole minutes, such as 60. Leave one blank to use its default.";
 
-  document.querySelectorAll(".slot").forEach((el) => {
-    const slot = el.dataset.slot;
-    el.classList.toggle("filled", !!state.files[slot]);
-    el.innerHTML = slotHTML(slot);
-  });
-  const hasImage = state.files.photo || state.files.bill;
-  $("check").disabled = state.status === "pending" || !validNumber() || !validTimes() || !hasImage;
-  $("check").textContent = state.status === "pending" ? "Checking…" : "Check";
+  document.querySelectorAll(".zone").forEach((el) => { el.innerHTML = zoneHTML(el.dataset.role); });
+  const n = imageCount();
+  $("check").disabled = state.status === "pending" || !validNumber() || !validLimits() || !validQuantity() || !n;
+  $("check").textContent = state.status === "pending" ? "Checking…" : n ? `Check ${n} image${n > 1 ? "s" : ""}` : "Check";
 
   $("t-requests").textContent = state.totals.requests;
   $("t-tokens").textContent = state.totals.tokens.toLocaleString();
@@ -500,77 +589,81 @@ function render() {
 
   const out = $("results");
   if (state.status === "pending") {
-    out.innerHTML = `<div class="empty"><div class="loading"><span class="spinner" aria-hidden="true"></span>Asking Jev about ${hasImage && state.files.photo && state.files.bill ? "both images" : "the image"}…</div></div>`;
+    out.innerHTML = `<div class="empty"><div class="loading"><span class="spinner" aria-hidden="true"></span>Asking Jev about ${n} image${n > 1 ? "s" : ""}…</div></div>`;
   } else if (state.status === "error") {
     out.innerHTML = `<div class="error">${esc(state.error)}</div>`;
   } else if (state.status === "done") {
     const r = state.result;
-    out.innerHTML = verdictHTML(r) + Object.keys(SLOT).filter((s) => r[s]).map((s) => cardHTML(s, r[s])).join("");
+    out.innerHTML = verdictHTML(r) + ROLES.map((role) => roleCardHTML(role, r.images[role])).join("");
   } else {
     out.innerHTML = `<div class="empty">
-      <h2>Type the vehicle number, add the proof, then check</h2>
-      <p class="muted">Jev checks:</p>
+      <h2>Type the vehicle number, add the trip's images, then check</h2>
+      <p class="muted">A trip runs tare → loading → gross → unloading. Jev and this page check:</p>
       <ul>
-        <li>the photo shows a vehicle, with a GPS stamp printed on it;</li>
-        <li>the number plate can be read, and is the number you typed;</li>
-        <li>the image is a weighbridge bill, with the number you typed;</li>
-        <li>the photo was taken on the bill's date, between the arrival and end time you typed.</li>
+        <li>every photo shows a vehicle, with a GPS stamp, taken directly (not a photo of a screen);</li>
+        <li>one loading and one unloading photo clearly show the number you typed;</li>
+        <li>there's a final weighbridge slip, every slip shows the number, and the net weight is the quantity you typed;</li>
+        <li>tare was weighed first, at least the set time before gross;</li>
+        <li>every loading photo is between the tare and gross weighings, and every unloading photo after gross;</li>
+        <li>no image was already used in another trip under trips/.</li>
       </ul>
-      <p class="muted">Or try the samples: a truck photo with a GPS stamp and the slip from the same trip, for KL05AF9341, arriving 03:00 and ending 09:00.</p>
+      <p class="muted">Nothing is rejected automatically. A problem or an unsure answer flags the trip, and you accept or reject it.</p>
     </div>`;
   }
 }
 
-// Slots: click or Enter to choose a file, drop a file on them, or use Replace and Remove.
-document.querySelectorAll(".slot").forEach((el) => {
-  const slot = el.dataset.slot;
+// Zones: + Add or drop files to add them, × to remove one.
+document.querySelectorAll(".zone").forEach((el) => {
+  const role = el.dataset.role;
   el.addEventListener("click", (e) => {
-    const act = e.target.dataset?.act;
-    if (act === "remove") { state.files[slot] = null; changed(); return; }
-    if (act === "replace" || !state.files[slot]) { picking = slot; $("file").click(); }
-  });
-  el.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && e.target === el) { e.preventDefault(); picking = slot; $("file").click(); }
+    const target = e.target.closest("[data-add], [data-remove]");
+    if (target?.dataset.add) { picking = role; $("file").click(); }
+    else if (target?.dataset.remove) { state.files[role].splice(Number(target.dataset.remove.split(":")[1]), 1); changed(); }
   });
   ["dragenter", "dragover"].forEach((t) => el.addEventListener(t, (e) => { e.preventDefault(); el.classList.add("over"); }));
   ["dragleave", "drop"].forEach((t) => el.addEventListener(t, (e) => { e.preventDefault(); el.classList.remove("over"); }));
-  el.addEventListener("drop", (e) => { if (e.dataTransfer.files[0]) setFile(slot, e.dataTransfer.files[0]); });
+  el.addEventListener("drop", (e) => { if (e.dataTransfer.files.length) addFiles(role, [...e.dataTransfer.files]); });
 });
-$("file").addEventListener("change", (e) => { if (picking && e.target.files[0]) setFile(picking, e.target.files[0]); e.target.value = ""; });
+$("file").addEventListener("change", (e) => { if (picking && e.target.files.length) addFiles(picking, [...e.target.files]); e.target.value = ""; });
+$("trip").addEventListener("change", (e) => pickTrip(e.target.value));
 $("vehicle").addEventListener("input", changed);
 $("vehicle").addEventListener("keydown", (e) => { if (e.key === "Enter" && !$("check").disabled) check(); });
-for (const id of ["arrival", "end"]) $(id).addEventListener("input", changed);
+for (const id of ["quantity", ...LIMITS]) $(id).addEventListener("input", changed);
 $("model").addEventListener("change", changed);
 $("check").addEventListener("click", check);
-$("samples").addEventListener("click", async () => {
-  $("vehicle").value = "KL05AF9341";
-  $("arrival").value = "03:00";
-  $("end").value = "09:00";
-  for (const slot of ["photo", "bill"]) {
-    const blob = await (await fetch(`/samples/${slot}.png`)).blob();
-    state.files[slot] = { name: `sample-${slot}.png`, data: await readAsDataURL(blob) };
-  }
+$("clear").addEventListener("click", () => {
+  for (const role of ROLES) state.files[role] = [];
+  Object.assign(state, { tripId: null, typedFrom: null });
+  $("trip").value = "";
   changed();
 });
 $("results").addEventListener("click", (e) => {
   const button = e.target.closest("[data-view], [data-decide]");
-  if (button?.dataset.view) openViewer(button.dataset.view);
-  else if (button) decide(button.dataset.decide);
+  if (!button) return;
+  if (button.dataset.view === "all") openViewer(ROLES.find((r) => state.files[r].length), 0);
+  else if (button.dataset.view) { const [role, i] = button.dataset.view.split(":"); openViewer(role, Number(i)); }
+  else decide(button.dataset.decide);
 });
 $("v-side").addEventListener("click", (e) => {
   const button = e.target.closest("[data-decide]");
   if (button) decide(button.dataset.decide);
 });
+$("v-prev").addEventListener("click", () => { viewer.at = Math.max(0, viewer.at - 1); showViewerImage(); });
+$("v-next").addEventListener("click", () => { viewer.at = Math.min(viewer.list.length - 1, viewer.at + 1); showViewerImage(); });
 $("v-rotate").addEventListener("click", () => { viewer.angle = (viewer.angle + 90) % 360; drawViewer(); });
 $("v-zoom").addEventListener("click", () => { viewer.zoomed = !viewer.zoomed; drawViewer(); });
 $("v-canvas").addEventListener("click", () => { viewer.zoomed = !viewer.zoomed; drawViewer(); });
-$("v-switch").addEventListener("click", () => openViewer(viewer.slot === "photo" ? "bill" : "photo"));
 $("v-close").addEventListener("click", () => $("viewer").close());
 $("viewer").addEventListener("click", (e) => { if (e.target === $("viewer")) $("viewer").close(); });  // the backdrop
+$("viewer").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowLeft") $("v-prev").click();
+  if (e.key === "ArrowRight") $("v-next").click();
+});
 document.addEventListener("dragover", (e) => e.preventDefault());
 document.addEventListener("drop", (e) => e.preventDefault());
 
 loadStatus();
+loadTrips();
 render();
 </script>
 </body>

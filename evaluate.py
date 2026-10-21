@@ -1,21 +1,28 @@
 """Measure how accurate Jev is on your own labeled images, and choose confidence thresholds from it.
 
 1. Copy labels.example.csv to labels.csv. Add one row per image check: the file (relative to the
-   CSV), its slot (photo or bill), the vehicle number typed in, and the correct answers. Leave a
-   cell blank to skip it. Add rows with a wrong vehicle number too (labeled `different`), to
-   measure how well Jev catches a mismatch: one character off is the hardest case.
+   CSV), its slot (photo or bill), the vehicle number typed in, for a bill the quantity typed in
+   (kg), and the correct answers. Leave a cell blank to skip it. Add rows with a wrong vehicle
+   number or quantity too (labeled `different`), to measure how well Jev catches a mismatch: one
+   character or digit off is the hardest case.
 2. Ask Jev about every row. This costs tokens, and saves the answers to eval/<model>.jsonl:
        .venv/bin/python evaluate.py labels.csv
 3. Re-score the saved answers for free, for example after editing labels:
        .venv/bin/python evaluate.py labels.csv --cached
 
 Label columns:
-    shows_vehicle, gps_stamp, weigh_bill   yes or no
+    shows_vehicle, gps_stamp, screen_photo, weigh_bill   yes or no
+    slip_kind                              one_weight, both_weights or not_shown
+    gross_vs_tare                          gross_heavier, tare_heavier or not_shown
     plate                                  readable, partly_readable or not_visible
     plate_number                           same, different or cannot_tell
     bill_number                            same, different or not_shown
+    net_weight                             same, different or not_shown (needs a quantity)
+    first_weight                           tare, gross or not_shown (which weight was taken at Time In)
     photo_time                             04:09, or not_shown
-    bill_date, photo_date                  15/10/2026, or not_shown
+    gross_time, tare_time, in_time, out_time   07:39, or not_shown
+    photo_date                             15/10/2026, or not_shown
+    gross_date, tare_date, in_date, out_date   19/10/2026, or not_shown
 
 The report shows accuracy per field, accuracy at each confidence level, and for each candidate
 threshold how many answers would be accepted automatically and how many of those would be wrong.
@@ -34,11 +41,14 @@ from typesafe_sdk import Noul, TypeSafeClient
 import check_proof
 
 FIELDS = {  # label column -> group
-    "shows_vehicle": "image", "gps_stamp": "image", "weigh_bill": "image",
+    "shows_vehicle": "image", "gps_stamp": "image", "screen_photo": "image", "weigh_bill": "image",
+    "slip_kind": "slips", "gross_vs_tare": "slips",
     "plate": "plate",
     "plate_number": "vehicle number", "bill_number": "vehicle number",
-    "photo_time": "times",
-    "bill_date": "dates", "photo_date": "dates",
+    "net_weight": "net weight",
+    "first_weight": "weighing order",
+    "photo_time": "times", "gross_time": "times", "tare_time": "times", "in_time": "times", "out_time": "times",
+    "photo_date": "dates", "gross_date": "dates", "tare_date": "dates", "in_date": "dates", "out_date": "dates",
 }
 BUCKETS = [(0.0, 0.5), (0.5, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 0.95), (0.95, 1.01)]
 THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
@@ -47,7 +57,8 @@ READING_FIELDS = {key for readings in check_proof.REPORT.values() for key, *_ in
 
 
 def row_id(row: dict) -> str:
-    return f"{row['file']} | {row['slot']} | {row['vehicle_number']}"
+    quantity = f" | {row['quantity']} kg" if row.get("quantity") else ""
+    return f"{row['file']} | {row['slot']} | {row['vehicle_number']}{quantity}"
 
 
 def normalize(field: str, value: str) -> str:
@@ -81,6 +92,12 @@ def load_labels(path: Path) -> list[dict]:
         if not number:
             sys.exit(f"{where}: vehicle_number {row.get('vehicle_number')!r} isn't 4 to 12 letters and digits.")
         row["vehicle_number"] = number
+        try:
+            row["quantity"] = check_proof.parse_quantity(row.get("quantity"))
+        except ValueError:
+            sys.exit(f"{where}: quantity {row.get('quantity')!r} isn't a number of kilograms.")
+        if (row.get("net_weight") or "").strip() and not row["quantity"]:
+            sys.exit(f"{where}: net_weight needs the quantity typed in. Fill in quantity, or leave net_weight blank.")
         row["path"] = (path.parent / row["file"]).resolve()
         for field in FIELDS:
             value = normalize(field, row.get(field) or "")
@@ -100,7 +117,8 @@ def run(client: TypeSafeClient, rows: list[dict], model: str) -> dict[str, dict]
         print(f"[{i}/{len(rows)}] {row_id(row)}", file=sys.stderr)
         try:
             img = check_proof.load(row["path"])
-            results[row_id(row)], _ = check_proof.analyze(client, row["slot"], img, row["vehicle_number"], model)
+            results[row_id(row)], _ = check_proof.analyze(client, row["slot"], img, row["vehicle_number"], model,
+                                                          row["quantity"])
         except Exception as error:  # keep going; the report lists what failed
             print(f"    failed: {type(error).__name__}: {error}", file=sys.stderr)
     return results
@@ -208,7 +226,7 @@ def main() -> None:
     else:
         if not (key := check_proof.api_key()):
             sys.exit(check_proof.NO_KEY)
-        with TypeSafeClient(api_key=key, headers=check_proof.HEADERS) as client:
+        with TypeSafeClient(api_key=key, headers=check_proof.HEADERS, timeout=check_proof.TIMEOUT) as client:
             results = run(client, rows, args.model)
         cache.parent.mkdir(exist_ok=True)
         cache.write_text("".join(json.dumps({"check": c, "result": r}) + "\n" for c, r in results.items()))

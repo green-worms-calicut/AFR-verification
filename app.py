@@ -1,4 +1,5 @@
-"""Local test page for check_proof.py: type a vehicle number, add its photo and weigh bill, and see what Jev finds.
+"""Local test page for check_proof.py: type a vehicle number and quantity, add a trip's loading photos,
+unloading photos and weigh bills (or load a trip folder from trips/), and see what Jev finds.
 
 The API key stays in this process; the browser only talks to this server.
 
@@ -10,24 +11,36 @@ import argparse
 import base64
 import io
 import json
+import threading
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 
 from PIL import Image as PILImage
-from PIL import ImageOps, UnidentifiedImageError
+from PIL import UnidentifiedImageError
 from typesafe_sdk import TypeSafeClient, TypeSafeError
 
 import check_proof
+import run_trips
 
 HERE = Path(__file__).parent
 HOST, PORT = "127.0.0.1", 8765
-MAX_BODY = 30 * 1024 * 1024  # two phone photos as base64 JSON are well under this
+TRIPS = HERE / "trips"  # trip folders to load on the page, and to find images used again
+MAX_BODY = 120 * 1024 * 1024  # a trip's phone photos and slips as base64 JSON are well under this
 MODELS = ("jev-latest", "jev-preview")
-PAGES = {
-    "/": (HERE / "ui.html", "text/html; charset=utf-8"),
-    "/samples/bill.png": (HERE / "samples" / "bill.png", "image/png"),
-    "/samples/photo.png": (HERE / "samples" / "photo.png", "image/png"),
-}
+PAGES = {"/": (HERE / "ui.html", "text/html; charset=utf-8")}
+_index: check_proof.ImageIndex | None = None
+_index_lock = threading.Lock()
+
+
+def image_index() -> check_proof.ImageIndex | None:
+    """Fingerprints of every image under trips/, made once, or None if there is no trips/ folder."""
+    global _index
+    with _index_lock:
+        if _index is None and TRIPS.is_dir():
+            _index = check_proof.ImageIndex.of_folders(TRIPS)
+        return _index
 
 
 def data_url(img: PILImage.Image, longest: int = 640) -> str:
@@ -38,9 +51,40 @@ def data_url(img: PILImage.Image, longest: int = 640) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def file_url(data: bytes) -> str:
+    """A file's bytes as a data URL, typed by its content: the .heic files seen so far are really JPEGs."""
+    kind = "image/png" if data.startswith(b"\x89PNG") else "image/jpeg"
+    return f"data:{kind};base64," + base64.b64encode(data).decode("ascii")
+
+
+def trip_folder(trip_id: str) -> Path | None:
+    """The folder of a trip id (its path under trips/), or None if it isn't one."""
+    folder = (TRIPS / trip_id).resolve()
+    if not folder.is_relative_to(TRIPS.resolve()) or not folder.is_dir():
+        return None
+    return folder if any(check_proof.role_of(p.name) for p in folder.iterdir()) else None
+
+
+def typed_for(folder: Path) -> tuple[dict | None, str]:
+    truth = run_trips.find_truth(folder.parent)
+    return run_trips.typed_for(folder, truth.get(folder.name))
+
+
+def list_trips() -> list[dict]:
+    if not TRIPS.is_dir():
+        return []
+    trips = []
+    for folder in run_trips.find_trips(TRIPS):
+        typed, source = typed_for(folder)
+        counts = {role: len(u) for role, u in check_proof.read_trip_folder(folder).items()}
+        trips.append({"id": folder.relative_to(TRIPS).as_posix(), "name": folder.name, "counts": counts,
+                      "vehicle_number": (typed or {}).get("vehicle_number"), "typed_from": source})
+    return trips
+
+
 class Handler(BaseHTTPRequestHandler):
-    def send_json(self, status: int, body: dict) -> None:
-        data = json.dumps(body).encode()
+    def send_json(self, status: int, body: dict | list) -> None:
+        data = json.dumps(body, default=str).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -49,7 +93,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/api/status":
-            self.send_json(200, {"key_set": bool(check_proof.api_key()), "key_help": check_proof.NO_KEY, "models": MODELS})
+            self.send_json(200, {"key_set": bool(check_proof.api_key()), "key_help": check_proof.NO_KEY, "models": MODELS,
+                                 "limits": asdict(check_proof.Limits())})
+            return
+        if self.path == "/api/trips":
+            self.send_json(200, list_trips())
+            return
+        if self.path.startswith("/api/trips/"):
+            folder = trip_folder(unquote(self.path.removeprefix("/api/trips/")))
+            if not folder:
+                self.send_json(404, {"error": "No such trip folder under trips/."})
+                return
+            typed, source = typed_for(folder)
+            images = {role: [{"name": u.name, "data": file_url(u.data)} for u in uploads]
+                      for role, uploads in check_proof.read_trip_folder(folder).items()}
+            self.send_json(200, {"id": folder.relative_to(TRIPS.resolve()).as_posix(), "images": images,
+                                 "typed": typed or {}, "typed_from": source})
             return
         page = PAGES.get(self.path)
         if not page or not page[0].is_file():
@@ -68,7 +127,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_BODY:
-            self.send_json(413, {"error": "These images are too large to upload. Use images under 10 MB each."})
+            self.send_json(413, {"error": "These images are too large to upload together. Use images under 10 MB each."})
             return
         try:
             body = json.loads(self.rfile.read(length))
@@ -80,22 +139,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": "Type the vehicle number first: 4 to 12 letters and digits, such as KL05AF9341."})
                 return
             try:
-                window = check_proof.parse_window(body.get("arrival"), body.get("end"))
+                quantity = check_proof.parse_quantity(body.get("quantity"))
+                limits = check_proof.parse_limits(body)
             except ValueError as error:
                 self.send_json(400, {"error": str(error)})
                 return
-            images = {}
-            for slot in check_proof.SLOTS:
-                if body.get(slot):
-                    raw = base64.b64decode(body[slot].split(",", 1)[-1])
-                    with PILImage.open(io.BytesIO(raw)) as original:
-                        images[slot] = ImageOps.exif_transpose(original).convert("RGB")
-            if not images:
-                raise ValueError("Add the vehicle photo, the weigh bill, or both.")
+            uploads = {role: [] for role in check_proof.ROLES}
+            for role in check_proof.ROLES:
+                for i, item in enumerate(body.get("images", {}).get(role) or []):
+                    data = base64.b64decode(item["data"].split(",", 1)[-1])
+                    check_proof.load_bytes(data)  # fails early if it isn't an image
+                    uploads[role].append(check_proof.Upload(item.get("name") or f"{role}{i + 1}.jpg", data))
+            if not any(uploads.values()):
+                raise ValueError("Add the loading photos, unloading photos and weigh bills.")
+            trip_id = body.get("trip_id") or None
         except UnidentifiedImageError:
-            self.send_json(400, {"error": "This file couldn't be opened as an image. Use a JPEG or PNG."})
+            self.send_json(400, {"error": "A file couldn't be opened as an image. Use JPEG or PNG."})
             return
-        except (ValueError, KeyError) as error:
+        except (ValueError, KeyError, TypeError) as error:
             self.send_json(400, {"error": f"Bad request: {error}"})
             return
 
@@ -103,16 +164,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(503, {"error": check_proof.NO_KEY})
             return
         try:
-            with TypeSafeClient(api_key=key, headers=check_proof.HEADERS) as client:
-                trip, sent = check_proof.analyze_trip(client, images, number, model, window)
+            with TypeSafeClient(api_key=key, headers=check_proof.HEADERS, timeout=check_proof.TIMEOUT) as client:
+                trip, sent = check_proof.analyze_trip(client, uploads, number, model, quantity, limits,
+                                                      image_index(), trip_id)
         except TypeSafeError as error:
             self.send_json(502, {"error": f"Jev returned an error: {error}"})
             return
-        for slot, img in sent.items():
-            trip[slot]["sent_image"] = data_url(img)
-            trip[slot]["sent_size"] = list(img.size)
-        trip["vehicle_number"] = number
-        trip["window"] = window
+        for role, imgs in sent.items():
+            for r, img in zip(trip["images"][role], imgs):
+                r["sent_image"] = data_url(img)
+                r["sent_size"] = list(img.size)
+        trip.update(vehicle_number=number, quantity=quantity, limits=asdict(limits), trip_id=trip_id)
         self.send_json(200, trip)
 
     def log_message(self, fmt: str, *args) -> None:

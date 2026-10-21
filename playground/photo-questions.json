@@ -17,8 +17,16 @@
     "type": "noul",
     "instructions": "Is a GPS stamp printed on `photo`?",
     "criteria": {
-      "true": "A block of text printed on the photo by a GPS map camera app, with a place name or address, latitude and longitude, and a date and time.",
+      "true": "A block of text printed on the photo by a GPS camera app, with a place name or address, latitude and longitude, and a date and time. It may have a map, a logo, or neither.",
       "false": "No such block of text, or only a date and time with no place or coordinates."
+    }
+  },
+  "screen_photo": {
+    "type": "noul",
+    "instructions": "Is `photo` a picture of a screen, such as a phone or computer showing another photo, rather than a photo taken directly?",
+    "criteria": {
+      "true": "A screen was photographed: its edge, glare, cracked glass, an app's bars or buttons, or screen pixels show.",
+      "false": "A photo taken directly of the scene."
     }
   },
   "plate": {

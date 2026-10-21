@@ -1,80 +1,108 @@
 # Jev proof check
 
-Checks the proof sent in for a waste-collection trip against the trip's vehicle number, using [TypeSafe's Jev model](https://docs.typesafe.ai). You type the vehicle number and the trip's arrival and end time, add two images, and it answers:
+Checks the proof sent in for a waste-collection trip, using [TypeSafe's Jev model](https://docs.typesafe.ai). You type the trip's vehicle number and quantity in kilograms, add its **loading photos**, **unloading photos** and **weigh bills**, and it checks them against each other and against what you typed.
 
-**Vehicle photo**
-- Does it show a vehicle?
-- Is a GPS stamp printed on it?
-- Can the number plate be read?
-- Is the plate the vehicle number you typed?
+A trip runs **tare → loading → gross → unloading**: the empty vehicle is weighed (tare), loaded and photographed, weighed loaded (gross), and photographed again where it unloads. A trip weighed gross first is flagged.
 
-**Weigh bill**
-- Is it a weighbridge bill?
-- Is the vehicle number printed on it the one you typed?
+**Photos** (each loading and unloading photo)
+- Does it show a vehicle, with a GPS stamp printed on it?
+- Is it taken directly, not a photo of a phone screen?
+- Does at least one loading photo and one unloading photo clearly show the vehicle number you typed? A photo clearly showing another number is a problem. Rear plates are often hidden, so one clear photo of each kind is enough.
 
-**The trip**
-- Are the photo and the bill from the same date?
-- Was the photo taken between the arrival and end time you typed? An end earlier than the arrival means the trip ran past midnight.
+**Weigh bills**
+- Is there a weighbridge slip? Handwritten notes and tallies are ignored.
+- Is there a final slip, with both weights and the net? A first slip (only the tare) is used only for the vehicle number.
+- Does every slip show the vehicle number you typed?
+- Is the final slip's net weight the quantity you typed?
+- Is the gross heavier than the tare? If not, the labels look swapped.
 
-The bill's time in and time out aren't asked about: the vehicle can be weighed before it is loaded, so the photo needn't fall between them. Only the bill's date is read.
+**Times**, from the final slip and the photos' GPS stamps
+- Was the tare weighed first, at least 60 minutes before the gross?
+- Was every loading photo taken between the tare and gross weighings?
+- Was every unloading photo taken after the gross weighing, on the same day?
 
-Every answer comes with a probability or a confidence, so unclear images go to a person instead of being trusted. The trip gets one verdict: **Accepted**, **Rejected** or **Needs a person to check**.
+A photo's clock may be off the weighbridge's by up to 5 minutes (the clock slack). The 60 and 5 are defaults: you can change them for each run.
 
-> **Status:** tested offline against a fake Jev API. Not yet run against the real Jev API, which needs an API key.
+**Across trips**
+- Was any image already used in another trip? The same file, or a look-alike copy.
+- Is the vehicle on two trips at the same time? This is checked when a whole day is run with `run_trips.py`.
+
+Every answer comes with a probability or a confidence, so unclear images go to a person instead of being trusted. **Nothing is rejected automatically.** The trip gets one verdict: **Accepted**, **Flagged: problem found** (a check found something wrong) or **Flagged: please check** (something was unclear). A person accepts or rejects every flagged trip.
+
+> **Status:** tested offline against a fake Jev API, and run on one real day (48 trips from one plant, 19 Oct 2026) against the real Jev API: see [Real trips](#real-trips). The confidence thresholds are still placeholders.
 
 ## How it works
 
 Jev is a "System One" model. A chat model writes text; Jev doesn't. You send it something to look at and a set of questions, and it answers each from options you define, with a probability for every option.
 
-**Jev can't read text out of an image.** It can't tell you "the plate says KL05AF9341". So the vehicle number you type goes into the request next to the image, and Jev judges whether the plate, or the bill, shows *that* number. Spaces, hyphens and line breaks are ignored; every letter and digit must match.
+**Jev can't read text out of an image.** It can't tell you "the plate says KL05AF9341". So the vehicle number you type goes into the request next to the image, and Jev judges whether the plate, or the bill, shows *that* number. Spaces, hyphens and line breaks are ignored; every letter and digit must match. The quantity works the same way: it goes into a bill's request as `quantity_kg`, and Jev judges whether the net weight is that many kilograms. Leading zeros are ignored, so a bill printing `00480 Kg` matches `480`.
 
-`check_proof.py` sends each image in its own request, with the typed number. The two requests run at the same time.
+`check_proof.py` sends each image in its own request, all at the same time. Loading and unloading photos get the photo questions; weigh bills get the bill questions. An image added twice to a trip is asked about once.
 
-**Vehicle photo:** 9 questions
+**Each photo:** 10 questions
 
 | Question | Type | Answers |
 |-|-|-|
 | `orientation` | choice | `upright`, `top_points_right`, `top_points_left`, `upside_down` |
 | `shows_vehicle` | yes/no | Does the photo show a motor vehicle? |
 | `gps_stamp` | yes/no | Is a GPS stamp printed on the photo (place, coordinates, date and time)? |
+| `screen_photo` | yes/no | Is it a picture of a screen rather than a photo taken directly? |
 | `plate` | choice | `not_visible`, `partly_readable`, `readable` |
 | `plate_number` | choice | Is the plate the typed number: `different`, `same`, `cannot_tell` |
 | `stamp_hour`, `stamp_minute` | choice | Time in the GPS stamp: `00`–`23`, `00`–`59`, or `not_shown` |
 | `stamp_day`, `stamp_month` | choice | Date in the GPS stamp: `01`–`31`, `01`–`12`, or `not_shown` |
 
-**Weigh bill:** 5 questions
+**Each weigh bill:** 23 questions
 
 | Question | Type | Answers |
 |-|-|-|
 | `orientation` | choice | as above |
-| `weigh_bill` | yes/no | Is it a weighbridge bill (weighment slip)? |
+| `weigh_bill` | yes/no | Is it a weighbridge slip? |
+| `slip_kind` | choice | `one_weight` (a first slip), `both_weights` (a final slip), `not_shown` |
 | `bill_number` | choice | Is the vehicle number on the bill the typed number: `different`, `same`, `not_shown` |
-| `bill_day`, `bill_month` | choice | Date on the bill, or `not_shown` |
+| `net_weight` | choice | Is the net weight the typed quantity in kg: `different`, `same`, `not_shown`. Only asked when a quantity is typed. |
+| `gross_vs_tare` | choice | Which labelled weight is larger: `gross_heavier`, `tare_heavier`, `not_shown` |
+| `gross_hour` … `gross_month` | choice | Date and time printed with the gross weight, or `not_shown` |
+| `tare_hour` … `tare_month` | choice | Date and time printed with the tare weight, or `not_shown` |
+| `in_hour` … `in_month` | choice | Time In and Date In (the first weighment), or `not_shown` |
+| `out_hour` … `out_month` | choice | Time Out and Date Out (the second weighment), or `not_shown` |
+| `first_weight` | choice | Which weight was taken at Time In: `tare`, `gross`, `not_shown` |
 
-A time like `03:09` is two questions: which hour and which minute. Code puts the parts together and does all the comparing: same date, and the photo time between the typed arrival and end time. Jev is unreliable at comparing dates and times itself.
+A time like `03:09` is two questions: which hour and which minute. Code puts the parts together and does all the comparing. Jev is unreliable at comparing dates and times itself.
 
-Jev can lean towards the first option of a choice, so `same` is never listed first in the number questions.
+Bills come in two layouts. Some print a date and time with each weight (the G W weighbridge); others print only a Time In and Time Out. Both sets of questions are asked at once, and `check_proof.weighings` uses whichever the final slip has. With Time In and Time Out, `first_weight` says which weight was taken first. If both layouts can be read, the surer one is used. Only the day and month are read, so a trip that runs past midnight or across New Year still works. Some weighbridges (Lakshmi, Bhavani and others) print neither layout clearly, and their trips go to a person for now.
 
-If Jev finds an image isn't upright with at least 0.5 confidence (`ROTATE`), it is rotated and asked again. That cut-off is lower than the others because a wrong turn costs little: one more request, and unsure answers that go to a person anyway. The sideways sample bill was found turned at 0.56. That's two requests for that image. Before sending, each image has its camera rotation flag applied and is scaled so its longest side is 1568 px, the largest Jev accepts.
+Jev can lean towards the first option of a choice, so `same` is never listed first in the number and net weight questions.
+
+If Jev finds an image isn't upright with at least 0.5 confidence (`ROTATE`), it is rotated and asked again. That cut-off is lower than the others because a wrong turn costs little: one more request, and unsure answers that go to a person anyway. Before sending, each image has its camera rotation flag applied and is scaled so its longest side is 1568 px, the largest Jev accepts.
 
 ### How the verdict is decided
 
-All of this is in code (`check_proof.checks_for`, `trip_checks`, `verdict`), not in the questions:
+All of this is in code (`check_proof.trip_checks`, `decide`, `verdict`), not in the questions:
 
-| Answer | Pass | Needs a person | Fail |
+| Check | Pass | Needs a person | Problem |
 |-|-|-|-|
-| yes/no question | yes ≥ 0.8 | between 0.2 and 0.8 | yes ≤ 0.2 |
-| `plate` | `readable` | `partly_readable` | `not_visible` |
-| `plate_number` | `same` | `cannot_tell` | `different` |
-| `bill_number` | `same` | `not_shown` | `different` |
-| Same date | yes | a date not shown | no |
-| Photo during the trip (typed arrival to end) | yes | photo time not shown, or arrival and end not typed | no |
+| Vehicle, GPS stamp, taken directly | every photo of the kind: yes ≥ 0.8 (screen: no) | any photo unsure | any photo clearly fails |
+| Plate matches | at least one photo of the kind clearly `same` | none clear | any photo clearly `different` |
+| Weighbridge slip, final slip | a final slip, clearly | no slip, or no clear final slip | – |
+| Bills match | every slip `same` | any slip unclear | any slip `different` |
+| Net weight (final slip) | `same` | `not_shown`, or no quantity typed | `different` |
+| Gross heavier than tare (final slip) | `gross_heavier` | `not_shown` | `tare_heavier` |
+| Weighing order | tare first | a time unreadable, or both the same | gross first |
+| Tare to gross | at least 60 min apart | a time unsure | less |
+| Loading photos | every one between tare and gross, give or take 5 min | a stamp time unreadable or unsure | any outside |
+| Unloading photos | every one after gross, give or take 5 min | a stamp time unreadable or unsure | any before |
+| Same day as gross | every unloading photo dated the gross weighing's day | a stamp date unreadable or unsure | any on another day |
+| Images not used in other trips | none seen in another trip | a look-alike copy | the same file |
+| One trip at a time (`run_trips.py`) | – | – | the vehicle is on another trip at the same time |
 
 Any choice answer, or time or date reading, below 80% confidence also goes to a person.
 
-The trip is **Rejected** if any check fails, **Needs a person to check** if any check is unsure, and **Accepted** only when every check on both images passes.
+The trip is **Flagged: problem found** if any check finds a problem, **Flagged: please check** if any check is unsure, and **Accepted** only when every check passes. Problems are listed first, and a timeline shows tare, loading, gross and unloading in time order, with any out of place in red.
 
-The 0.8 and 0.2 thresholds (`CONFIDENT`, `YES`, `NO` in `check_proof.py`), and the 0.5 rotation cut-off (`ROTATE`), are placeholders. Choose real ones with `evaluate.py` (below).
+The timing limits are `check_proof.Limits`: `min_gap_tare_first` (60) and `clock_slack` (5), in minutes. Each run can change them, on the page, the command line, or a trip's `trip.json`.
+
+The 0.8 and 0.2 thresholds (`CONFIDENT`, `YES`, `NO` in `check_proof.py`), and the 0.5 rotation cut-off (`ROTATE`), are placeholders. Choose real ones with `run_trips.py` and `evaluate.py` (below).
 
 ## Setup
 
@@ -102,13 +130,27 @@ It asks for a "Password": paste the key there. Nothing is shown as you type. To 
 secret-tool lookup service typesafe account api >/dev/null && echo saved
 ```
 
-`app.py`, `check_proof.py` and `evaluate.py` read the key from the keyring when they need it, and hand it straight to the TypeSafe client. A `TYPESAFE_API_KEY` environment variable, if set, is used instead, which is handy on a server without a keyring.
+`app.py`, `check_proof.py`, `run_trips.py` and `evaluate.py` read the key from the keyring when they need it, and hand it straight to the TypeSafe client. A `TYPESAFE_API_KEY` environment variable, if set, is used instead, which is handy on a server without a keyring.
 
 To replace the key, run the `store` command again. To remove it: `secret-tool clear service typesafe account api`.
 
 Any program running under your user account can ask the keyring for the key while it's unlocked, as with any secret store. Never paste the key into a chat or a file inside this project.
 
 ## Usage
+
+### Trip folders
+
+A trip is a folder of images named by what they are, as in the inward log export:
+
+```
+trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773/
+  collection1.jpg  collection2.jpg     loading photos (also loading*.jpg)
+  unloading1.jpg   unloading2.jpg      unloading photos
+  weighbill1.jpg   weighbill2.jpg      weigh bills (also bill*.jpg; .heic files that are really JPEGs work too)
+  trip.json                            optional: {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10}
+```
+
+`trip.json` holds what was typed for the trip. Without it, the hand-read vehicle number and net weight from a `truth.jsonl` in a parent folder stand in. `trips/` holds real records (phone numbers, driver names), so it isn't in git.
 
 ### Test page
 
@@ -119,63 +161,51 @@ Any program running under your user account can ask the keyring for the key whil
 Open the address it prints. It's `http://127.0.0.1:8765` unless that port is taken, in which case the app uses the next free one; choose a port with `--port`.
 
 On the page:
-1. Type the vehicle number, and the trip's arrival and end time.
-2. Add the vehicle photo and the weigh bill (JPEG or PNG): click a slot or drop a file on it. Or click **Try the samples**.
-3. Click **Check**.
+1. Pick a trip from **Load a trip from trips/**, or type the vehicle number and quantity yourself.
+2. Change the timing limits if you need to: they start at 60 and 5 minutes.
+3. Add images to **Loading photos**, **Unloading photos** and **Weigh bills**: click **+ Add** or drop files on a box. **×** removes one.
+4. Click **Check**.
 
-The verdict lists every check with its answer and how sure Jev was. Below it, each image shows the times and dates read and the image as it was actually sent. You can check one image on its own; the verdict waits for both, unless that image already fails. The arrival and end time are optional, but without them the photo time can't be checked and the trip goes to a person.
+The verdict lists problems first, then every check grouped by kind of image, with how sure Jev was, the timeline, and the limits it was checked with. Below it, each image shows what Jev read from it (stamp times, slip times), its tags (first or final slip, rotated, same image as another trip) and its own answers.
 
-When the verdict is **Needs a person to check**, it shows the images full size with what to look at beside them: the unsure checks, what Jev read and what was typed in. You can rotate and zoom in, then click **Accept** or **Reject**. The verdict changes to **Accepted after review** or **Rejected after review**, and **Undo** takes it back. The decision is only kept on the page; it isn't saved anywhere. Any image's **View full size** opens the same viewer.
+When the trip is flagged, **View all images** opens a full-size viewer that steps through every image (‹ › or the arrow keys), with the trip's flags and that image's answers beside it. Rotate and zoom in, then click **Accept** or **Reject**. The decision is only kept on the page; it isn't saved anywhere.
 
-Changing the number, a time or an image clears the result, so a verdict always matches what's on screen.
+Images are compared with every image under `trips/`, so one already used in another trip is flagged. A trip loaded from `trips/` isn't compared with itself.
 
-The server only listens on your own computer (`127.0.0.1`). The API key stays in the `app.py` process and is never sent to the browser.
+Changing the number, the quantity, a limit or an image clears the result, so a verdict always matches what's on screen. The server only listens on your own computer (`127.0.0.1`). The API key stays in the `app.py` process and is never sent to the browser.
 
 ### Command line
 
 ```bash
-.venv/bin/python check_proof.py KL05AF9341 --photo samples/photo.png --bill samples/bill.png --arrival 03:00 --end 09:00
-.venv/bin/python check_proof.py KL05AF9314 --photo samples/photo.png    # wrong number: should be rejected
-.venv/bin/python check_proof.py KL05AF9341 --photo samples/photo.png --arrival 22:00 --end 05:00   # trip past midnight
-.venv/bin/python check_proof.py KL05AF9341 --bill samples/bill.png --model jev-preview   # try Jev 1.14
+.venv/bin/python check_proof.py KL57AB8815 --trip trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773 --quantity 1630
+.venv/bin/python check_proof.py KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg --bill slip1.jpg slip2.jpg \
+    --quantity 1630 --min-gap-tare-first 45 --clock-slack 10 --others trips/   # this run's own limits, and flag reused images
+.venv/bin/python check_proof.py KL57AB8815 --trip … --model jev-preview   # try Jev 1.14
 ```
 
-Prints each check with its probability or confidence, the times and dates read, the tokens used, and the verdict.
+Prints each image's answers and readings, then the verdict, timeline, limits and flags.
 
-### Measure accuracy and choose thresholds
+### Check a whole day: run_trips.py
 
-`evaluate.py` measures how often Jev is right on your own images, and shows what each confidence threshold would do. TypeSafe's guidance is to set thresholds per question, by the risk of acting on a wrong answer, from accuracy measured on your own data.
+```bash
+.venv/bin/python run_trips.py trips/inward-2026-10-19              # asks Jev about every trip, saves the answers in eval/
+.venv/bin/python run_trips.py trips/inward-2026-10-19 --cached     # re-checks with saved answers: free
+.venv/bin/python run_trips.py trips/inward-2026-10-19 --only 171773 171496 --json eval/two.json
+```
 
-1. Copy `labels.example.csv` to `labels.csv`. Add one row per check: the image, its slot (`photo` or `bill`), the vehicle number typed in, and the correct answers. File paths are relative to the CSV. Leave a cell blank to skip it.
+It prints a line per trip (verdict and first flags), the totals, and, where `truth.jsonl` has hand-read values, how often Jev read each kind of value right, with every wrong reading. Saved answers are reused whenever the image, questions, typed values and model are the same, so after changing a rule or a threshold, `--cached` re-checks the whole day without asking Jev again.
 
-   ```csv
-   file,slot,vehicle_number,shows_vehicle,gps_stamp,plate,plate_number,weigh_bill,bill_number,bill_date,photo_time,photo_date
-   trips/0412-photo.jpg,photo,KL05AF9341,yes,yes,readable,same,,,,04:09,15/10/2026
-   trips/0412-photo.jpg,photo,KL05AF9314,,,,different,,,,,
-   trips/0412-bill.jpg,bill,KL05AF9341,,,,,yes,same,15/10/2026,,
-   ```
+### Measure accuracy per image: evaluate.py
 
-   **Add rows with a wrong vehicle number too**, labeled `different`. That's how you find out whether Jev catches a mismatch. Numbers one character off, like `9341` and `9314`, are the hardest case; include plenty of them.
+`evaluate.py` measures how often Jev is right on single labeled images, and shows what each confidence threshold would do. TypeSafe's guidance is to set thresholds per question, by the risk of acting on a wrong answer, from accuracy measured on your own data.
 
-2. Ask Jev about every row. This costs tokens, and saves the answers to `eval/<model>.jsonl`:
+1. Copy `labels.example.csv` to `labels.csv`. Add one row per check: the image, its slot (`photo` or `bill`), the vehicle number typed in, for a bill the quantity typed in (kg), and the correct answers. `net_weight` can only be labeled on a row with a quantity. File paths are relative to the CSV. Leave a cell blank to skip it.
 
-   ```bash
-   .venv/bin/python evaluate.py labels.csv
-   ```
+   **Add rows with a wrong vehicle number or quantity too**, labeled `different`. That's how you find out whether Jev catches a mismatch. Numbers one character off, like `9341` and `9314`, or `2570` and `2750`, are the hardest case; include plenty of them.
 
-3. Re-score the saved answers without asking Jev again, for example after fixing a label:
+2. Ask Jev about every row (`.venv/bin/python evaluate.py labels.csv`), then re-score the saved answers for free with `--cached`.
 
-   ```bash
-   .venv/bin/python evaluate.py labels.csv --cached
-   ```
-
-The report has four parts:
-- accuracy for each field;
-- accuracy at each confidence level, for each group: image (vehicle, GPS stamp, weigh bill), plate, vehicle number, times and dates;
-- for each candidate threshold, how many answers would be accepted automatically, how many of those would be wrong, and how many would go to a person;
-- every mistake, most confident first.
-
-For a yes/no answer, the confidence in the report is how far it leans (the probability of yes for a yes, of no for a no), so a threshold of 0.8 matches `YES` and `NO` at 0.8 and 0.2. Start with 20–50 real photo-and-bill pairs; the report warns while a group has fewer than 30 answers.
+The report shows accuracy per field, accuracy at each confidence level per group, what each candidate threshold would accept and how many of those would be wrong, and every mistake, most confident first.
 
 ### Tests
 
@@ -183,21 +213,30 @@ For a yes/no answer, the confidence in the report is how far it leans (the proba
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The tests use a fake Jev API, so they need no key and cost nothing. They check:
-- reading the API key from the environment or the keyring;
-- vehicle number clean-up and image resizing;
-- that the typed number is sent with each image;
-- the rotate-and-ask-again step;
-- each check's pass, fail and needs-a-person outcomes;
-- reading the typed arrival and end time, including a trip past midnight;
-- the trip verdict: accepted, wrong plate, wrong bill number, different dates, photo outside the trip, bill times not asked, times not typed, unsure answers, one image only;
-- the question wording rules;
-- the evaluation scoring and label checks;
-- the test page's server (the full-size viewer and the Accept and Reject buttons were checked by hand in a browser, not by these tests).
+The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, one clear plate per kind, every photo's timing with the clock slack, gross first, the gap, past midnight, limits per run, missing images and quantity), reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
+
+## Real trips
+
+`trips/inward-2026-10-19/` holds one plant's inward log for 19 Oct 2026: 48 trips, 42 with weigh bills. `truth.jsonl` there has values read by hand from every image of those 42 (plates, stamp times, slip weights and times), to measure Jev against. They were read by Claude subagents, not yet checked by a person.
+
+What the day showed, from the hand-read values:
+- 38 trips were weighed tare first, 3 gross first, and 1 unclear (two weighings 9 seconds apart).
+- In every genuine trip the loading photos fall between tare and gross, and the unloading photos come after gross.
+- Images were reused across trips: 171531 and 171566 are the same files; 171496 uses 171562's loading photos and 171531's unloading photos and bill; 171654 and 171655 share a bill and unloading photos.
+- About half the trips use the G W weighbridge (a time printed with each weight). The rest use Lakshmi, Bhavani and other slips, which print times or labels differently.
+
+What Jev did on that day (`run_trips.py`, `jev-latest`, about $0.10 for the 42 trips; saved answers re-check it for free):
+- **Verdicts:** 11 accepted, 12 flagged as a problem, 19 to check. Every problem matches the hand-read values: the six trips with reused images (171496 also has loading photos taken before the tare weighing), the photos of a phone screen (171656), a loading photo without a GPS stamp (171538), 171493 (swapped gross and tare labels, 48 minutes between weighings), 171595 (gross and tare a second apart), and 171503 and 171535 (the same vehicle on both at once, tared a minute apart). No genuine trip was flagged as a problem.
+- **Readings against the hand-read values:** photo stamp times 175 of 175 right, vehicle number on bills 73 of 73, plates 164 of 176 (each miss was Jev saying "same" where a person couldn't read the plate), slip kind 67 of 76, bill tare times 31 of 35 and gross times 30 of 35.
+- **The 19 to check** are mostly slips whose layout isn't read yet (Lakshmi, Bhavani and others), and bills read below 0.8 confidence.
+- **Sideways slips:** most slips are photographed sideways. Jev is sure a slip is sideways but close to a coin flip on which way, so the likelier way is tried and the next look decides between upright and upside down (`turn_for`). Before this, 33 of 43 sideways slips were read sideways, and bill times were right only about 3 in 4.
+- **Wrong typed values:** ten real trips checked with the vehicle number's last two characters swapped were all flagged (9 as a problem, 1 to check), and with the quantity's digits swapped all 10 were flagged by the net weight. Jev twice said "same" to a wrong number on a single image, but the other images caught it, so a trip is safer than any single image.
+- **AM/PM:** asked to convert "03:06:08 PM" itself, Jev often answered 03; the bill hour is now read as printed with AM or PM asked separately. Photo stamps are read right with the conversion, so they're unchanged.
+- **Dates:** every unloading photo must be dated the same day as the gross weighing (by the calendar date, so a trip weighed just before midnight and unloaded just after is flagged too). On 19 Oct every unloading photo was.
 
 ## Cost
 
-Jev charges **$0.042 per million input tokens**; output is free. Images count as input tokens at the same rate. TypeSafe hasn't published how many tokens an image uses, so the page and the command line show the exact count and cost for every check.
+Jev charges **$0.042 per million input tokens**; output is free. Images count as input tokens at the same rate: a photo or slip is about 10,000 tokens, so a trip of 6 images is about $0.003, and the whole real day about $0.15. The page, the command line and `run_trips.py` show the exact count and cost.
 
 | Model | Alias | Notes |
 |-|-|-|
@@ -207,49 +246,39 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 ## Limits
 
 - **Image input is experimental.** TypeSafe calls it "dreamer-ready": fine for prototypes, not yet production quality. Accuracy and the request format can change between releases. Each request needs the `TypeSafe-Danger-Zone-Images: true` header, which the code sends.
-- **Number matching isn't measured yet.** Whether Jev reliably tells `KL05AF9341` from `KL05AF9314` on real photos is unknown until `evaluate.py` has run on your images. Until then, treat a "same" answer as a strong hint, not proof.
 - **Jev can't transcribe text.** It only picks from the options it's given. It can confirm the typed number, but it can't say what a different number is. Addresses, serial numbers and weights can't be read out.
-- **Jev only sees pixels.** The API strips all file metadata, so GPS data stored in the photo file never reaches it. "GPS stamp" here means the stamp is printed on the photo.
-- **A GPS stamp isn't proof.** GPS camera apps can be set to any place and time. Check the GPS and capture time in the original photo file on your side as well.
-- **Use original photos.** Screenshots and photos forwarded through WhatsApp lose detail and their GPS data. The sample images are low-resolution screenshots, about 350 × 590 px.
-- **Bill layout.** Only the bill's date and vehicle number are asked about. A slip layout very different from the sample may need different wording.
-- **Image size limits.** PNG or JPEG only, 280–1568 px on each side, at most 16 MiB per file. Convert HEIC and WebP first.
+- **Jev only sees pixels.** The API strips all file metadata, so GPS data stored in the photo file never reaches it. "GPS stamp" here means the stamp is printed on the photo. The real day's photos had no GPS data in their files anyway.
+- **A GPS stamp isn't proof.** GPS camera apps can be set to any place and time. Where the photo was taken isn't checked yet.
+- **Reused images** are found only among the trips under `trips/` (or the folder `run_trips.py` is given). A copy that was cropped or edited may not be found.
+- **Net weight in kilograms.** The quantity is compared with the final slip's net weight as a number of kilograms.
+- **Other weighbridge layouts.** Slips with only FIRST/SECOND weights and one print time (Lakshmi), or Date In/Out without gross and tare labels (Bhavani), aren't read yet; their trips go to a person.
+- **Image size limits.** PNG or JPEG only (real HEIC isn't), 280–1568 px on each side after scaling, at most 16 MiB per file.
 
 ## Files
 
 | Path | What it is |
 |-|-|
-| `check_proof.py` | The checks: questions, image preparation, rotation, and the pass, fail or review decisions. Also a command-line tool. |
+| `check_proof.py` | The checks: questions, image preparation, rotation, the trip checks and verdict, reused images. Also a command-line tool. |
+| `run_trips.py` | Checks every trip folder under a folder, flags a vehicle on two trips at once, and compares Jev with hand-read values. |
 | `app.py` | Local server for the test page. Uses only Python's standard library. |
 | `ui.html` | The test page. |
-| `evaluate.py` | Measures accuracy on labeled images and shows what each confidence threshold would do. |
+| `evaluate.py` | Measures accuracy on labeled single images and shows what each confidence threshold would do. |
 | `labels.example.csv` | Example labels file for `evaluate.py`, for the sample images, including wrong-number rows. |
-| `eval/` | Saved Jev answers from `evaluate.py`, one file per model. Not in git. |
+| `trips/` | Real trip folders and their hand-read `truth.jsonl`. Not in git. |
+| `eval/` | Saved Jev answers and run reports. Not in git. |
+| `mockups/` | The design mockup of the trip page, with real photos. Not in git. |
 | `tests/test_offline.py` | Offline tests against a fake Jev API. |
 | `playground/` | The questions and a state for each slot, as JSON, to paste into the [TypeSafe playground](https://console.typesafe.ai/playground). Generated from `check_proof.QUESTIONS`. |
-| `samples/photo.png`, `samples/bill.png` | A truck photo with a GPS stamp, and the weighment slip from the same trip (photographed sideways). |
-| `read_time.py` | An earlier experiment: reads the time on an analog or digital clock. |
-| `make_test_clock.py` | Draws test clocks at a chosen time, for `read_time.py`. |
-| `samples/analog-*.jpg`, `samples/digital-*.jpg` | Test clocks made by `make_test_clock.py`. |
+| `samples/photo.png`, `samples/bill.png` | A low-resolution truck photo with a GPS stamp, and a weighment slip (photographed sideways), used by `evaluate.py`'s example labels. |
+| `read_time.py`, `make_test_clock.py`, `samples/analog-*.jpg`, `samples/digital-*.jpg` | An earlier experiment: reading the time on a clock. |
 | `jev-guide.html` | A longer illustrated guide to Jev, pricing, images and the first version of this project. Open it in a browser. |
-
-## Expected results for the samples
-
-Read by hand from the images, to compare against Jev's answers:
-
-| Image | Checks | Time | Date |
-|-|-|-|-|
-| `samples/photo.png` | vehicle, GPS stamp, plate readable: `KL 05 AF 9341` | 04:09 | 15/10/2026 |
-| `samples/bill.png` | weighbridge bill, Truck No `KL05AF9341`; sideways (needs a 90° counter-clockwise rotation) | not asked (prints in 03:09, out 08:57) | 15/10/2026 |
-
-With vehicle number `KL05AF9341`, arrival `03:00` and end `09:00`, the pair should be **Accepted**. With `KL05AF9314`, both number checks should fail and the trip should be **Rejected**.
 
 ## Ideas not built yet
 
-- **Pick the number from the fleet.** Fill the vehicle number from the trip in the route-optimisation app, or a list of the fleet's registrations, instead of typing it.
-- **Cross-check photo and bill directly.** Send both images in one request and ask whether the plate in the photo matches the number on the bill, as a second opinion that doesn't depend on the typed number.
-- **Teach by example.** If the vehicle or bill answers are unsure on real images, describe each option with a few example images as well as words.
-- **Check the file's own GPS data.** Read the GPS position and capture time from original photo files, and compare them with the plant's location and the printed stamp.
+- **Where photos were taken.** Check the GPS stamp's place against the collection point and the plant, and the travel time from loading to the gross weighing.
+- **More slip layouts.** Read Lakshmi's two print times (first and final slip) and Bhavani's Date In/Out by which weight is heavier.
+- **Records as input.** Take the vehicle number and quantity from the inward log export instead of `trip.json`.
+- **Teach by example.** If answers are unsure on real images, describe each option with a few example images as well as words.
 
 ## References
 

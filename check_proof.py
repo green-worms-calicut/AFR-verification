@@ -1,30 +1,53 @@
-"""Check a trip's proof images against the vehicle number typed in: a vehicle photo and a weigh bill.
+"""Check a whole trip's proof images against what was typed in: loading photos, unloading photos and weigh bills.
 
-Vehicle photo: does it show a vehicle, is a GPS stamp printed on it, can the number plate be read,
-and is the plate the typed vehicle number? Weigh bill: is it a weighbridge bill, and is the vehicle
-number printed on it the typed one? Both: are they from the same date? And was the photo taken
-between the arrival and end time typed in? The bill's own times aren't asked about, because the
-vehicle can be weighed before it is loaded.
+The trip runs tare -> loading -> gross -> unloading: the empty vehicle is weighed (tare), loaded and
+photographed, weighed loaded (gross), and photographed again where it unloads. A trip weighed gross
+first is flagged.
 
-Jev can't read text out, it only picks from answers it is given, so the typed vehicle number goes
-into the state and Jev judges whether the plate or bill shows that number. Each part of a time
+Photos (each loading and unloading photo): does it show a vehicle, is a GPS stamp printed on it, is
+it a photo taken directly rather than a photo of a screen, and does one photo of each kind clearly
+show the typed vehicle number? Weigh bills: is there a weighbridge slip (handwritten notes are
+ignored), a final slip with both weights, the typed vehicle number on every slip, the typed
+quantity as the final slip's net weight, and gross heavier than tare?
+
+Times, from the final slip's tare and gross times and the photos' GPS stamps:
+  - tare is weighed before gross, at least `min_gap_tare_first` before;
+  - every loading photo is between the tare and gross weighings;
+  - every unloading photo is after the gross weighing.
+A photo's clock may be off the weighbridge's by up to `clock_slack`. Each run can change these limits
+(`Limits`). Across trips: an image already used in another trip is flagged (`ImageIndex`), and so is
+a vehicle on two trips at once (`overlap_checks`).
+
+Nothing is rejected here. A check that finds a problem flags the trip, an unsure one asks a person
+to look, and the person accepts or rejects it.
+
+Jev can't read text out, it only picks from answers it is given, so the typed vehicle number and
+quantity go into the state and Jev judges whether the plate or bill shows them. Each part of a time
 (hour, minute, day, month) is a separate Choice question, assembled here. If Jev is sure an image
 is turned, it is rotated upright and asked again. Code makes every decision from the answers
 (`checks_for`, `trip_checks`, `verdict`); the thresholds below are placeholders until evaluate.py
-has measured accuracy on real images.
+and run_trips.py have measured accuracy on real images.
 
 Usage:
-    .venv/bin/python check_proof.py KL05AF9341 --photo photo.png --bill bill.png --arrival 03:00 --end 09:00 [--model jev-preview]
+    .venv/bin/python check_proof.py KL57AB8815 --trip trips/.../171773 --quantity 1630
+    .venv/bin/python check_proof.py KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg \\
+        --bill slip1.jpg slip2.jpg --quantity 1630 [--min-gap-tare-first 60] [--clock-slack 5] [--model jev-preview]
 
-The same checks run behind the test page in app.py and the accuracy report in evaluate.py.
+The same checks run behind the test page in app.py, the trip runner run_trips.py, and the accuracy
+report in evaluate.py.
 """
 
 import argparse
+import hashlib
+import io
+import json
 import os
 import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, fields
+from datetime import datetime
 from pathlib import Path
 
 from PIL import Image as PILImage
@@ -34,16 +57,43 @@ from typesafe_sdk import Choice, Image, Noul, NoulAnswer, NoulCriteria, TypeSafe
 PRICE_PER_INPUT_TOKEN = 0.042 / 1_000_000  # USD; output tokens are free
 MIN_SIDE, MAX_SIDE = 280, 1568  # API limits for each side of an image
 HEADERS = {"TypeSafe-Danger-Zone-Images": "true"}  # images are opt-in per request
+TIMEOUT = 60.0  # seconds per request; the SDK's 10 s default timed out on large slips in the 19 Oct 2026 run
 NOT_SHOWN = "not_shown"
 
 # Placeholder thresholds: choose real ones from evaluate.py reports on labeled images.
 CONFIDENT = 0.8  # a Choice answer below this confidence goes to a person
 YES, NO = 0.8, 0.2  # a yes/no answer between these goes to a person
+# Thresholds measured for one question: (yes at or above, no at or below). In the 19 Oct 2026 run of 42 real
+# trips, every photo taken directly scored 0.05-0.43 for screen_photo, and every photo of a screen 0.99.
+NOUL_THRESHOLDS = {"screen_photo": (0.8, 0.6)}
 # Lower than CONFIDENT: a wrong turn only costs a second request, and then gives unsure answers that go to a person.
 # The sample bill, photographed sideways, was rightly found turned at 0.56 and was read less surely unturned.
 ROTATE = 0.5  # rotate an image and ask again when `orientation` is at least this confident
+# Sideways but unsure which way: in the 19 Oct 2026 run Jev put 89-95% on the two sideways options for
+# sideways slips, split about 55/40 between them, so no one option reached ROTATE and 33 of 43 sideways
+# slips were read sideways. Above this, the likelier way is tried, then checked (see `turn_for`).
+SIDEWAYS = 0.7
 
-SLOTS = ("photo", "bill")
+SLOTS = ("photo", "bill")  # the two kinds of image Jev is asked about
+ROLES = ("loading", "unloading", "bill")  # what each image is for in a trip
+SLOT_OF = {"loading": "photo", "unloading": "photo", "bill": "bill"}
+ROLE_TITLES = {"loading": "Loading photos", "unloading": "Unloading photos", "bill": "Weigh bills"}
+IMAGE_TYPES = (".jpg", ".jpeg", ".png", ".heic")  # the .heic files seen so far were really JPEGs
+
+
+@dataclass(frozen=True)
+class Limits:
+    """The timing rules, in minutes. The defaults can be changed for each run."""
+
+    min_gap_tare_first: int = 60  # loading happens between the weighings, so they are at least this far apart
+    clock_slack: int = 5  # the camera's clock and the weighbridge's may disagree by this much
+
+
+# How each limit is described in error messages and the command-line help.
+LIMIT_NAMES = {
+    "min_gap_tare_first": "the least gap between the tare and gross weighings",
+    "clock_slack": "how far a photo's clock may be off the weighbridge's",
+}
 
 # The API key lives in the login keyring (GNOME Keyring), stored with KEY_STORE_COMMAND.
 KEY_LOOKUP = ["secret-tool", "lookup", "service", "typesafe", "account", "api"]
@@ -75,20 +125,34 @@ def normalize_vehicle_number(text: str) -> str | None:
     return number if re.fullmatch(r"[A-Z0-9]{4,12}", number) else None
 
 
-def parse_time(text: str | None) -> str | None:
-    """'9:05' or '09.05' -> '09:05'. None if it isn't a time on a 24-hour clock."""
-    found = re.fullmatch(r"([01]?\d|2[0-3])[:.]([0-5]\d)", (text or "").strip())
-    return f"{int(found[1]):02d}:{found[2]}" if found else None
+def parse_limits(typed: dict) -> Limits:
+    """Limits from typed minutes, such as {"clock_slack": "10"}. A blank or missing one keeps its default."""
+    values = {}
+    for f in fields(Limits):
+        text = str(typed.get(f.name) or "").strip()
+        if not text:
+            continue
+        if not re.fullmatch(r"\d{1,4}", text):
+            raise ValueError(f"Type {LIMIT_NAMES[f.name]} as whole minutes, such as {f.default}.")
+        values[f.name] = int(text)
+    return Limits(**values)
 
 
-def parse_window(arrival: str | None, end: str | None) -> tuple[str, str] | None:
-    """The typed arrival and end time as ("HH:MM", "HH:MM"), or None if neither was typed."""
-    if not (arrival or "").strip() and not (end or "").strip():
+def parse_quantity(text: str | None) -> str | None:
+    """'2,570 kg' -> '2570', '480.50' -> '480.5'. None if nothing was typed.
+
+    The quantity is in kilograms, as weighbridge bills print it.
+    """
+    text = str(text or "").strip()
+    if not text:
         return None
-    window = parse_time(arrival), parse_time(end)
-    if None in window:
-        raise ValueError("Type both the arrival and end time on a 24-hour clock, such as 03:00 and 09:30.")
-    return window
+    found = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:kg|kgs)?\.?", text.replace(",", ""), re.IGNORECASE)
+    if not found or float(found[1]) <= 0:
+        raise ValueError("Type the quantity in kilograms as a number, such as 480.")
+    number = found[1].lstrip("0") or "0"
+    if "." in number:
+        number = number.rstrip("0").rstrip(".")
+    return "0" + number if number.startswith(".") else number
 
 
 def options(values: list[str], not_shown: str) -> dict:
@@ -114,14 +178,44 @@ DAYS = [f"{d:02d}" for d in range(1, 32)]
 MONTHS = [f"{m:02d}" for m in range(1, 13)]
 TO_24H = "Give the hour on a 24-hour clock: 2:15 AM is 02, 2:15 PM is 14, 12:30 AM is 00."
 STAMP = "If a GPS stamp is printed on `photo`,"
-BILL = "If `bill` is a weighbridge bill,"
 NO_STAMP_TIME = "There is no GPS stamp with a time, or its time can't be read."
 NO_STAMP_DATE = "There is no GPS stamp with a date, or its date can't be read."
-NO_BILL_DATE = "No date is printed on the bill, or it can't be read."
+# The two bill layouts: a date and time printed with each weight, or only a Time In and Time Out.
+GROSS = "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it,"
+TARE = "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it,"
+TIME_IN = "If `bill` prints a Time In (the first weighment, often beside a Date In),"
+TIME_OUT = "If `bill` prints a Time Out (the second weighment, often beside a Date Out),"
+NOT_CAMERA = "Ignore any timestamp on a camera picture printed on the slip."
+NO_BILL_TIME = "The bill prints no such time, or it can't be read."
+NO_BILL_DATE = "The bill prints no such date, or it can't be read."
 SAME_NUMBER = (
     "Compare only the letters and digits, ignoring spaces, hyphens, dots, line breaks and letter case. "
     "They are the same only if every letter and digit matches, in the same order."
 )
+
+
+def bill_time(prefix: str, premise: str) -> dict:
+    """The five Choice questions that read one date and time on the bill: `{prefix}_hour`, `_minute`, `_ampm`, `_day`, `_month`.
+
+    The hour is read as printed and AM or PM is asked separately; code turns them into a 24-hour time
+    (`to_24h`). Asked to convert "03:06:08 PM" itself, Jev often answered 03 (19 Oct 2026 run).
+    """
+    return {
+        f"{prefix}_hour": Choice(instructions=f"{premise} what hour is that time, exactly as printed? If AM or PM is "
+                                              f"printed after it, give the hour as printed, from 01 to 12. {NOT_CAMERA}",
+                                 criteria=options(HOURS, NO_BILL_TIME)),
+        f"{prefix}_minute": Choice(instructions=f"{premise} what minute is that time? {NOT_CAMERA}",
+                                   criteria=options(MINUTES, NO_BILL_TIME)),
+        f"{prefix}_ampm": Choice(instructions=f"{premise} is AM or PM printed after that time? {NOT_CAMERA}",
+                                 criteria={"none": "Neither: the time is on a 24-hour clock, such as 15:06.",
+                                           "am": "AM is printed after the time.", "pm": "PM is printed after the time.",
+                                           NOT_SHOWN: NO_BILL_TIME}),
+        f"{prefix}_day": Choice(instructions=f"{premise} what day of the month is its date? {NOT_CAMERA}",
+                                criteria=options(DAYS, NO_BILL_DATE)),
+        f"{prefix}_month": Choice(instructions=f"{premise} what month (01 to 12) is its date? {NOT_CAMERA}",
+                                  criteria=options(MONTHS, NO_BILL_DATE)),
+    }
+
 
 # How to turn the image so it is upright, by the answer to `orientation` (PIL rotates counterclockwise).
 ROTATION = {"upright": 0, "top_points_right": 90, "upside_down": 180, "top_points_left": 270}
@@ -135,10 +229,19 @@ QUESTIONS = {
             instructions="Is a GPS stamp printed on `photo`?",
             criteria=NoulCriteria(
                 true=(
-                    "A block of text printed on the photo by a GPS map camera app, with a place name or "
-                    "address, latitude and longitude, and a date and time."
+                    "A block of text printed on the photo by a GPS camera app, with a place name or address, "
+                    "latitude and longitude, and a date and time. It may have a map, a logo, or neither."
                 ),
                 false="No such block of text, or only a date and time with no place or coordinates.",
+            ),
+        ),
+        "screen_photo": Noul(
+            instructions="Is `photo` a picture of a screen, such as a phone or computer showing another photo, "
+                         "rather than a photo taken directly?",
+            criteria=NoulCriteria(
+                true="A screen was photographed: its edge, glare, cracked glass, an app's bars or buttons, "
+                     "or screen pixels show.",
+                false="A photo taken directly of the scene.",
             ),
         ),
         "plate": Choice(
@@ -174,8 +277,17 @@ QUESTIONS = {
             instructions="Is `bill` a weighbridge bill (a weighment slip)?",
             criteria=NoulCriteria(
                 true="A printed slip from a weighbridge that records a vehicle's weight, such as gross, tare and net weight.",
-                false="Any other document or photo, including a receipt or invoice that records no vehicle weight.",
+                false="Any other document or photo, including a handwritten note or tally, or a receipt or invoice "
+                      "that records no vehicle weight.",
             ),
+        ),
+        "slip_kind": Choice(
+            instructions="If `bill` is a weighbridge slip, which weights are filled in on it?",
+            criteria={
+                "one_weight": "Only one weight, from the first weighing; the other weight and the net weight are blank or zero.",
+                "both_weights": "Both weights (gross and tare, loaded and empty, or first and second), and the net weight.",
+                NOT_SHOWN: "It isn't a weighbridge slip, or its weights can't be read.",
+            },
         ),
         "bill_number": Choice(
             instructions=(
@@ -191,9 +303,40 @@ QUESTIONS = {
                 NOT_SHOWN: "No vehicle number is printed on the bill, or it can't be read well enough to compare.",
             },
         ),
-        # Only the date: the bill's times aren't checked, because the vehicle can be weighed before loading.
-        "bill_day": Choice(instructions=f"{BILL} what day of the month is the date printed on it?", criteria=options(DAYS, NO_BILL_DATE)),
-        "bill_month": Choice(instructions=f"{BILL} what month (01 to 12) is the date printed on it?", criteria=options(MONTHS, NO_BILL_DATE)),
+        # Only asked when a quantity is typed: see `ask`.
+        "net_weight": Choice(
+            instructions=(
+                "Is the net weight printed on `bill` the same as `quantity_kg` kilograms? The bill may label it "
+                "Net Weight, Net Wt, Net or Difference. Compare the number of kilograms only, ignoring leading "
+                "zeros, spaces, thousands separators and the unit. They are the same only if the numbers are equal."
+            ),
+            criteria={
+                "different": "The bill shows a net weight, and it is a different number of kilograms from `quantity_kg`.",
+                "same": "The bill shows a net weight of exactly `quantity_kg` kilograms.",
+                NOT_SHOWN: "No net weight is printed on the bill, or it can't be read well enough to compare.",
+            },
+        ),
+        "gross_vs_tare": Choice(
+            instructions="If `bill` labels a gross (loaded) weight and a tare (empty) weight, which is the larger number?",
+            criteria={
+                "gross_heavier": "The weight labelled gross is larger than the weight labelled tare.",
+                "tare_heavier": "The weight labelled tare is larger than the weight labelled gross.",
+                NOT_SHOWN: "The bill doesn't label both a gross and a tare weight, or they can't be read.",
+            },
+        ),
+        # Both layouts are asked about at once; `weighings` uses whichever the bill has.
+        **bill_time("gross", GROSS),
+        **bill_time("tare", TARE),
+        **bill_time("in", TIME_IN),
+        **bill_time("out", TIME_OUT),
+        "first_weight": Choice(
+            instructions="Which weight on `bill` was taken first, at the Time In (the first weighment)?",
+            criteria={
+                "tare": "The tare (empty) weight: the bill shows it with the Time In, or labels it the first weight.",
+                "gross": "The gross (loaded) weight: the bill shows it with the Time In, or labels it the first weight.",
+                NOT_SHOWN: "The bill has no Time In, or doesn't show which weight was taken first.",
+            },
+        ),
     },
 }
 
@@ -204,35 +347,63 @@ REPORT = {
         ("photo_date", "photo date", ["stamp_day", "stamp_month"], "/"),
     ],
     "bill": [
-        ("bill_date", "bill date", ["bill_day", "bill_month"], "/"),
+        ("gross_time", "gross time", ["gross_hour", "gross_minute", "gross_ampm"], ":"),
+        ("gross_date", "gross date", ["gross_day", "gross_month"], "/"),
+        ("tare_time", "tare time", ["tare_hour", "tare_minute", "tare_ampm"], ":"),
+        ("tare_date", "tare date", ["tare_day", "tare_month"], "/"),
+        ("in_time", "time in", ["in_hour", "in_minute", "in_ampm"], ":"),
+        ("in_date", "date in", ["in_day", "in_month"], "/"),
+        ("out_time", "time out", ["out_hour", "out_minute", "out_ampm"], ":"),
+        ("out_date", "date out", ["out_day", "out_month"], "/"),
     ],
 }
 
-# What each yes/no answer means, as (check label, what a yes shows, what a no shows).
+# What each yes/no answer means, as (check label, what passing shows, what failing shows, whether yes passes).
 NOUL_CHECKS = {
-    "shows_vehicle": ("Vehicle in photo", "Shows a vehicle", "No vehicle in the photo"),
-    "gps_stamp": ("GPS stamp", "GPS stamp printed on the photo", "No GPS stamp on the photo"),
-    "weigh_bill": ("Weigh bill", "Is a weighbridge bill", "Not a weighbridge bill"),
+    "shows_vehicle": ("Vehicle in photo", "Shows a vehicle", "No vehicle in the photo", True),
+    "gps_stamp": ("GPS stamp", "GPS stamp printed on the photo", "No GPS stamp on the photo", True),
+    "screen_photo": ("Taken directly", "A photo taken directly", "A photo of a screen", False),
+    "weigh_bill": ("Weigh bill", "Is a weighbridge bill", "Not a weighbridge bill", True),
 }
 # What each Choice answer means, as (check label, {option: (status, detail)}).
 CHOICE_CHECKS = {
     "plate": ("Number plate", {
         "readable": ("pass", "Number plate can be read"),
         "partly_readable": ("review", "Number plate is only partly readable"),
-        "not_visible": ("fail", "No number plate in view"),
+        "not_visible": ("review", "No number plate in view"),
     }),
     "plate_number": ("Plate matches {number}", {
         "same": ("pass", "Plate shows {number}"),
         "different": ("fail", "Plate shows a different number"),
         "cannot_tell": ("review", "Plate can't be compared"),
     }),
+    "slip_kind": ("Slip", {
+        "both_weights": ("pass", "Final slip: both weights and the net"),
+        "one_weight": ("pass", "First slip: one weight only"),
+        NOT_SHOWN: ("review", "Its weights can't be read"),
+    }),
     "bill_number": ("Bill matches {number}", {
         "same": ("pass", "Bill shows {number}"),
         "different": ("fail", "Bill shows a different vehicle number"),
         NOT_SHOWN: ("review", "No vehicle number readable on the bill"),
     }),
+    "net_weight": ("Net weight is {quantity} kg", {
+        "same": ("pass", "Bill shows a net weight of {quantity} kg"),
+        "different": ("fail", "Bill shows a different net weight"),
+        NOT_SHOWN: ("review", "No net weight readable on the bill"),
+    }),
+    "gross_vs_tare": ("Gross heavier than tare", {
+        "gross_heavier": ("pass", "Gross is the larger weight"),
+        "tare_heavier": ("fail", "Gross printed lighter than tare: the labels look swapped"),
+        NOT_SHOWN: ("review", "Gross and tare labels can't be compared"),
+    }),
 }
-TITLES = {"pass": "Accepted", "fail": "Rejected", "review": "Needs a person to check", "waiting": "Waiting for both images"}
+FINAL_ONLY = ("net_weight", "gross_vs_tare")  # bill questions that only mean something on the final slip
+
+# A check's status is pass, fail (a problem found) or review (unsure). Nothing is rejected without a person.
+TITLES = {"pass": "Accepted", "problem": "Flagged: problem found", "review": "Flagged: please check"}
+GROUPS = {"loading": "Loading photos", "unloading": "Unloading photos", "bill": "Weigh bills",
+          "times": "Times", "trips": "Other trips"}
 
 
 def fit(img: PILImage.Image) -> PILImage.Image:
@@ -246,12 +417,17 @@ def fit(img: PILImage.Image) -> PILImage.Image:
     return img
 
 
-def ask(client: TypeSafeClient, slot: str, img: PILImage.Image, vehicle_number: str, model: str):
-    return client.system_one(
-        state={slot: Image.from_pil(fit(img), format="jpeg"), "vehicle_number": vehicle_number},
-        questions=QUESTIONS[slot],
-        model=model,
-    )
+def questions_for(slot: str, quantity: str | None) -> dict:
+    """The questions asked about one image: the net weight only when a quantity was typed."""
+    return {q: v for q, v in QUESTIONS[slot].items() if quantity or q != "net_weight"}
+
+
+def ask(client: TypeSafeClient, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
+        quantity: str | None = None):
+    state = {slot: Image.from_pil(fit(img), format="jpeg"), "vehicle_number": vehicle_number}
+    if slot == "bill" and quantity:
+        state["quantity_kg"] = quantity
+    return client.system_one(state=state, questions=questions_for(slot, quantity), model=model)
 
 
 def top(answer, n: int = 3) -> list[tuple[str, float]]:
@@ -273,10 +449,13 @@ def readings_for(slot: str, answers: dict[str, dict]) -> list[dict]:
     for key, label, qids, sep in REPORT[slot]:
         parts = [{"id": q, **answers[q]} for q in qids]
         missing = any(p["choice"] == NOT_SHOWN for p in parts)
+        value = None if missing else sep.join(p["choice"] for p in parts[:2])
+        if value and len(parts) == 3:  # a bill time: hour as printed, minute, and AM or PM
+            value = to_24h(value, parts[2]["choice"])
         readings.append({
             "key": key,
             "label": label,
-            "value": None if missing else sep.join(p["choice"] for p in parts),
+            "value": value,
             "missing": missing,
             "parts": parts,
             "min_confidence": min(p["confidence"] for p in parts),
@@ -284,19 +463,42 @@ def readings_for(slot: str, answers: dict[str, dict]) -> list[dict]:
     return readings
 
 
-def checks_for(slot: str, answers: dict[str, dict], vehicle_number: str) -> list[dict]:
-    """Turn one image's yes/no and Choice answers into pass, fail or review checks.
+def to_24h(hhmm: str, ampm: str) -> str:
+    """'03:06' PM -> '15:06', '12:30' AM -> '00:30'. An hour above 12 is already on a 24-hour clock."""
+    hour, minute = hhmm.split(":")
+    h = int(hour)
+    if ampm == "pm" and h < 12:
+        h += 12
+    elif ampm == "am" and h == 12:
+        h = 0
+    return f"{h:02d}:{minute}"
+
+
+def noul_status(yes: float, pass_when_yes: bool = True, qid: str | None = None) -> str:
+    """pass, fail or review for a yes/no answer, by the question's own thresholds or YES and NO."""
+    high, low = NOUL_THRESHOLDS.get(qid, (YES, NO))
+    status = "pass" if yes >= high else "fail" if yes <= low else "review"
+    return status if pass_when_yes or status == "review" else {"pass": "fail", "fail": "pass"}[status]
+
+
+def checks_for(slot: str, answers: dict[str, dict], vehicle_number: str, quantity: str | None = None) -> list[dict]:
+    """Turn one image's yes/no and Choice answers into pass, fail or review checks, shown with the image.
 
     `certainty` is the probability of yes for a yes/no answer (`measure` "yes"), and the Choice
-    confidence otherwise.
+    confidence otherwise. A question that wasn't asked (net weight with no quantity) gives no check,
+    and nor do the final-slip questions on a first slip. The trip's verdict combines these answers
+    across images in `trip_checks`.
     """
+    first_slip = answers.get("slip_kind", {}).get("choice") == "one_weight"
     checks = []
     for qid in QUESTIONS[slot]:
+        if qid not in answers or (first_slip and qid in FINAL_ONLY):
+            continue
         a = answers[qid]
         if qid in NOUL_CHECKS:
-            label, yes, no = NOUL_CHECKS[qid]
-            status = "pass" if a["yes"] >= YES else "fail" if a["yes"] <= NO else "review"
-            detail = {"pass": yes, "fail": no, "review": f"Unsure: {yes.lower()}?"}[status]
+            label, yes, no, pass_when_yes = NOUL_CHECKS[qid]
+            status = noul_status(a["yes"], pass_when_yes, qid)
+            detail = {"pass": yes, "fail": no, "review": f"Unsure: {(yes if pass_when_yes else no).lower()}?"}[status]
             checks.append({"key": qid, "label": label, "status": status, "detail": detail,
                            "certainty": a["yes"], "measure": "yes"})
         elif qid in CHOICE_CHECKS:
@@ -304,148 +506,641 @@ def checks_for(slot: str, answers: dict[str, dict], vehicle_number: str) -> list
             status, detail = outcomes[a["choice"]]
             if a["confidence"] < CONFIDENT:
                 status, detail = "review", f"Unsure: {detail[0].lower()}{detail[1:]}"
-            checks.append({"key": qid, "label": label.format(number=vehicle_number), "status": status,
-                           "detail": detail.format(number=vehicle_number), "certainty": a["confidence"],
+            typed = {"number": vehicle_number, "quantity": quantity}
+            checks.append({"key": qid, "label": label.format(**typed), "status": status,
+                           "detail": detail.format(**typed), "certainty": a["confidence"],
                            "measure": "confidence"})
     return checks
 
 
-def minutes(hhmm: str) -> int:
-    h, m = map(int, hhmm.split(":"))
-    return h * 60 + m
+YEAR = 2024  # only the day and month are read; a leap year, so 29/02 is a date
 
 
-def within(t: str, start: str, end: str) -> bool:
-    """Is time `t` from `start` to `end`? A window that ends earlier than it starts runs past midnight."""
-    t, start, end = minutes(t), minutes(start), minutes(end)
-    return start <= t <= end if start <= end else t >= start or t <= end
+def moment(time: dict, date: dict) -> dict | None:
+    """A time and a date reading as {"at": datetime, "time": "08:57", "date": "15/10", "certainty": ...}.
 
-
-def reading_check(key: str, label: str, readings: list[dict], ok, yes: str, no: str) -> dict:
-    """A check that compares readings in code. `ok` takes their values; `yes` and `no` format them."""
-    missing = [x["label"] for x in readings if x["missing"]]
-    if missing:
-        return {"key": key, "label": label, "status": "review", "detail": "Not shown or unreadable: " + ", ".join(missing),
-                "certainty": None, "measure": None}
-    values = [x["value"] for x in readings]
-    passed = ok(*values)
-    certainty = min(x["min_confidence"] for x in readings)
-    status = "review" if certainty < CONFIDENT else "pass" if passed else "fail"
-    detail = (yes if passed else no).format(*values) + (" (unsure reading)" if status == "review" else "")
-    return {"key": key, "label": label, "status": status, "detail": detail, "certainty": certainty, "measure": "confidence"}
-
-
-def trip_checks(photo: dict | None, bill: dict | None, window: tuple[str, str] | None) -> list[dict]:
-    """Photo and bill from the same date, and the photo taken between the typed arrival and end time.
-
-    The bill's times aren't asked about: the vehicle can be weighed before it is loaded.
+    None if either is missing or the date doesn't exist, such as 31/02.
     """
-    r = {x["key"]: x for x in (photo["readings"] if photo else []) + (bill["readings"] if bill else [])}
+    if time["missing"] or date["missing"]:
+        return None
+    (hour, minute), (day, month) = map(int, time["value"].split(":")), map(int, date["value"].split("/"))
+    try:
+        at = datetime(YEAR, month, day, hour, minute)
+    except ValueError:
+        return None
+    return {"at": at, "time": time["value"], "date": date["value"],
+            "certainty": min(time["min_confidence"], date["min_confidence"])}
+
+
+def minutes_between(a: dict, b: dict) -> int:
+    """Minutes from moment `a` to moment `b`, negative if `b` is earlier. Runs across New Year when that's nearer."""
+    gap = round((b["at"] - a["at"]).total_seconds() / 60)
+    half_year = 183 * 24 * 60
+    return gap - 2 * half_year if gap > half_year else gap + 2 * half_year if gap < -half_year else gap
+
+
+def duration(minutes: int) -> str:
+    """75 -> '1 h 15 min', 60 -> '1 h', 13 -> '13 min'."""
+    hours, minutes = divmod(minutes, 60)
+    return " ".join(part for part in (f"{hours} h" if hours else "", f"{minutes} min" if minutes or not hours else "") if part)
+
+
+def show(*moments: dict) -> list[str]:
+    """Moments as text for a check's detail: times only, with dates when they're not all the same day."""
+    one_day = len({m["date"] for m in moments}) == 1
+    return [m["time"] if one_day else f"{m['time']} on {m['date']}" for m in moments]
+
+
+def weighings(bill: dict) -> dict | None:
+    """When the gross and tare weights were taken: {"gross": moment, "tare": moment, "certainty", "source"}.
+
+    A bill prints a date and time with each weight, or only a Time In and Time Out, with `first_weight`
+    saying which weight was taken at Time In. If both layouts can be read, the surer one is used.
+    None if neither can be read.
+    """
+    r = {x["key"]: x for x in bill["readings"]}
+    found = []
+    gross, tare = moment(r["gross_time"], r["gross_date"]), moment(r["tare_time"], r["tare_date"])
+    if gross and tare:
+        found.append({"gross": gross, "tare": tare, "certainty": min(gross["certainty"], tare["certainty"]),
+                      "source": "the times printed with each weight"})
+    first = bill["answers"]["first_weight"]
+    time_in, time_out = moment(r["in_time"], r["in_date"]), moment(r["out_time"], r["out_date"])
+    if time_in and time_out and first["choice"] != NOT_SHOWN:
+        gross, tare = (time_in, time_out) if first["choice"] == "gross" else (time_out, time_in)
+        found.append({"gross": gross, "tare": tare,
+                      "certainty": min(time_in["certainty"], time_out["certainty"], first["confidence"]),
+                      "source": f"Time In and Time Out, {first['choice']} first"})
+    return max(found, key=lambda w: w["certainty"], default=None)
+
+
+def check(group: str, key: str, label: str, status: str, detail: str, certainty: float | None = None) -> dict:
+    return {"group": group, "key": key, "label": label, "status": status, "detail": detail,
+            "certainty": certainty, "measure": "confidence" if certainty is not None else None}
+
+
+def timing_check(group: str, key: str, label: str, passed: bool, yes: str, no: str, certainty: float) -> dict:
+    """A check worked out in code from times Jev read: unsure readings go to a person."""
+    status = "review" if certainty < CONFIDENT else "pass" if passed else "fail"
+    return check(group, key, label, status, (yes if passed else no) + (" (unsure reading)" if status == "review" else ""),
+                 certainty)
+
+
+def names(results: list[dict]) -> str:
+    return ", ".join(r["name"] for r in results)
+
+
+def each_photo(role: str, key: str, label: str, results: list[dict], qid: str) -> dict:
+    """A yes/no question that every photo of a role must pass, such as "shows a vehicle"."""
+    _, yes, no, pass_when_yes = NOUL_CHECKS[qid]
+    statuses = {r["name"]: noul_status(r["answers"][qid]["yes"], pass_when_yes, qid) for r in results}
+    failed = [r for r in results if statuses[r["name"]] == "fail"]
+    unsure = [r for r in results if statuses[r["name"]] == "review"]
+    if failed:
+        return check(role, key, label, "fail", f"{no}: {names(failed)}")
+    if unsure:
+        return check(role, key, label, "review", f"Unsure for {names(unsure)}")
+    return check(role, key, label, "pass", f"{len(results)} of {len(results)} photos")
+
+
+def plate_check(role: str, results: list[dict], vehicle_number: str) -> dict:
+    """At least one photo of the role clearly shows the typed number; any photo clearly showing another is a problem."""
+    label = f"Plate matches {vehicle_number}"
+    sure = [r for r in results if r["answers"]["plate_number"]["confidence"] >= CONFIDENT]
+    different = [r for r in sure if r["answers"]["plate_number"]["choice"] == "different"]
+    same = [r for r in sure if r["answers"]["plate_number"]["choice"] == "same"]
+    if different:
+        return check(role, f"{role}_plate", label, "fail", f"A different number in {names(different)}")
+    if same:
+        return check(role, f"{role}_plate", label, "pass", f"Seen clearly in {len(same)} of {len(results)}",
+                     max(r["answers"]["plate_number"]["confidence"] for r in same))
+    return check(role, f"{role}_plate", label, "review", "No photo shows the plate clearly enough to compare")
+
+
+def photo_checks(role: str, results: list[dict], vehicle_number: str) -> list[dict]:
+    if not results:
+        return [check(role, f"{role}_missing", GROUPS[role], "review", "None added")]
+    return [
+        each_photo(role, f"{role}_vehicle", "Vehicle in photo", results, "shows_vehicle"),
+        each_photo(role, f"{role}_stamp", "GPS stamp", results, "gps_stamp"),
+        each_photo(role, f"{role}_direct", "Taken directly", results, "screen_photo"),
+        plate_check(role, results, vehicle_number),
+    ]
+
+
+def final_slip(bills: list[dict]) -> dict | None:
+    """The slip with both weights and the net, the one the times and net weight come from."""
+    slips = [b for b in bills if b["answers"]["weigh_bill"]["yes"] >= 0.5]
+    finals = [b for b in slips if b["answers"]["slip_kind"]["choice"] == "both_weights"]
+    return max(finals, key=lambda b: b["answers"]["slip_kind"]["confidence"], default=None)
+
+
+def choice_check(group: str, key: str, qid: str, answer: dict, vehicle_number: str, quantity: str | None, prefix: str = "") -> dict:
+    label, outcomes = CHOICE_CHECKS[qid]
+    status, detail = outcomes[answer["choice"]]
+    if answer["confidence"] < CONFIDENT:
+        status, detail = "review", f"Unsure: {detail[0].lower()}{detail[1:]}"
+    typed = {"number": vehicle_number, "quantity": quantity}
+    return check(group, key, label.format(**typed), status, prefix + detail.format(**typed), answer["confidence"])
+
+
+def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None) -> list[dict]:
+    """A weighbridge slip, the final slip, the vehicle number on every slip, and the final slip's net weight and labels."""
+    if not bills:
+        return [check("bill", "bill_missing", "Weigh bills", "review", "None added")]
+    slips = [b for b in bills if b["answers"]["weigh_bill"]["yes"] >= 0.5]
+    ignored = [b for b in bills if b not in slips]
+    note = f"; ignored as not a slip: {names(ignored)}" if ignored else ""
+    final = final_slip(bills)
     checks = []
-    if photo and bill:
-        checks.append(reading_check("same_date", "Same date", [r["photo_date"], r["bill_date"]],
-                                    lambda a, b: a == b, "Both dated {0}", "Photo {0}, bill {1}"))
-    if photo and not window:
-        checks.append({"key": "in_window", "label": "Photo during the trip", "status": "review",
-                       "detail": "Arrival and end time not typed", "certainty": None, "measure": None})
-    elif photo:
-        arrival, end = window
-        checks.append(reading_check("in_window", "Photo during the trip", [r["photo_time"]],
-                                    lambda t: within(t, arrival, end),
-                                    f"Photo {{0}} is between arrival {arrival} and end {end}",
-                                    f"Photo {{0}} is outside arrival {arrival} to end {end}"))
+    if not any(b["answers"]["weigh_bill"]["yes"] >= YES for b in slips):
+        checks.append(check("bill", "bill_found", "Weighbridge slip", "review", f"No image is clearly a weighbridge slip{note}"))
+    elif final and final["answers"]["slip_kind"]["confidence"] >= CONFIDENT:
+        checks.append(check("bill", "bill_found", "Final slip", "pass", f"{final['name']}: both weights and the net{note}",
+                            final["answers"]["slip_kind"]["confidence"]))
+    else:
+        checks.append(check("bill", "bill_found", "Final slip", "review",
+                            f"No slip clearly shows both weights and the net{note}"))
+
+    sure = [b for b in slips if b["answers"]["bill_number"]["confidence"] >= CONFIDENT]
+    different = [b for b in sure if b["answers"]["bill_number"]["choice"] == "different"]
+    unclear = [b for b in slips if b not in sure or b["answers"]["bill_number"]["choice"] == NOT_SHOWN]
+    label = f"Bills match {vehicle_number}"
+    if different:
+        checks.append(check("bill", "bill_number", label, "fail", f"A different vehicle number on {names(different)}"))
+    elif unclear or not slips:
+        checks.append(check("bill", "bill_number", label, "review", f"Can't be compared on {names(unclear) or 'any slip'}"))
+    else:
+        shown = f"All {len(slips)} slips show" if len(slips) > 1 else "The slip shows"
+        checks.append(check("bill", "bill_number", label, "pass", f"{shown} {vehicle_number}",
+                            min(b["answers"]["bill_number"]["confidence"] for b in slips)))
+
+    if not quantity:
+        checks.append(check("bill", "net_weight", "Net weight", "review", "Quantity not typed"))
+    elif not final:
+        checks.append(check("bill", "net_weight", f"Net weight is {quantity} kg", "review", "No final slip to read it from"))
+    else:
+        checks.append(choice_check("bill", "net_weight", "net_weight", final["answers"]["net_weight"], vehicle_number, quantity,
+                                   f"{final['name']}: "))
+    # Only when Jev is sure either way: many slips don't label gross and tare (19 Oct 2026 run), and an
+    # unsure answer there would send most trips to a person for nothing.
+    if final and final["answers"]["gross_vs_tare"]["confidence"] >= CONFIDENT \
+            and final["answers"]["gross_vs_tare"]["choice"] != NOT_SHOWN:
+        checks.append(choice_check("bill", "gross_vs_tare", "gross_vs_tare", final["answers"]["gross_vs_tare"],
+                                   vehicle_number, quantity, f"{final['name']}: "))
     return checks
 
 
-def verdict(photo: dict | None, bill: dict | None, window: tuple[str, str] | None = None) -> dict:
-    """One decision for the trip: any failed check rejects it, any unsure check sends it to a person."""
-    checks = (photo["checks"] if photo else []) + (bill["checks"] if bill else [])
-    checks += trip_checks(photo, bill, window)
-    statuses = {c["status"] for c in checks}
-    if "fail" in statuses:
-        status = "fail"
-    elif not (photo and bill):
-        status = "waiting"
-    else:
-        status = "review" if "review" in statuses else "pass"
-    return {"status": status, "title": TITLES[status], "checks": checks}
+def photo_moments(results: list[dict]) -> list[tuple[dict, dict | None]]:
+    """Each photo with its GPS stamp time as a moment, or None if it can't be read."""
+    out = []
+    for r in results:
+        rd = {x["key"]: x for x in r["readings"]}
+        out.append((r, moment(rd["photo_time"], rd["photo_date"])))
+    return out
 
 
-def analyze(client: TypeSafeClient, slot: str, img: PILImage.Image, vehicle_number: str, model: str) -> tuple[dict, PILImage.Image]:
-    """Check one upright-by-EXIF RGB image in its slot. Returns the result and the image as finally sent."""
-    response = ask(client, slot, img, vehicle_number, model)
-    tokens = response.usage.input_tokens or 0
-    turned = response.choices["orientation"]
-    turn = ROTATION[turned.choice] if turned.confidence >= ROTATE else 0
-    if turn:
-        img = img.rotate(turn, expand=True)
-        response = ask(client, slot, img, vehicle_number, model)
-        tokens += response.usage.input_tokens or 0
+def photo_timing(role: str, results: list[dict], w: dict, limits: Limits) -> dict | None:
+    """Every loading photo between tare and gross, or every unloading photo after gross, give or take the clock slack."""
+    if not results:
+        return None
+    slack = limits.clock_slack
+    allowing = f", allowing {duration(slack)} clock difference" if slack else ""
+    tare, gross = w["tare"], w["gross"]
+    label = "Between tare and gross" if role == "loading" else "After gross"
+    taken = photo_moments(results)
+    unread = [r for r, m in taken if not m]
+    wrong, unsure, times = [], [], []
+    for r, m in taken:
+        if not m:
+            continue
+        if role == "loading":
+            ok = minutes_between(tare, m) >= -slack and minutes_between(m, gross) >= -slack
+        else:
+            ok = minutes_between(gross, m) >= -slack
+        certainty = min(m["certainty"], w["certainty"])
+        (unsure if certainty < CONFIDENT else times if ok else wrong).append((r, m))
+    word = "Loading" if role == "loading" else "Unloading"
+    t, g = show(tare, gross)
+    if wrong:
+        r, m = wrong[0]
+        p = show(m, tare, gross)[0]
+        where = (f"before tare {t}" if minutes_between(tare, m) < -slack else f"after gross {g}") if role == "loading" else f"before gross {g}"
+        return check(role, f"{role}_timing", label, "fail", f"{word} {p} ({r['name']}) is {where}{allowing}",
+                     min(m["certainty"], w["certainty"]))
+    if unread:
+        return check(role, f"{role}_timing", label, "review", f"GPS stamp time can't be read on {names(unread)}")
+    if unsure:
+        return check(role, f"{role}_timing", label, "review", f"Unsure reading of {names([r for r, _ in unsure])}")
+    when = ", ".join(sorted({show(m, tare, gross)[0] for _, m in times}))
+    detail = f"{word} {when} is between tare {t} and gross {g}" if role == "loading" else f"{word} {when} is after gross {g}"
+    return check(role, f"{role}_timing", label, "pass", detail, min(min(m["certainty"] for _, m in times), w["certainty"]))
 
-    answers = {q: summary(a) for q, a in response.answers.items()}
-    result = {
-        "slot": slot,
-        "model": response.model,
-        "requests": 2 if turn else 1,
-        "orientation": summary(turned),
-        "rotated": turn,
-        "checks": checks_for(slot, answers, vehicle_number),
-        "readings": readings_for(slot, answers),
-        "answers": answers,
-        "input_tokens": tokens,
-        "cost_usd": tokens * PRICE_PER_INPUT_TOKEN,
-    }
-    return result, fit(img)
+
+def same_day(results: list[dict], w: dict) -> dict | None:
+    """Every unloading photo dated the same day as the gross weighing (by the calendar date, so a trip
+    weighed just before midnight and unloaded just after is flagged too)."""
+    if not results:
+        return None
+    gross = w["gross"]
+    label = "Same day as gross"
+    taken = photo_moments(results)
+    unread = [r for r, m in taken if not m]
+    other_day = [(r, m) for r, m in taken if m and m["date"] != gross["date"]]
+    sure = [(r, m) for r, m in other_day if min(m["certainty"], w["certainty"]) >= CONFIDENT]
+    if sure:
+        r, m = sure[0]
+        return check("unloading", "unloading_day", label, "fail",
+                     f"Unloading on {m['date']} ({r['name']}), gross on {gross['date']}", min(m["certainty"], w["certainty"]))
+    if other_day:
+        return check("unloading", "unloading_day", label, "review",
+                     f"Unsure reading: {names([r for r, _ in other_day])} dated {other_day[0][1]['date']}, gross on {gross['date']}")
+    if unread:
+        return check("unloading", "unloading_day", label, "review", f"GPS stamp date can't be read on {names(unread)}")
+    return check("unloading", "unloading_day", label, "pass", f"All on {gross['date']}",
+                 min(min(m["certainty"] for _, m in taken), w["certainty"]))
 
 
-def analyze_trip(client: TypeSafeClient, images: dict[str, PILImage.Image], vehicle_number: str, model: str,
-                 window: tuple[str, str] | None = None) -> tuple[dict, dict]:
-    """Check each slot's image in parallel and decide. Returns ({slot: result, "verdict": ...}, {slot: image as sent}).
+def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
+                limits: Limits = Limits()) -> tuple[list[dict], dict | None]:
+    """Every check for a trip, and the weighings they used (None if the times couldn't be read).
 
-    `window` is the typed (arrival, end) time, which the photo time must fall between.
+    The trip runs tare -> loading -> gross -> unloading. Gross first is a problem; the weighings must
+    be at least `min_gap_tare_first` apart; loading photos fall between them and unloading photos
+    after gross, give or take `clock_slack`, and on the same day as the gross weighing.
     """
-    with ThreadPoolExecutor(len(images)) as pool:
-        futures = {slot: pool.submit(analyze, client, slot, img, vehicle_number, model) for slot, img in images.items()}
-        done = {slot: f.result() for slot, f in futures.items()}
-    results = {slot: r for slot, (r, _) in done.items()}
-    sent = {slot: img for slot, (_, img) in done.items()}
-    return {**results, "verdict": verdict(results.get("photo"), results.get("bill"), window)}, sent
+    checks = photo_checks("loading", images.get("loading", []), vehicle_number)
+    checks += photo_checks("unloading", images.get("unloading", []), vehicle_number)
+    bills = images.get("bill", [])
+    checks += bill_checks(bills, vehicle_number, quantity)
+
+    final = final_slip(bills)
+    w = weighings(final) if final else None
+    gap = minutes_between(w["tare"], w["gross"]) if w else None  # positive when the tare was taken first
+    if not bills:
+        return checks, None
+    if not w:
+        checks.append(check("times", "weigh_order", "Weighing order", "review",
+                            "Tare and gross times can't be read from the final slip"))
+        return checks, None
+    g, t = show(w["gross"], w["tare"])
+    if gap == 0:
+        checks.append(check("times", "weigh_order", "Weighing order", "review", f"Tare and gross both at {g}"))
+        return checks, w
+    if gap < 0:
+        checks.append(timing_check("times", "weigh_order", "Weighing order", False, "",
+                                   f"Gross first ({g}), then tare ({t}): the trip should be weighed tare first", w["certainty"]))
+        return checks, w
+    checks.append(timing_check("times", "weigh_order", "Weighing order", True,
+                               f"Tare first ({t}), then gross ({g}), from {w['source']}", "", w["certainty"]))
+    least = limits.min_gap_tare_first
+    checks.append(timing_check("times", "weigh_gap", "Tare to gross", gap >= least,
+                               f"{duration(gap)} apart (at least {duration(least)})",
+                               f"Only {duration(gap)} apart (at least {duration(least)} needed)", w["certainty"]))
+    for role in ("loading", "unloading"):
+        if c := photo_timing(role, images.get(role, []), w, limits):
+            checks.append(c)
+    if c := same_day(images.get("unloading", []), w):
+        checks.append(c)
+    return checks, w
 
 
-def load(path: Path) -> PILImage.Image:
-    with PILImage.open(path) as original:
+def timeline(images: dict[str, list[dict]], w: dict | None, checks: list[dict]) -> list[dict]:
+    """The trip's events in time order, for the page: tare, loading, gross and unloading, marking those in a failed check."""
+    failed = {c["key"] for c in checks if c["status"] == "fail"}
+    events = []
+    if w:
+        events += [{"at": w["tare"], "what": "Tare", "bad": "weigh_order" in failed or "weigh_gap" in failed},
+                   {"at": w["gross"], "what": "Gross", "bad": "weigh_order" in failed or "weigh_gap" in failed}]
+    for role, word in (("loading", "Loading photos"), ("unloading", "Unloading photos")):
+        times = [m for _, m in photo_moments(images.get(role, [])) if m]
+        if times:
+            first = min(times, key=lambda m: m["at"])
+            events.append({"at": first, "what": word, "bad": f"{role}_timing" in failed or f"{role}_day" in failed})
+    events.sort(key=lambda e: e["at"]["at"])
+    return [{"time": e["at"]["time"], "date": e["at"]["date"], "what": e["what"], "bad": e["bad"]} for e in events]
+
+
+def decide(checks: list[dict]) -> dict:
+    """The verdict from a list of checks: any failed check flags a problem, any unsure one asks a person.
+
+    Nothing is rejected here. `flags` lists the checks that didn't pass, problems first.
+    """
+    statuses = {c["status"] for c in checks}
+    status = "problem" if "fail" in statuses else "review" if "review" in statuses else "pass"
+    flags = sorted((c for c in checks if c["status"] != "pass"), key=lambda c: c["status"] != "fail")
+    return {"status": status, "title": TITLES[status], "checks": checks, "flags": flags}
+
+
+def verdict(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
+            limits: Limits = Limits(), extra: list[dict] = ()) -> dict:
+    """One verdict for the trip, with its checks, flags and timeline. `extra` are checks across trips."""
+    checks, w = trip_checks(images, vehicle_number, quantity, limits)
+    checks += list(extra)
+    # From tare to gross, for finding a vehicle on two trips at once: only when clearly read as tare first.
+    clear = any(c["key"] == "weigh_order" and c["status"] == "pass" for c in checks)
+    window = [w["tare"]["at"], w["gross"]["at"]] if w and clear else None
+    return {**decide(checks), "timeline": timeline(images, w, checks),
+            "window": [t.isoformat() for t in window] if window else None}
+
+
+@dataclass
+class Upload:
+    """One image of a trip, as uploaded: its file name and bytes."""
+
+    name: str
+    data: bytes
+
+
+def role_of(name: str) -> str | None:
+    """What an image in a trip folder is for, by its file name: collection1.jpg is a loading photo."""
+    stem = name.lower()
+    if not stem.endswith(IMAGE_TYPES):
+        return None
+    for prefix, role in (("collection", "loading"), ("loading", "loading"), ("unloading", "unloading"),
+                         ("weighbill", "bill"), ("weigh_bill", "bill"), ("bill", "bill")):
+        if stem.startswith(prefix):
+            return role
+    return None
+
+
+def read_trip_folder(folder: Path) -> dict[str, list[Upload]]:
+    """The images in a trip folder by role, in file-name order."""
+    found = {role: [] for role in ROLES}
+    for path in sorted(folder.iterdir()):
+        if path.is_file() and (role := role_of(path.name)):
+            found[role].append(Upload(path.name, path.read_bytes()))
+    return found
+
+
+def load_bytes(data: bytes) -> PILImage.Image:
+    with PILImage.open(io.BytesIO(data)) as original:
         return ImageOps.exif_transpose(original).convert("RGB")
 
 
-MARK = {"pass": "ok  ", "fail": "FAIL", "review": "??  "}
+def load(path: Path) -> PILImage.Image:
+    return load_bytes(path.read_bytes())
 
 
-def print_trip(trip: dict, vehicle_number: str) -> None:
-    for slot in SLOTS:
-        r = trip.get(slot)
-        if not r:
-            continue
-        rotated = f", rotated {r['rotated']}°" if r["rotated"] else ""
-        print(f"\n{slot}  (answered by {r['model']}{rotated})")
-        for c in r["checks"]:
-            print(f"  {MARK[c['status']]} {c['label']:<26} {c['detail']}  ({c['certainty']:.2f})")
-        for reading in r["readings"]:
-            print(f"       {reading['label']:<26} {reading['value'] or 'not shown'}  ({reading['min_confidence']:.2f})")
-        print(f"       {r['input_tokens']} input tokens ≈ ${r['cost_usd']:.6f}")
+def fingerprints(data: bytes, img: PILImage.Image | None = None) -> dict:
+    """An exact fingerprint (md5 of the file) and a look-alike one (a 64-bit difference hash of the picture)."""
+    img = img or load_bytes(data)
+    px = img.convert("L").resize((9, 8), PILImage.LANCZOS).tobytes()
+    bits = sum(1 << i for i in range(64) if px[(i // 8) * 9 + i % 8] > px[(i // 8) * 9 + i % 8 + 1])
+    return {"md5": hashlib.md5(data).hexdigest(), "dhash": f"{bits:016x}"}
+
+
+LOOKS_ALIKE = 3  # at most this many of the 64 look-alike bits differ: a re-saved or resized copy
+FEATURELESS = 6  # a look-alike fingerprint with this few bits set, or unset, is a plain image that says nothing
+
+
+class ImageIndex:
+    """Fingerprints of every image in known trips, to find an image used again in another trip."""
+
+    def __init__(self):
+        self.items: list[tuple[str, str, str, int]] = []  # (trip, image name, md5, dhash)
+
+    def add(self, trip: str, name: str, prints: dict) -> None:
+        self.items.append((trip, name, prints["md5"], int(prints["dhash"], 16)))
+
+    @classmethod
+    def of_folders(cls, root: Path) -> "ImageIndex":
+        """Index every trip folder under `root`: a folder holding role-named images."""
+        index = cls()
+        for folder in sorted({p.parent for p in root.rglob("*") if p.is_file() and role_of(p.name)}):
+            trip = folder.relative_to(root).as_posix()
+            for uploads in read_trip_folder(folder).values():
+                for u in uploads:
+                    try:
+                        index.add(trip, u.name, fingerprints(u.data))
+                    except OSError:
+                        continue
+        return index
+
+    def matches(self, prints: dict, trip: str | None) -> list[dict]:
+        """Images in other trips that are this image: the same file, or one that looks the same."""
+        dhash = int(prints["dhash"], 16)
+        found = []
+        for other, name, md5, h in self.items:
+            if other == trip:
+                continue
+            if md5 == prints["md5"]:
+                found.append({"trip": other, "name": name, "exact": True})
+            elif FEATURELESS < bin(dhash).count("1") < 64 - FEATURELESS and bin(h ^ dhash).count("1") <= LOOKS_ALIKE:
+                found.append({"trip": other, "name": name, "exact": False})
+        return found
+
+
+def short_trip(trip: str) -> str:
+    """A trip id for people: its folder's name, such as 171562 for day/InwardLog/171562."""
+    return trip.rsplit("/", 1)[-1]
+
+
+def and_list(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def reuse_check(images: dict[str, list[dict]], index: ImageIndex, trip: str | None) -> dict:
+    """Any image of this trip already used in another trip is a problem; a look-alike asks a person.
+
+    The detail groups this trip's images by the trips they were seen in, such as
+    "collection1.jpg and collection2.jpg are also in trip 171562".
+    """
+    seen = {True: {}, False: {}}  # exact or look-alike -> {image name: [other trips]}
+    for results in images.values():
+        for r in results:
+            for m in index.matches(r["prints"], trip):
+                r.setdefault("used_in", []).append(m)
+                others = seen[m["exact"]].setdefault(r["name"], [])
+                if short_trip(m["trip"]) not in others:
+                    others.append(short_trip(m["trip"]))
+
+    def describe(found: dict) -> str:
+        groups = {}
+        for name, others in found.items():
+            groups.setdefault(tuple(sorted(others)), []).append(name)
+        return "; ".join(f"{and_list(names)} {'is' if len(names) == 1 else 'are'} also in trip{'s' if len(others) > 1 else ''} "
+                         f"{and_list(list(others))}" for others, names in groups.items())
+
+    label = "Images not used in other trips"
+    if seen[True]:
+        return check("trips", "reused", label, "fail", describe(seen[True]))
+    if seen[False]:
+        return check("trips", "reused", label, "review", "Looks the same: " + describe(seen[False]))
+    return check("trips", "reused", label, "pass", "None seen in another trip")
+
+
+def overlap_checks(trips: dict[str, dict]) -> dict[str, dict]:
+    """A vehicle can't be on two trips at once: {trip: check} for each trip whose tare-to-gross window overlaps
+    another trip's with the same vehicle number. `trips` maps a trip id to {"vehicle_number", "verdict"}.
+    """
+    windows = {}
+    for trip, t in trips.items():
+        if w := t["verdict"].get("window"):
+            windows[trip] = (t["vehicle_number"], datetime.fromisoformat(w[0]), datetime.fromisoformat(w[1]))
+    found = {}
+    for a, (va, sa, ea) in windows.items():
+        for b, (vb, sb, eb) in windows.items():
+            if a < b and va == vb and sa < eb and sb < ea:
+                for x, y in ((a, b), (b, a)):
+                    found.setdefault(x, []).append(y)
+    return {trip: check("trips", "overlap", "One trip at a time", "fail",
+                        f"{trips[trip]['vehicle_number']} is also on trip {', '.join(others)} at the same time")
+            for trip, others in found.items()}
+
+
+def add_checks(trip: dict, extra: list[dict]) -> None:
+    """Add checks across trips to a finished trip's verdict, and decide again."""
     v = trip["verdict"]
+    trip["verdict"] = {**v, **decide(v["checks"] + extra)}
+
+
+def question_version(slot: str) -> str:
+    """Changes whenever a question changes, so saved answers from older questions aren't reused."""
+    text = json.dumps({q: v.model_dump(mode="json") for q, v in QUESTIONS[slot].items()}, sort_keys=True)
+    return hashlib.md5(text.encode()).hexdigest()[:10]
+
+
+TURNING = "turn3"  # how images are turned before the answers are kept; changing it means asking again
+
+
+def answer_key(prints: dict, slot: str, vehicle_number: str, quantity: str | None, model: str) -> str:
+    """What an image's answers depend on, to save them and reuse them: the image, the questions, what was typed, the model."""
+    return "|".join([prints["md5"], slot, question_version(slot), TURNING, vehicle_number, quantity or "", model])
+
+
+def result_from(slot: str, raw: dict, vehicle_number: str, quantity: str | None) -> dict:
+    """An image's result from Jev's raw answers: its checks and readings are worked out here, so changing a
+    threshold or rule needs no new request.
+    """
+    tokens = raw["input_tokens"]
+    return {**raw, "slot": slot, "checks": checks_for(slot, raw["answers"], vehicle_number, quantity),
+            "readings": readings_for(slot, raw["answers"]), "cost_usd": tokens * PRICE_PER_INPUT_TOKEN}
+
+
+def turn_for(answer, first: bool) -> int:
+    """How far to turn an image (counterclockwise) by its `orientation` answer, or 0 to keep it.
+
+    A confident answer is followed. On the first look, an image surely sideways but unsure which way is
+    turned the likelier way. Which way is close to a coin flip for Jev, so the next look decides only
+    between the two places that turn can have left it: upright, or upside down (then half a turn more).
+    In the 19 Oct 2026 run, 6 of 35 slips turned once were left upside down by waiting for ROTATE there.
+    """
+    p = answer.probabilities
+    if not first:
+        return 180 if p.get("upside_down", 0) > p.get("upright", 0) else 0
+    if answer.choice != "upright" and answer.confidence >= ROTATE:
+        return ROTATION[answer.choice]
+    if p.get("top_points_left", 0) + p.get("top_points_right", 0) >= SIDEWAYS:
+        return ROTATION["top_points_left" if p["top_points_left"] > p["top_points_right"] else "top_points_right"]
+    return 0
+
+
+def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
+            quantity: str | None = None, cache: dict | None = None, key: str | None = None) -> tuple[dict, PILImage.Image]:
+    """Check one upright-by-EXIF RGB image in its slot. Returns the result and the image as finally sent.
+
+    `quantity` is the typed quantity in kilograms, which a bill's net weight must match. With `cache`
+    and `key`, saved answers are used instead of asking Jev, and new answers are saved.
+    """
+    if cache is not None and key in cache:
+        raw = cache[key]
+        result = {**result_from(slot, raw, vehicle_number, quantity), "saved": True}
+        return result, fit(img.rotate(raw["rotated"], expand=True))
+    response = ask(client, slot, img, vehicle_number, model, quantity)
+    tokens, requests, rotated = response.usage.input_tokens or 0, 1, 0
+    turned = response.choices["orientation"]
+    looks = [summary(turned)]  # each orientation answer, before each turn
+    # At most two turns: the likelier sideways guess, then half a turn if that left it upside down.
+    while requests < 3 and (turn := turn_for(response.choices["orientation"], first=requests == 1)):
+        img = img.rotate(turn, expand=True)
+        rotated = (rotated + turn) % 360
+        response = ask(client, slot, img, vehicle_number, model, quantity)
+        tokens += response.usage.input_tokens or 0
+        requests += 1
+        looks.append(summary(response.choices["orientation"]))
+    raw = {"model": response.model, "requests": requests, "orientation": summary(turned), "rotated": rotated, "looks": looks,
+           "answers": {q: summary(a) for q, a in response.answers.items()}, "input_tokens": tokens}
+    if cache is not None and key:
+        cache[key] = raw
+    return result_from(slot, raw, vehicle_number, quantity), fit(img)
+
+
+def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]], vehicle_number: str, model: str,
+                 quantity: str | None = None, limits: Limits = Limits(), index: ImageIndex | None = None,
+                 trip: str | None = None, cache: dict | None = None) -> tuple[dict, dict]:
+    """Check every image of a trip in parallel and decide.
+
+    Returns ({"images": {role: [result]}, "verdict": ...}, {role: [image as sent]}). An image uploaded
+    twice in the trip is asked about once. With `index`, images already used in other trips (not
+    `trip` itself) are flagged. `cache` holds saved answers (see `analyze`).
+    """
+    jobs = []  # (role, upload, image, fingerprints)
+    for role in ROLES:
+        for u in uploads.get(role, []):
+            img = load_bytes(u.data)
+            jobs.append((role, u, img, fingerprints(u.data, img)))
+    first_of = {}
+    for _, u, _, prints in jobs:
+        first_of.setdefault(prints["md5"], u.name)
+
+    def run(job):
+        role, u, img, prints = job
+        slot = SLOT_OF[role]
+        return analyze(client, slot, img, vehicle_number, model, quantity, cache,
+                       answer_key(prints, slot, vehicle_number, quantity, model))
+
+    unique = [j for j in jobs if first_of[j[3]["md5"]] == j[1].name]
+    with ThreadPoolExecutor(max(1, min(8, len(unique)))) as pool:
+        done = dict(zip((j[3]["md5"] for j in unique), pool.map(run, unique)))
+    images, sent = {role: [] for role in ROLES}, {role: [] for role in ROLES}
+    for role, u, _, prints in jobs:
+        result, img = done[prints["md5"]]
+        repeat = first_of[prints["md5"]] != u.name
+        images[role].append({**result, "name": u.name, "prints": prints, "requests": 0 if repeat else result["requests"],
+                             "input_tokens": 0 if repeat else result["input_tokens"],
+                             "cost_usd": 0 if repeat else result["cost_usd"], "same_as": first_of[prints["md5"]] if repeat else None})
+        sent[role].append(img)
+    extra = [reuse_check(images, index, trip)] if index is not None else []
+    return {"images": images, "verdict": verdict(images, vehicle_number, quantity, limits, extra)}, sent
+
+
+MARK = {"pass": "ok  ", "fail": "FLAG", "review": "??  "}
+
+
+def print_trip(trip: dict, vehicle_number: str, limits: Limits) -> None:
+    for role in ROLES:
+        for r in trip["images"][role]:
+            rotated = f", rotated {r['rotated']}°" if r["rotated"] else ""
+            same = f", same file as {r['same_as']}" if r["same_as"] else ""
+            print(f"\n{ROLE_TITLES[role]}: {r['name']}  (answered by {r['model']}{rotated}{same})")
+            for c in r["checks"]:
+                print(f"  {MARK[c['status']]} {c['label']:<26} {c['detail']}  ({c['certainty']:.2f})")
+            for reading in r["readings"]:
+                if not reading["missing"]:
+                    print(f"       {reading['label']:<26} {reading['value']}  ({reading['min_confidence']:.2f})")
+    v = trip["verdict"]
+    tokens = sum(r["input_tokens"] for rs in trip["images"].values() for r in rs)
     print(f"\nVehicle {vehicle_number}: {v['title']}")
-    for c in v["checks"]:
-        if c["status"] != "pass" or c["key"] in ("same_date", "in_window"):
-            print(f"  {MARK[c['status']]} {c['label']}: {c['detail']}")
+    print(f"  Limits: tare to gross at least {duration(limits.min_gap_tare_first)}, clock slack {duration(limits.clock_slack)}")
+    print("  Timeline: " + " -> ".join(f"{e['what']} {e['time']}{' (!)' if e['bad'] else ''}" for e in v["timeline"]))
+    for c in v["flags"] + [c for c in v["checks"] if c["status"] == "pass" and c["group"] == "times"]:
+        print(f"  {MARK[c['status']]} {GROUPS[c['group']]} · {c['label']}: {c['detail']}")
+    print(f"  {tokens} input tokens ≈ ${tokens * PRICE_PER_INPUT_TOKEN:.5f}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("vehicle_number", help="the trip's vehicle number, such as KL05AF9341")
-    parser.add_argument("--photo", type=Path, help="photo of the vehicle with a GPS stamp")
-    parser.add_argument("--bill", type=Path, help="weighbridge bill")
-    parser.add_argument("--arrival", help="the time the vehicle arrived, such as 03:00")
-    parser.add_argument("--end", help="the time the trip ended, such as 09:30 (earlier than --arrival if past midnight)")
+    parser.add_argument("--trip", type=Path, help="a trip folder: collection*, unloading* and weighbill* images")
+    parser.add_argument("--loading", type=Path, nargs="+", default=[], help="loading photos, with GPS stamps")
+    parser.add_argument("--unloading", type=Path, nargs="+", default=[], help="unloading photos, with GPS stamps")
+    parser.add_argument("--bill", type=Path, nargs="+", default=[], help="weighbridge slips")
+    parser.add_argument("--quantity", help="the quantity in kilograms, such as 2570, which the final slip's net weight must match")
+    for f in fields(Limits):
+        parser.add_argument(f"--{f.name.replace('_', '-')}", dest=f.name, metavar="MIN",
+                            help=f"{LIMIT_NAMES[f.name]}, in minutes (default {f.default})")
+    parser.add_argument("--others", type=Path, help="a folder of other trips, to flag images used again (such as trips/)")
     parser.add_argument("--model", default="jev-latest", help="jev-latest (1.13), jev-preview (1.14), or a pinned ID")
     args = parser.parse_args()
 
@@ -453,21 +1148,27 @@ def main() -> None:
     if not number:
         parser.error(f"{args.vehicle_number!r} doesn't look like a vehicle number. Use 4 to 12 letters and digits.")
     try:
-        window = parse_window(args.arrival, args.end)
+        quantity = parse_quantity(args.quantity)
+        limits = parse_limits(vars(args))
     except ValueError as error:
         parser.error(str(error))
-    images = {slot: load(path) for slot in SLOTS if (path := getattr(args, slot))}
-    if not images:
-        parser.error("Give --photo, --bill, or both.")
+    uploads = read_trip_folder(args.trip) if args.trip else {role: [] for role in ROLES}
+    for role in ROLES:
+        uploads[role] += [Upload(p.name, p.read_bytes()) for p in getattr(args, role)]
+    if not any(uploads.values()):
+        parser.error("Give --trip, or images with --loading, --unloading and --bill.")
+    index = ImageIndex.of_folders(args.others) if args.others else None
+    trip_id = args.trip.resolve().relative_to(args.others.resolve()).as_posix() \
+        if args.trip and args.others and args.trip.resolve().is_relative_to(args.others.resolve()) else None
 
     if not (key := api_key()):
         sys.exit(NO_KEY)
-    with TypeSafeClient(api_key=key, headers=HEADERS) as client:
+    with TypeSafeClient(api_key=key, headers=HEADERS, timeout=TIMEOUT) as client:
         try:
-            trip, _ = analyze_trip(client, images, number, args.model, window)
+            trip, _ = analyze_trip(client, uploads, number, args.model, quantity, limits, index, trip_id)
         except Exception as error:
             sys.exit(f"{type(error).__name__}: {error}")
-    print_trip(trip, number)
+    print_trip(trip, number, limits)
 
 
 if __name__ == "__main__":
