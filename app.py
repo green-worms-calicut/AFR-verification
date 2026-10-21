@@ -1,4 +1,4 @@
-"""Local test page for check_proof.py: drop in bills and geotagged photos and see what Jev reads.
+"""Local test page for check_proof.py: type a vehicle number, add its photo and weigh bill, and see what Jev finds.
 
 The API key stays in this process; the browser only talks to this server.
 
@@ -10,8 +10,6 @@ import argparse
 import base64
 import io
 import json
-import os
-import shlex
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -23,26 +21,13 @@ import check_proof
 
 HERE = Path(__file__).parent
 HOST, PORT = "127.0.0.1", 8765
-MAX_BODY = 30 * 1024 * 1024  # a phone photo as base64 JSON is well under this
-KEY_FILE = Path.home() / ".config" / "typesafe" / "env"
+MAX_BODY = 30 * 1024 * 1024  # two phone photos as base64 JSON are well under this
 MODELS = ("jev-latest", "jev-preview")
 PAGES = {
     "/": (HERE / "ui.html", "text/html; charset=utf-8"),
     "/samples/bill.png": (HERE / "samples" / "bill.png", "image/png"),
     "/samples/photo.png": (HERE / "samples" / "photo.png", "image/png"),
 }
-
-
-def load_key() -> bool:
-    """Use TYPESAFE_API_KEY from the environment, or read it from ~/.config/typesafe/env."""
-    if os.environ.get("TYPESAFE_API_KEY"):
-        return True
-    if KEY_FILE.is_file():
-        for token in shlex.split(KEY_FILE.read_text(), comments=True):
-            if token.startswith("TYPESAFE_API_KEY="):
-                os.environ["TYPESAFE_API_KEY"] = token.split("=", 1)[1]
-                return True
-    return False
 
 
 def data_url(img: PILImage.Image, longest: int = 640) -> str:
@@ -64,7 +49,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/api/status":
-            self.send_json(200, {"key_set": load_key(), "key_file": str(KEY_FILE), "models": MODELS})
+            self.send_json(200, {"key_set": bool(check_proof.api_key()), "key_help": check_proof.NO_KEY, "models": MODELS})
             return
         page = PAGES.get(self.path)
         if not page or not page[0].is_file():
@@ -83,16 +68,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_BODY:
-            self.send_json(413, {"error": "This image is too large to upload. Use one under 20 MB."})
+            self.send_json(413, {"error": "These images are too large to upload. Use images under 10 MB each."})
             return
         try:
             body = json.loads(self.rfile.read(length))
             model = body.get("model", MODELS[0])
             if model not in MODELS:
                 raise ValueError(f"Unknown model {model!r}.")
-            raw = base64.b64decode(body["data"].split(",", 1)[-1])
-            with PILImage.open(io.BytesIO(raw)) as original:
-                img = ImageOps.exif_transpose(original).convert("RGB")
+            number = check_proof.normalize_vehicle_number(body.get("vehicle_number", ""))
+            if not number:
+                self.send_json(400, {"error": "Type the vehicle number first: 4 to 12 letters and digits, such as KL05AF9341."})
+                return
+            try:
+                window = check_proof.parse_window(body.get("arrival"), body.get("end"))
+            except ValueError as error:
+                self.send_json(400, {"error": str(error)})
+                return
+            images = {}
+            for slot in check_proof.SLOTS:
+                if body.get(slot):
+                    raw = base64.b64decode(body[slot].split(",", 1)[-1])
+                    with PILImage.open(io.BytesIO(raw)) as original:
+                        images[slot] = ImageOps.exif_transpose(original).convert("RGB")
+            if not images:
+                raise ValueError("Add the vehicle photo, the weigh bill, or both.")
         except UnidentifiedImageError:
             self.send_json(400, {"error": "This file couldn't be opened as an image. Use a JPEG or PNG."})
             return
@@ -100,18 +99,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": f"Bad request: {error}"})
             return
 
-        if not load_key():
-            self.send_json(503, {"error": f"No API key found. Set TYPESAFE_API_KEY or save it in {KEY_FILE}, then try again."})
+        if not (key := check_proof.api_key()):
+            self.send_json(503, {"error": check_proof.NO_KEY})
             return
         try:
-            with TypeSafeClient(headers=check_proof.HEADERS) as client:
-                result, sent = check_proof.analyze(client, img, model)
+            with TypeSafeClient(api_key=key, headers=check_proof.HEADERS) as client:
+                trip, sent = check_proof.analyze_trip(client, images, number, model, window)
         except TypeSafeError as error:
             self.send_json(502, {"error": f"Jev returned an error: {error}"})
             return
-        result["sent_image"] = data_url(sent)
-        result["sent_size"] = list(sent.size)
-        self.send_json(200, result)
+        for slot, img in sent.items():
+            trip[slot]["sent_image"] = data_url(img)
+            trip[slot]["sent_size"] = list(img.size)
+        trip["vehicle_number"] = number
+        trip["window"] = window
+        self.send_json(200, trip)
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"{self.address_string()} {fmt % args}")
@@ -133,7 +135,7 @@ def main() -> None:
     args = parser.parse_args()
 
     server = serve(args.port)
-    print(f"API key: {'found' if load_key() else f'not found (set TYPESAFE_API_KEY or create {KEY_FILE})'}")
+    print("API key: found" if check_proof.api_key() else check_proof.NO_KEY)
     print(f"Open http://{HOST}:{server.server_port} in your browser. Press Ctrl+C to stop.", flush=True)
     try:
         server.serve_forever()

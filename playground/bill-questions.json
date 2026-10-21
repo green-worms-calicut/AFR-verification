@@ -1,16 +1,7 @@
 {
-  "kind": {
-    "type": "choice",
-    "instructions": "What is `image`?",
-    "criteria": {
-      "bill": "A printed bill, receipt, invoice or weighment slip.",
-      "geotagged_photo": "A photo with a GPS stamp printed on it: a place name or address, latitude and longitude, and a date and time, as added by a GPS map camera app.",
-      "other": "Any other photo or document, including a photo with no GPS stamp."
-    }
-  },
   "orientation": {
     "type": "choice",
-    "instructions": "Which way is the printed text in `image` turned?",
+    "instructions": "Which way is the printed text in `bill` turned?",
     "criteria": {
       "upright": "The text reads normally, left to right.",
       "top_points_right": "The image is turned so the tops of the letters face the right edge.",
@@ -18,34 +9,78 @@
       "upside_down": "The text is upside down."
     }
   },
-  "in_hour": {
-    "type": "choice",
-    "instructions": "If `image` is a bill, what hour is its time in (the first, earlier time printed)? Give the hour on a 24-hour clock: 2:15 AM is 02, 2:15 PM is 14, 12:30 AM is 00.",
-    "criteria": { "00": null, "01": null, "02": null, "03": null, "04": null, "05": null, "06": null, "07": null, "08": null, "09": null, "10": null, "11": null, "12": null, "13": null, "14": null, "15": null, "16": null, "17": null, "18": null, "19": null, "20": null, "21": null, "22": null, "23": null, "not_shown": "No time in is printed on a bill, or it can't be read." }
+  "weigh_bill": {
+    "type": "noul",
+    "instructions": "Is `bill` a weighbridge bill (a weighment slip)?",
+    "criteria": {
+      "true": "A printed slip from a weighbridge that records a vehicle's weight, such as gross, tare and net weight.",
+      "false": "Any other document or photo, including a receipt or invoice that records no vehicle weight."
+    }
   },
-  "in_minute": {
+  "bill_number": {
     "type": "choice",
-    "instructions": "If `image` is a bill, what minute is its time in (the first, earlier time printed)?",
-    "criteria": { "00": null, "01": null, "02": null, "03": null, "04": null, "05": null, "06": null, "07": null, "08": null, "09": null, "10": null, "11": null, "12": null, "13": null, "14": null, "15": null, "16": null, "17": null, "18": null, "19": null, "20": null, "21": null, "22": null, "23": null, "24": null, "25": null, "26": null, "27": null, "28": null, "29": null, "30": null, "31": null, "32": null, "33": null, "34": null, "35": null, "36": null, "37": null, "38": null, "39": null, "40": null, "41": null, "42": null, "43": null, "44": null, "45": null, "46": null, "47": null, "48": null, "49": null, "50": null, "51": null, "52": null, "53": null, "54": null, "55": null, "56": null, "57": null, "58": null, "59": null, "not_shown": "No time in is printed on a bill, or it can't be read." }
-  },
-  "out_hour": {
-    "type": "choice",
-    "instructions": "If `image` is a bill, what hour is its time out (the second, later time printed)? Give the hour on a 24-hour clock: 2:15 AM is 02, 2:15 PM is 14, 12:30 AM is 00.",
-    "criteria": { "00": null, "01": null, "02": null, "03": null, "04": null, "05": null, "06": null, "07": null, "08": null, "09": null, "10": null, "11": null, "12": null, "13": null, "14": null, "15": null, "16": null, "17": null, "18": null, "19": null, "20": null, "21": null, "22": null, "23": null, "not_shown": "No second, later time is printed on a bill, or it can't be read." }
-  },
-  "out_minute": {
-    "type": "choice",
-    "instructions": "If `image` is a bill, what minute is its time out (the second, later time printed)?",
-    "criteria": { "00": null, "01": null, "02": null, "03": null, "04": null, "05": null, "06": null, "07": null, "08": null, "09": null, "10": null, "11": null, "12": null, "13": null, "14": null, "15": null, "16": null, "17": null, "18": null, "19": null, "20": null, "21": null, "22": null, "23": null, "24": null, "25": null, "26": null, "27": null, "28": null, "29": null, "30": null, "31": null, "32": null, "33": null, "34": null, "35": null, "36": null, "37": null, "38": null, "39": null, "40": null, "41": null, "42": null, "43": null, "44": null, "45": null, "46": null, "47": null, "48": null, "49": null, "50": null, "51": null, "52": null, "53": null, "54": null, "55": null, "56": null, "57": null, "58": null, "59": null, "not_shown": "No second, later time is printed on a bill, or it can't be read." }
+    "instructions": "Is the vehicle number printed on `bill` the same as `vehicle_number`? The bill may label it Vehicle No, Truck No or Lorry No. Compare only the letters and digits, ignoring spaces, hyphens, dots, line breaks and letter case. They are the same only if every letter and digit matches, in the same order.",
+    "criteria": {
+      "different": "The bill shows a vehicle number, and at least one of its letters or digits differs from `vehicle_number`, or is missing or extra.",
+      "same": "The bill shows a vehicle number with the same letters and digits as `vehicle_number`, in the same order.",
+      "not_shown": "No vehicle number is printed on the bill, or it can't be read well enough to compare."
+    }
   },
   "bill_day": {
     "type": "choice",
-    "instructions": "If `image` is a bill, what day of the month is the date printed on it?",
-    "criteria": { "01": null, "02": null, "03": null, "04": null, "05": null, "06": null, "07": null, "08": null, "09": null, "10": null, "11": null, "12": null, "13": null, "14": null, "15": null, "16": null, "17": null, "18": null, "19": null, "20": null, "21": null, "22": null, "23": null, "24": null, "25": null, "26": null, "27": null, "28": null, "29": null, "30": null, "31": null, "not_shown": "No date is printed on a bill, or it can't be read." }
+    "instructions": "If `bill` is a weighbridge bill, what day of the month is the date printed on it?",
+    "criteria": {
+      "01": null,
+      "02": null,
+      "03": null,
+      "04": null,
+      "05": null,
+      "06": null,
+      "07": null,
+      "08": null,
+      "09": null,
+      "10": null,
+      "11": null,
+      "12": null,
+      "13": null,
+      "14": null,
+      "15": null,
+      "16": null,
+      "17": null,
+      "18": null,
+      "19": null,
+      "20": null,
+      "21": null,
+      "22": null,
+      "23": null,
+      "24": null,
+      "25": null,
+      "26": null,
+      "27": null,
+      "28": null,
+      "29": null,
+      "30": null,
+      "31": null,
+      "not_shown": "No date is printed on the bill, or it can't be read."
+    }
   },
   "bill_month": {
     "type": "choice",
-    "instructions": "If `image` is a bill, what month (01 to 12) is the date printed on it?",
-    "criteria": { "01": null, "02": null, "03": null, "04": null, "05": null, "06": null, "07": null, "08": null, "09": null, "10": null, "11": null, "12": null, "not_shown": "No date is printed on a bill, or it can't be read." }
+    "instructions": "If `bill` is a weighbridge bill, what month (01 to 12) is the date printed on it?",
+    "criteria": {
+      "01": null,
+      "02": null,
+      "03": null,
+      "04": null,
+      "05": null,
+      "06": null,
+      "07": null,
+      "08": null,
+      "09": null,
+      "10": null,
+      "11": null,
+      "12": null,
+      "not_shown": "No date is printed on the bill, or it can't be read."
+    }
   }
 }

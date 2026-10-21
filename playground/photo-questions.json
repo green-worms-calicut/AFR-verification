@@ -1,31 +1,197 @@
 {
-  "kind": {
+  "orientation": {
     "type": "choice",
-    "instructions": "What is `image`?",
+    "instructions": "Which way is the printed text in `photo` turned?",
     "criteria": {
-      "bill": "A printed bill, receipt, invoice or weighment slip.",
-      "geotagged_photo": "A photo with a GPS stamp printed on it: a place name or address, latitude and longitude, and a date and time, as added by a GPS map camera app.",
-      "other": "Any other photo or document, including a photo with no GPS stamp."
+      "upright": "The text reads normally, left to right.",
+      "top_points_right": "The image is turned so the tops of the letters face the right edge.",
+      "top_points_left": "The image is turned so the tops of the letters face the left edge.",
+      "upside_down": "The text is upside down."
+    }
+  },
+  "shows_vehicle": {
+    "type": "noul",
+    "instructions": "Does `photo` show a motor vehicle, such as a truck, tipper, pickup or van?"
+  },
+  "gps_stamp": {
+    "type": "noul",
+    "instructions": "Is a GPS stamp printed on `photo`?",
+    "criteria": {
+      "true": "A block of text printed on the photo by a GPS map camera app, with a place name or address, latitude and longitude, and a date and time.",
+      "false": "No such block of text, or only a date and time with no place or coordinates."
+    }
+  },
+  "plate": {
+    "type": "choice",
+    "instructions": "How well can the registration number on the vehicle's number plate in `photo` be read?",
+    "criteria": {
+      "not_visible": "No number plate of the vehicle is in view.",
+      "partly_readable": "A number plate is in view, but some of its letters or digits are hidden, blurred, dirty, cut off or too small to read.",
+      "readable": "Every letter and digit on the number plate can be read."
+    }
+  },
+  "plate_number": {
+    "type": "choice",
+    "instructions": "Is the registration number on the vehicle's number plate in `photo` the same as `vehicle_number`? Compare only the letters and digits, ignoring spaces, hyphens, dots, line breaks and letter case. They are the same only if every letter and digit matches, in the same order.",
+    "criteria": {
+      "different": "At least one letter or digit on the plate differs from `vehicle_number`, or is missing or extra.",
+      "same": "The plate shows the same letters and digits as `vehicle_number`, in the same order.",
+      "cannot_tell": "No number plate is in view, or it can't be read well enough to compare."
     }
   },
   "stamp_hour": {
     "type": "choice",
-    "instructions": "If `image` is a photo with a GPS stamp printed on it, what hour is the time in the stamp? Give the hour on a 24-hour clock: 2:15 AM is 02, 2:15 PM is 14, 12:30 AM is 00.",
-    "criteria": { "00": null, "01": null, "02": null, "03": null, "04": null, "05": null, "06": null, "07": null, "08": null, "09": null, "10": null, "11": null, "12": null, "13": null, "14": null, "15": null, "16": null, "17": null, "18": null, "19": null, "20": null, "21": null, "22": null, "23": null, "not_shown": "There is no GPS stamp with a time, or its time can't be read." }
+    "instructions": "If a GPS stamp is printed on `photo`, what hour is the time in the stamp? Give the hour on a 24-hour clock: 2:15 AM is 02, 2:15 PM is 14, 12:30 AM is 00.",
+    "criteria": {
+      "00": null,
+      "01": null,
+      "02": null,
+      "03": null,
+      "04": null,
+      "05": null,
+      "06": null,
+      "07": null,
+      "08": null,
+      "09": null,
+      "10": null,
+      "11": null,
+      "12": null,
+      "13": null,
+      "14": null,
+      "15": null,
+      "16": null,
+      "17": null,
+      "18": null,
+      "19": null,
+      "20": null,
+      "21": null,
+      "22": null,
+      "23": null,
+      "not_shown": "There is no GPS stamp with a time, or its time can't be read."
+    }
   },
   "stamp_minute": {
     "type": "choice",
-    "instructions": "If `image` is a photo with a GPS stamp printed on it, what minute is the time in the stamp?",
-    "criteria": { "00": null, "01": null, "02": null, "03": null, "04": null, "05": null, "06": null, "07": null, "08": null, "09": null, "10": null, "11": null, "12": null, "13": null, "14": null, "15": null, "16": null, "17": null, "18": null, "19": null, "20": null, "21": null, "22": null, "23": null, "24": null, "25": null, "26": null, "27": null, "28": null, "29": null, "30": null, "31": null, "32": null, "33": null, "34": null, "35": null, "36": null, "37": null, "38": null, "39": null, "40": null, "41": null, "42": null, "43": null, "44": null, "45": null, "46": null, "47": null, "48": null, "49": null, "50": null, "51": null, "52": null, "53": null, "54": null, "55": null, "56": null, "57": null, "58": null, "59": null, "not_shown": "There is no GPS stamp with a time, or its time can't be read." }
+    "instructions": "If a GPS stamp is printed on `photo`, what minute is the time in the stamp?",
+    "criteria": {
+      "00": null,
+      "01": null,
+      "02": null,
+      "03": null,
+      "04": null,
+      "05": null,
+      "06": null,
+      "07": null,
+      "08": null,
+      "09": null,
+      "10": null,
+      "11": null,
+      "12": null,
+      "13": null,
+      "14": null,
+      "15": null,
+      "16": null,
+      "17": null,
+      "18": null,
+      "19": null,
+      "20": null,
+      "21": null,
+      "22": null,
+      "23": null,
+      "24": null,
+      "25": null,
+      "26": null,
+      "27": null,
+      "28": null,
+      "29": null,
+      "30": null,
+      "31": null,
+      "32": null,
+      "33": null,
+      "34": null,
+      "35": null,
+      "36": null,
+      "37": null,
+      "38": null,
+      "39": null,
+      "40": null,
+      "41": null,
+      "42": null,
+      "43": null,
+      "44": null,
+      "45": null,
+      "46": null,
+      "47": null,
+      "48": null,
+      "49": null,
+      "50": null,
+      "51": null,
+      "52": null,
+      "53": null,
+      "54": null,
+      "55": null,
+      "56": null,
+      "57": null,
+      "58": null,
+      "59": null,
+      "not_shown": "There is no GPS stamp with a time, or its time can't be read."
+    }
   },
   "stamp_day": {
     "type": "choice",
-    "instructions": "If `image` is a photo with a GPS stamp printed on it, what day of the month is the date in the stamp?",
-    "criteria": { "01": null, "02": null, "03": null, "04": null, "05": null, "06": null, "07": null, "08": null, "09": null, "10": null, "11": null, "12": null, "13": null, "14": null, "15": null, "16": null, "17": null, "18": null, "19": null, "20": null, "21": null, "22": null, "23": null, "24": null, "25": null, "26": null, "27": null, "28": null, "29": null, "30": null, "31": null, "not_shown": "There is no GPS stamp with a date, or its date can't be read." }
+    "instructions": "If a GPS stamp is printed on `photo`, what day of the month is the date in the stamp?",
+    "criteria": {
+      "01": null,
+      "02": null,
+      "03": null,
+      "04": null,
+      "05": null,
+      "06": null,
+      "07": null,
+      "08": null,
+      "09": null,
+      "10": null,
+      "11": null,
+      "12": null,
+      "13": null,
+      "14": null,
+      "15": null,
+      "16": null,
+      "17": null,
+      "18": null,
+      "19": null,
+      "20": null,
+      "21": null,
+      "22": null,
+      "23": null,
+      "24": null,
+      "25": null,
+      "26": null,
+      "27": null,
+      "28": null,
+      "29": null,
+      "30": null,
+      "31": null,
+      "not_shown": "There is no GPS stamp with a date, or its date can't be read."
+    }
   },
   "stamp_month": {
     "type": "choice",
-    "instructions": "If `image` is a photo with a GPS stamp printed on it, what month (01 to 12) is the date in the stamp?",
-    "criteria": { "01": null, "02": null, "03": null, "04": null, "05": null, "06": null, "07": null, "08": null, "09": null, "10": null, "11": null, "12": null, "not_shown": "There is no GPS stamp with a date, or its date can't be read." }
+    "instructions": "If a GPS stamp is printed on `photo`, what month (01 to 12) is the date in the stamp?",
+    "criteria": {
+      "01": null,
+      "02": null,
+      "03": null,
+      "04": null,
+      "05": null,
+      "06": null,
+      "07": null,
+      "08": null,
+      "09": null,
+      "10": null,
+      "11": null,
+      "12": null,
+      "not_shown": "There is no GPS stamp with a date, or its date can't be read."
+    }
   }
 }

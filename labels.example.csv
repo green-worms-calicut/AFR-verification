@@ -1,4 +1,6 @@
-file,kind,time_in,time_out,bill_date,photo_time,photo_date
-samples/bill.png,bill,03:09,08:57,15/10/2026,,
-samples/photo.png,geotagged_photo,,,,04:09,15/10/2026
-samples/analog-1042.jpg,other,,,,,
+file,slot,vehicle_number,shows_vehicle,gps_stamp,plate,plate_number,weigh_bill,bill_number,bill_date,photo_time,photo_date
+samples/photo.png,photo,KL05AF9341,yes,yes,readable,same,,,,04:09,15/10/2026
+samples/photo.png,photo,KL05AF9314,,,,different,,,,,
+samples/bill.png,bill,KL05AF9341,,,,,yes,same,15/10/2026,,
+samples/bill.png,bill,KL05AF9314,,,,,,different,,,
+samples/analog-1042.jpg,photo,KL05AF9341,no,no,not_visible,cannot_tell,,,,not_shown,not_shown
