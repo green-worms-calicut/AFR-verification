@@ -721,5 +721,22 @@
       "gross": "The gross (loaded) weight: the bill shows it with the Time In, or labels it the first weight.",
       "not_shown": "The bill has no Time In, or doesn't show which weight was taken first."
     }
+  },
+  "weighbridge_seal": {
+    "type": "noul",
+    "instructions": "Apart from any stamp of `our_company`, is an ink stamp of the weighbridge pressed on `bill`?",
+    "criteria": {
+      "true": "A rubber stamp impression in ink, usually with the weighbridge's or its owner's name, even if faint, tilted, upside down or partly over the printed text or a signature.",
+      "false": "No ink stamp other than one of `our_company`. A printed logo or heading, a signature or handwriting on its own doesn't count."
+    }
+  },
+  "weighbridge_name": {
+    "type": "choice",
+    "instructions": "If `bill` has an ink stamp of the weighbridge, apart from any stamp of `our_company`, does the name in that stamp match the weighbridge's name printed in the slip's heading?",
+    "criteria": {
+      "different": "The stamp shows a business name that is not the one printed in the heading.",
+      "same": "The stamp shows the same name as the heading, even if shortened or only partly legible.",
+      "not_shown": "There is no weighbridge stamp, or the name in it can't be made out."
+    }
   }
 }

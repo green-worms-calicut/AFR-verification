@@ -71,6 +71,8 @@ main { max-width: 76rem; margin: 0 auto; padding-block: 0 3rem; display: grid; g
 .time-input:focus { border-color: var(--slip); outline: none; }
 .time-input.bad { border-color: var(--no); }
 .quantity { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.7rem; }
+.switch { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.8rem; font-weight: 600; cursor: pointer; }
+.switch input { width: 1.1rem; height: 1.1rem; margin: 0; accent-color: var(--slip); }
 .hint { font-size: 0.88rem; color: var(--muted); }
 .hint.bad { color: var(--no); }
 
@@ -221,6 +223,8 @@ td.mono { white-space: nowrap; }
       <p id="vehicle-hint" class="hint">The number the trip was planned with. Spaces and hyphens don't matter.</p>
       <label class="quantity"><span class="label">Quantity (kg)</span><input id="quantity" class="time-input" type="text" inputmode="decimal" placeholder="480" autocomplete="off"></label>
       <p id="quantity-hint" class="hint">The disposal quantity. The final slip's net weight must be the same.</p>
+      <label class="switch"><input id="verra" type="checkbox">Verra project</label>
+      <p class="hint">Tick for a Verra project trip: the final slip must carry the weighbridge's own stamp.</p>
       <p id="typed-from" class="note" hidden></p>
     </section>
 
@@ -228,7 +232,7 @@ td.mono { white-space: nowrap; }
       <h2>Timing limits <span class="muted" style="font-weight:400">(minutes)</span></h2>
       <div class="limits">
         <label><span class="label">Tare first: tare to gross, at least</span><input id="min_gap_tare_first" class="time-input" type="text" inputmode="numeric" value="60" autocomplete="off"></label>
-        <label><span class="label">Gross first: gross to tare, at least</span><input id="min_gap_gross_first" class="time-input" type="text" inputmode="numeric" value="30" autocomplete="off"></label>
+        <label><span class="label">Gross first: gross to tare, at least</span><input id="min_gap_gross_first" class="time-input" type="text" inputmode="numeric" value="10" autocomplete="off"></label>
         <label><span class="label">Clock slack</span><input id="clock_slack" class="time-input" type="text" inputmode="numeric" value="5" autocomplete="off"></label>
       </div>
       <p id="limits-hint" class="hint"></p>
@@ -361,6 +365,7 @@ async function pickTrip(id) {
   for (const id of LIMITS) $(id).value = trip.typed[id] ?? $(id).defaultValue;
   if (trip.typed.plant) $("plant").value = [].concat(trip.typed.plant).join(", ");
   if (trip.typed.plant_radius) $("plant_radius").value = trip.typed.plant_radius;
+  $("verra").checked = [true, "true", "yes", 1, "1"].includes(trip.typed.verra);
   state.tripId = trip.id;
   state.typedFrom = trip.typed_from;
   changed();
@@ -411,6 +416,7 @@ async function check() {
         ...Object.fromEntries(LIMITS.map((id) => [id, $(id).value.trim() || null])),
         plant: plant() || null,
         plant_radius: $("plant_radius").value.trim() || null,
+        verra: $("verra").checked,
         model: $("model").value,
         trip_id: state.tripId,
         images: Object.fromEntries(ROLES.map((role) => [role, state.files[role]])),
@@ -472,7 +478,7 @@ function verdictHTML(r) {
     <div class="verdict-head"><b>${esc(title)}</b><span class="mono">${esc(r.vehicle_number)}${r.trip_id ? " · trip " + esc(r.trip_id.split("/").pop()) : ""}</span></div>
     <div class="groups">${groups}</div>
     ${timelineHTML(v.timeline)}
-    <p class="note">Limits: tare first, tare to gross at least ${l.min_gap_tare_first} min; gross first, gross to tare at least ${l.min_gap_gross_first} min; clock slack ${l.clock_slack} min. Quantity: ${r.quantity ? esc(r.quantity) + " kg" : "not typed"}. Plant: ${r.plant ? esc(r.plant.join(", ")) + ", unloading within " + l.plant_radius + " m" : "not given, so where unloading happened isn't checked"}.</p>
+    <p class="note">Limits: tare first, tare to gross at least ${l.min_gap_tare_first} min; gross first, gross to tare at least ${l.min_gap_gross_first} min; clock slack ${l.clock_slack} min. Quantity: ${r.quantity ? esc(r.quantity) + " kg" : "not typed"}. Plant: ${r.plant ? esc(r.plant.join(", ")) + ", unloading within " + l.plant_radius + " m" : "not given, so where unloading happened isn't checked"}. ${r.verra ? "Verra project: the weighbridge's stamp is checked." : "Not a Verra project, so the weighbridge's stamp isn't checked."}</p>
     ${reviewHTML(r)}</section>`;
 }
 
@@ -580,6 +586,7 @@ function drawViewer() {
     <span class="label">Read by Jev</span>${readings}
     <span class="label">Typed in</span><p>Vehicle <b class="mono">${esc(r.vehicle_number)}</b></p><p>Quantity <b class="mono">${esc(r.quantity ? r.quantity + " kg" : "not typed")}</b></p>
     <p>Plant <b class="mono">${esc(r.plant ? r.plant.join(", ") : "not given")}</b></p>
+    <p>Verra project <b>${r.verra ? "yes" : "no"}</b></p>
     ${FLAGGED.has(v.status) && !state.decision ? decideButtons() : ""}`;
 }
 
@@ -634,6 +641,7 @@ function render() {
         <li>tare was weighed first, at least the set time before gross;</li>
         <li>every loading photo is between the tare and gross weighings, and every unloading photo after gross;</li>
         <li>with the plant's location, an unloading photo's GPS stamp is near the plant;</li>
+        <li>for a Verra project trip, the final slip carries the weighbridge's own stamp;</li>
         <li>no image was already used in another trip under trips/.</li>
       </ul>
       <p class="muted">Nothing is rejected automatically. A problem or an unsure answer flags the trip, and you accept or reject it.</p>
@@ -664,6 +672,7 @@ for (const id of ["plant", "plant_radius"]) {
   $(id).addEventListener("input", () => { try { localStorage.setItem(id, $(id).value); } catch { /* not remembered */ } changed(); });
 }
 $("model").addEventListener("change", changed);
+$("verra").addEventListener("change", changed);
 $("check").addEventListener("click", check);
 $("clear").addEventListener("click", () => {
   for (const role of ROLES) state.files[role] = [];

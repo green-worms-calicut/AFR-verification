@@ -115,7 +115,8 @@ PHOTO = {
 LOADING = {**PHOTO, **stamp("02:40")}
 UNLOADING = PHOTO
 BILL_CHECKS = {"orientation": ("upright", 0.95), "weigh_bill": 0.96, "bill_number": ("same", 0.9)}
-FINAL = {**BILL_CHECKS, "slip_kind": ("both_weights", 0.92), "net_weight": ("same", 0.9),
+STAMPED = {"weighbridge_seal": 0.9, "weighbridge_name": ("same", 0.9)}  # the weighbridge's stamp clearly on the slip
+FINAL = {**BILL_CHECKS, **STAMPED, "slip_kind": ("both_weights", 0.92), "net_weight": ("same", 0.9),
          "gross_vs_tare": ("gross_heavier", 0.9), **at("tare", "02:00"), **at("gross", "03:30"),
          **not_printed("in", "out"), "first_weight": ("not_shown", 0.9)}
 FIRST = {**BILL_CHECKS, "slip_kind": ("one_weight", 0.9), "net_weight": ("different", 0.9),
@@ -233,10 +234,11 @@ def make_trip(loading=(LOADING, LOADING), unloading=(UNLOADING, UNLOADING), bill
     return uploads, FakeJev(by_colour=by_colour)
 
 
-def run_trip(quantity=QUANTITY, limits=Limits(), index=None, trip_id=None, cache=None, plant=None, **kw):
+def run_trip(quantity=QUANTITY, limits=Limits(), index=None, trip_id=None, cache=None, plant=None, verra=False, **kw):
     uploads, jev = make_trip(**kw)
     with jev.client() as client:
-        trip, _ = check_proof.analyze_trip(client, uploads, NUMBER, "jev-latest", quantity, limits, index, trip_id, cache, plant)
+        trip, _ = check_proof.analyze_trip(client, uploads, NUMBER, "jev-latest", quantity, limits, index, trip_id, cache, plant,
+                                           verra)
     return trip, jev
 
 
@@ -296,8 +298,16 @@ class TypedValueTests(unittest.TestCase):
             with self.subTest(typed=typed), self.assertRaises(ValueError):
                 check_proof.parse_quantity(typed)
 
+    def test_parse_switch(self):
+        for value, on in [(True, True), ("yes", True), (1, True), ("true", True), (False, False), (None, False), ("", False),
+                          ("no", False)]:
+            with self.subTest(value=value):
+                self.assertEqual(check_proof.parse_switch(value, "verra"), on)
+        with self.assertRaises(ValueError):
+            check_proof.parse_switch("maybe", "verra")
+
     def test_parse_limits_keeps_defaults_for_blanks(self):
-        self.assertEqual(check_proof.parse_limits({}), Limits(60, 30, 5, 500))
+        self.assertEqual(check_proof.parse_limits({}), Limits(60, 10, 5, 500))
         self.assertEqual(check_proof.parse_limits({"plant_radius": "250"}).plant_radius, 250)
         self.assertEqual(check_proof.parse_limits({"min_gap_tare_first": " 90 ", "clock_slack": "0"}), Limits(90, clock_slack=0))
         for bad in ("five", "-5", "1.5", "99999"):
@@ -462,7 +472,7 @@ class TripTests(unittest.TestCase):
         self.assertEqual(v["status"], "pass", v["flags"])
         c = by_key(v["checks"])
         self.assertEqual(c["weigh_order"]["detail"], "Gross first (03:30), then tare (04:15), from the times printed with each weight")
-        self.assertEqual((c["weigh_gap"]["label"], c["weigh_gap"]["detail"]), ("Gross to tare", "45 min apart (at least 30 min)"))
+        self.assertEqual((c["weigh_gap"]["label"], c["weigh_gap"]["detail"]), ("Gross to tare", "45 min apart (at least 10 min)"))
         self.assertEqual((c["loading_timing"]["label"], c["loading_timing"]["detail"]), ("Before gross", "Loading 02:40 is before gross 03:30"))
         self.assertEqual((c["unloading_timing"]["label"], c["unloading_timing"]["detail"]),
                          ("Between gross and tare", "Unloading 04:09 is between gross 03:30 and tare 04:15"))
@@ -470,11 +480,11 @@ class TripTests(unittest.TestCase):
         self.assertEqual([t[5:16] for t in v["window"]], ["10-15T03:30", "10-15T04:15"])
 
     def test_gross_first_weighings_too_close_are_a_problem(self):
-        v = run_trip(bill=({**FINAL, **at("gross", "03:50"), **at("tare", "04:10")},))[0]["verdict"]
+        v = run_trip(bill=({**FINAL, **at("gross", "04:05"), **at("tare", "04:12")},))[0]["verdict"]
         self.assertEqual(v["status"], "problem")
-        self.assertEqual(by_key(v["checks"])["weigh_gap"]["detail"], "Only 20 min apart (at least 30 min needed)")
+        self.assertEqual(by_key(v["checks"])["weigh_gap"]["detail"], "Only 7 min apart (at least 10 min needed)")
         self.assertTrue(all(e["bad"] for e in v["timeline"] if e["what"] in ("Tare", "Gross")))
-        v = run_trip(bill=({**FINAL, **at("gross", "03:50"), **at("tare", "04:10")},), limits=Limits(min_gap_gross_first=15))[0]["verdict"]
+        v = run_trip(bill=({**FINAL, **at("gross", "04:05"), **at("tare", "04:12")},), limits=Limits(min_gap_gross_first=5))[0]["verdict"]
         self.assertEqual(v["status"], "pass", v["flags"])
 
     def test_gross_first_photos_out_of_place_are_a_problem(self):
@@ -539,6 +549,41 @@ class TripTests(unittest.TestCase):
         self.assertNotIn("unloading_plant", by_key(trip["verdict"]["checks"]))
         self.assertFalse(any(b"lat_degrees" in sent(r) for r in jev.requests))
         self.assertNotIn("position", {x["key"] for x in trip["images"]["unloading"][0]["readings"]})
+
+    def test_not_a_verra_project_trip_the_stamp_is_not_asked(self):
+        trip, jev = run_trip()
+        self.assertFalse(any(b"weighbridge_seal" in sent(r) or b"our_company" in sent(r) for r in jev.requests))
+        self.assertNotIn("weighbridge_seal", by_key(trip["verdict"]["checks"]))
+
+    def test_weighbridge_stamp_on_the_final_slip_of_a_verra_project_trip(self):
+        trip, jev = run_trip(verra=True)
+        v = trip["verdict"]
+        self.assertEqual(v["status"], "pass", v["flags"])
+        c = by_key(v["checks"])
+        self.assertEqual(c["weighbridge_seal"]["detail"], "weighbill2.jpg: The weighbridge's own stamp is on it")
+        bills = [sent(r) for r in jev.requests if b"weigh_bill" in sent(r)]
+        self.assertTrue(bills and all(b"weighbridge_seal" in b and check_proof.OUR_COMPANY.encode() in b for b in bills))
+        self.assertFalse(any(b"weighbridge_seal" in sent(r) for r in jev.requests if b"weigh_bill" not in sent(r)))
+        # The first slip isn't checked for stamps, so its unsure stamp answers don't count.
+        self.assertNotIn("weighbridge_seal", by_key(trip["images"]["bill"][0]["checks"]))
+
+    def test_a_missing_or_wrong_stamp_is_a_problem_and_an_unsure_one_asks_a_person(self):
+        for picks, status in (({"weighbridge_seal": 0.05, "weighbridge_name": ("not_shown", 0.8)}, "fail"),
+                              ({"weighbridge_name": ("different", 0.85)}, "fail"),
+                              ({"weighbridge_seal": 0.55}, "review")):
+            with self.subTest(picks=picks):
+                v = run_trip(bill=(FIRST, {**FINAL, **picks}), verra=True)[0]["verdict"]
+                self.assertEqual(by_key(v["checks"])["weighbridge_seal"]["status"], status)
+                self.assertEqual(v["status"], "problem" if status == "fail" else "review")
+        v = run_trip(bill=(FIRST,), verra=True)[0]["verdict"]
+        self.assertEqual(by_key(v["checks"])["weighbridge_seal"]["status"], "review")
+
+    def test_a_weighbridge_stamp_surely_there_passes_though_its_name_is_unsure(self):
+        # As on 22 Oct 2026: a faint, upside-down stamp, surely there (0.88), its name unsure (0.46).
+        bill = {**FINAL, "weighbridge_seal": 0.88, "weighbridge_name": ("same", 0.46)}
+        c = by_key(run_trip(bill=(FIRST, bill), verra=True)[0]["verdict"]["checks"])["weighbridge_seal"]
+        self.assertEqual((c["status"], c["detail"]),
+                         ("pass", "weighbill2.jpg: The weighbridge's own stamp is on it, its name not surely compared"))
 
     def test_unloading_at_the_plant_given(self):
         trip, jev = run_trip(unloading=({**UNLOADING, **AT_PLANT}, {**UNLOADING, **AT_PLANT}), plant=PLANT)
@@ -779,6 +824,12 @@ class SavedAnswerTests(unittest.TestCase):
         keys = {check_proof.answer_key(prints, "bill", NUMBER, q, "jev-latest") for q in ("2570", "840")}
         self.assertEqual(len(keys), 2)
 
+    def test_answers_saved_for_another_company_name_are_not_reused(self):
+        before, plain = check_proof.question_version("bill", seal=True), check_proof.question_version("bill")
+        with mock.patch.object(check_proof, "OUR_COMPANY", "Another Company"):
+            self.assertNotEqual(check_proof.question_version("bill", seal=True), before)
+            self.assertEqual(check_proof.question_version("bill"), plain)
+
     def test_reading_the_position_is_saved_apart_and_serves_any_plant(self):
         cache = {}
         unloading = ({**UNLOADING, **AT_PLANT}, {**UNLOADING, **AT_PLANT})
@@ -826,6 +877,16 @@ class QuestionTests(unittest.TestCase):
         self.assertEqual(set(check_proof.questions_for("photo", None)) | set(check_proof.PLACE),
                          set(check_proof.questions_for("photo", None, place=True)))
         self.assertNotEqual(check_proof.question_version("photo"), check_proof.question_version("photo", place=True))
+
+    def test_seal_questions_only_for_a_verra_project_trip(self):
+        self.assertEqual(set(check_proof.questions_for("bill", QUANTITY)) | set(check_proof.SEAL),
+                         set(check_proof.questions_for("bill", QUANTITY, seal=True)))
+        self.assertFalse(set(check_proof.SEAL) & set(check_proof.questions_for("bill", QUANTITY)))
+        self.assertNotEqual(check_proof.question_version("bill"), check_proof.question_version("bill", seal=True))
+        question = check_proof.QUESTIONS["bill"]["weighbridge_name"]
+        self.assertNotEqual(next(iter(question.criteria)), "same")
+        for qid in check_proof.SEAL:
+            self.assertIn("`our_company`", check_proof.QUESTIONS["bill"][qid].instructions)
 
     def test_question_version_changes_with_the_questions(self):
         before = check_proof.question_version("photo")
@@ -1002,7 +1063,7 @@ class AppTests(unittest.TestCase):
             self.assertIn(b"Proof Check Bench", response.read())
         status, body = self.get("/api/status")
         self.assertTrue(body["key_set"])
-        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "min_gap_gross_first": 30, "clock_slack": 5, "plant_radius": 500})
+        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "min_gap_gross_first": 10, "clock_slack": 5, "plant_radius": 500})
 
     def test_lists_and_loads_trip_folders(self):
         status, trips = self.get("/api/trips")
@@ -1022,7 +1083,7 @@ class AppTests(unittest.TestCase):
                                              "bill": [self.image(COLOURS[7])]}})
         self.assertEqual(status, 200, body)
         self.assertEqual((body["vehicle_number"], body["quantity"]), (NUMBER, QUANTITY))
-        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "min_gap_gross_first": 30, "clock_slack": 10, "plant_radius": 500})
+        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "min_gap_gross_first": 10, "clock_slack": 10, "plant_radius": 500})
         self.assertIsNone(body["plant"])
         self.assertNotIn("unloading_plant", by_key(body["verdict"]["checks"]))
         self.assertEqual(body["verdict"]["title"], "Accepted", body["verdict"]["flags"])
@@ -1059,6 +1120,15 @@ class AppTests(unittest.TestCase):
         self.assertEqual((body["plant"], body["limits"]["plant_radius"]), ([11.4404, 75.942], 300))
         c = by_key(body["verdict"]["checks"])["unloading_plant"]
         self.assertEqual((c["status"], c["detail"]), ("fail", "x.jpg is stamped at 11.1649, 76.1549, 38 km from the plant (within 300 m allowed)"))
+
+    def test_checks_the_weighbridge_stamp(self):
+        self.jev.by_colour = {COLOURS[9]: [{**FINAL, "weighbridge_seal": 0.04}]}
+        status, body = self.post({"vehicle_number": NUMBER, "quantity": QUANTITY, "model": "jev-latest", "verra": True,
+                                  "images": {"bill": [self.image(COLOURS[9])]}})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["verra"])
+        c = by_key(body["verdict"]["checks"])
+        self.assertEqual((c["weighbridge_seal"]["status"], c["weighbridge_seal"]["detail"]), ("fail", "x.jpg: No weighbridge stamp"))
 
     def test_rejects_a_plant_that_is_not_a_position(self):
         status, body = self.post({"vehicle_number": NUMBER, "plant": "Raroth", "model": "jev-latest",

@@ -2,10 +2,11 @@
 
 A trip folder holds collection*/loading* photos, unloading* photos and weighbill* images, as in the
 inward log export. What was typed for the trip comes from trip.json in its folder:
-    {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10, "plant": "11.4404, 75.9420"}
+    {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10, "plant": "11.4404, 75.9420", "verra": true}
 Without one, the hand-read vehicle number and final-slip net weight from truth.jsonl (in the folder
 given or a parent) stand in for it, so the run checks Jev against the images themselves. The plant's
-location comes from --plant for every trip, unless a trip.json gives its own.
+location comes from --plant for every trip, unless a trip.json gives its own. "verra": true marks a Verra
+project trip, whose final slip must carry the weighbridge's stamp.
 
 Usage:
     .venv/bin/python run_trips.py trips/inward-2026-10-19              # asks Jev, saves answers in eval/
@@ -166,12 +167,13 @@ def main() -> None:
         try:
             limits = check_proof.parse_limits(typed)
             trip_plant = check_proof.parse_plant(typed["plant"]) if typed.get("plant") else plant
+            verra = check_proof.parse_switch(typed.get("verra"), "verra")
             trip, _ = check_proof.analyze_trip(client, check_proof.read_trip_folder(folder), number, args.model,
-                                               quantity, limits, index, trip_id, saved, trip_plant)
+                                               quantity, limits, index, trip_id, saved, trip_plant, verra)
         except Exception as error:
             skipped[folder.name] = f"{type(error).__name__}: {error}"
             return
-        results[folder.name] = {**trip, "vehicle_number": number, "quantity": quantity, "plant": trip_plant,
+        results[folder.name] = {**trip, "vehicle_number": number, "quantity": quantity, "plant": trip_plant, "verra": verra,
                                 "typed_from": source}
         with lock:
             cache_path.parent.mkdir(exist_ok=True)

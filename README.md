@@ -1,6 +1,6 @@
 # Jev proof check
 
-Checks the proof sent in for a waste-collection trip, using [TypeSafe's Jev model](https://docs.typesafe.ai). You type the trip's vehicle number and quantity in kilograms (and, optionally, the plant's location), add its **loading photos**, **unloading photos** and **weigh bills**, and it checks them against each other and against what you typed.
+Checks the proof sent in for a waste-collection trip, using [TypeSafe's Jev model](https://docs.typesafe.ai). You type the trip's vehicle number and quantity in kilograms (and, optionally, the plant's location and whether it's a Verra project trip), add its **loading photos**, **unloading photos** and **weigh bills**, and it checks them against each other and against what you typed.
 
 A trip runs one of two ways, worked out from which weighing came first on the final slip:
 - **Tare first: tare → loading → gross → unloading.** The empty vehicle is weighed (tare), loaded and photographed, weighed loaded (gross), and photographed again where it unloads.
@@ -20,13 +20,16 @@ A trip runs one of two ways, worked out from which weighing came first on the fi
 
 **Times**, from the final slip and the photos' GPS stamps
 - Tare first: were the weighings at least 60 minutes apart, every loading photo taken between them, and every unloading photo after the gross weighing?
-- Gross first: were the weighings at least 30 minutes apart, every loading photo taken before the gross weighing, and every unloading photo between the gross and tare weighings?
+- Gross first: were the weighings at least 10 minutes apart, every loading photo taken before the gross weighing, and every unloading photo between the gross and tare weighings?
 - Was every unloading photo taken on the same day as the gross weighing?
 
-A photo's clock may be off the weighbridge's by up to 5 minutes (the clock slack). The 60, 30 and 5 are defaults: you can change them for each run.
+A photo's clock may be off the weighbridge's by up to 5 minutes (the clock slack). The 60, 10 and 5 are defaults: you can change them for each run.
 
 **Place**, when you give the plant's location
 - Was the trip unloaded at the plant? At least one unloading photo's GPS stamp must place it within 500 m of the plant, and a photo stamped farther away is a problem. Positions are read to four decimals, so the distance is known to about 10 m. The plant's latitude and longitude are an input (`--plant "11.4404, 75.9420"`, a field on the page, or `"plant"` in `trip.json`), never written into the code, and the 500 m is a default you can change.
+
+**Stamp**, for a Verra project trip
+- Does the final slip carry the weighbridge's own ink stamp? No stamp is a problem, and so is a stamp clearly naming a different weighbridge from the slip's heading. Our company's own stamp, often on the slip too, doesn't count. Only Verra project trips are checked: tick **Verra project** on the page, give `--verra`, or put `"verra": true` in `trip.json`.
 
 **Across trips**
 - Was any image already used in another trip? The same file, or a look-alike copy.
@@ -70,7 +73,7 @@ Jev can't read a number out, so a position is read in steps. The degrees and fir
 
 Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`); code measures how far the plant is from the nearest point of that square, and more than `plant_radius` (500 m) is a problem. A trip passes only on a position picked surely to four decimals. When the pick is unsure, the two-decimal reading (a square about 1.1 km across) can still show a photo is away, read surely or by adding up Jev's probabilities over the likeliest readings (`chance_away`: 11.16 or 11.11 are both far from 11.44), but it can't show one is within 500 m, so that photo goes to a person. The plant's location is never sent to Jev, so the same answers serve any plant, and changing the plant or the distance needs no new request. Only the printed stamp is read: phone apps strip the GPS data from the file (4 of the day's 260 images kept it).
 
-**Each weigh bill:** 23 questions
+**Each weigh bill:** 23 questions, or 25 for a Verra project trip
 
 | Question | Type | Answers |
 |-|-|-|
@@ -85,12 +88,16 @@ Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`)
 | `in_hour` … `in_month` | choice | Time In and Date In (the first weighment), or `not_shown` |
 | `out_hour` … `out_month` | choice | Time Out and Date Out (the second weighment), or `not_shown` |
 | `first_weight` | choice | Which weight was taken at Time In: `tare`, `gross`, `not_shown` |
+| `weighbridge_seal` | yes/no | Is an ink stamp of the weighbridge on it, apart from our company's (`our_company`)? Only for a Verra project trip. |
+| `weighbridge_name` | choice | Does that stamp's name match the slip's heading: `different`, `same`, `not_shown`. Only for a Verra project trip. |
 
 A time like `03:09` is two questions: which hour and which minute. Code puts the parts together and does all the comparing. Jev is unreliable at comparing dates and times itself.
 
 Bills come in two layouts. Some print a date and time with each weight (the G W weighbridge); others print only a Time In and Time Out. Both sets of questions are asked at once, and `check_proof.weighings` uses whichever the final slip has. With Time In and Time Out, `first_weight` says which weight was taken first. If both layouts can be read, the surer one is used. Only the day and month are read, so a trip that runs past midnight or across New Year still works. Some weighbridges (Lakshmi, Bhavani and others) print neither layout clearly, and their trips go to a person for now.
 
-Jev can lean towards the first option of a choice, so `same` is never listed first in the number and net weight questions.
+Jev can lean towards the first option of a choice, so `same` is never listed first in the number, net weight and stamp questions.
+
+Jev can't read a stamp's words out either, so it compares the weighbridge's stamp with the name printed in the slip's own heading. Our company's name (`check_proof.OUR_COMPANY`, set once in the code) goes into the bill's request as `our_company`, so our own stamp isn't taken for the weighbridge's. The stamp questions are only asked for a Verra project trip, so other trips cost the same as before and their saved answers stay valid. Whether the stamp is there and whose name it shows are asked apart: Jev is surer that a stamp is there than of its name, so an unsure name doesn't send the trip to a person, but a name surely another weighbridge's is a problem.
 
 If Jev finds an image isn't upright with at least 0.5 confidence (`ROTATE`), it is rotated and asked again. That cut-off is lower than the others because a wrong turn costs little: one more request, and unsure answers that go to a person anyway. Before sending, each image has its camera rotation flag applied and is scaled so its longest side is 1568 px, the largest Jev accepts.
 
@@ -106,9 +113,10 @@ All of this is in code (`check_proof.trip_checks`, `decide`, `verdict`), not in 
 | Bills match | every slip `same` | any slip unclear | any slip `different` |
 | Net weight (final slip) | `same` | `not_shown`, or no quantity typed | `different` |
 | Gross heavier than tare (final slip) | `gross_heavier` | `not_shown` | `tare_heavier` |
+| Weighbridge stamp (final slip, Verra project only) | yes ≥ 0.8, and its name not surely `different` | unsure, or no final slip | yes ≤ 0.2, or its name surely `different` |
 | Weighing order | tare first or gross first, clearly | a time unreadable or unsure, or both the same | – |
 | Tare to gross (tare first) | at least 60 min apart | a time unsure | less |
-| Gross to tare (gross first) | at least 30 min apart | a time unsure | less |
+| Gross to tare (gross first) | at least 10 min apart | a time unsure | less |
 | Loading photos | every one between tare and gross (tare first) or before gross (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
 | Unloading photos | every one after gross (tare first) or between gross and tare (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
 | Same day as gross | every unloading photo dated the gross weighing's day | a stamp date unreadable or unsure | any on another day |
@@ -120,7 +128,7 @@ Any choice answer, or time or date reading, below 80% confidence also goes to a 
 
 The trip is **Flagged: problem found** if any check finds a problem, **Flagged: please check** if any check is unsure, and **Accepted** only when every check passes. Problems are listed first, and a timeline shows the weighings and photos in time order, with any out of place in red.
 
-The limits are `check_proof.Limits`: `min_gap_tare_first` (60), `min_gap_gross_first` (30) and `clock_slack` (5), in minutes, and `plant_radius` (500), in metres. Each run can change them, on the page, the command line, or a trip's `trip.json`.
+The limits are `check_proof.Limits`: `min_gap_tare_first` (60), `min_gap_gross_first` (10) and `clock_slack` (5), in minutes, and `plant_radius` (500), in metres. Each run can change them, on the page, the command line, or a trip's `trip.json`.
 
 The 0.8 and 0.2 thresholds (`CONFIDENT`, `YES`, `NO` in `check_proof.py`), and the 0.5 rotation cut-off (`ROTATE`), are placeholders. Choose real ones with `run_trips.py` and `evaluate.py` (below).
 
@@ -168,7 +176,7 @@ trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773/
   unloading1.jpg   unloading2.jpg      unloading photos
   weighbill1.jpg   weighbill2.jpg      weigh bills (also bill*.jpg; .heic files that are really JPEGs work too)
   trip.json                            optional: {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10,
-                                                  "plant": "11.4404, 75.9420", "plant_radius": 500}
+                                                  "plant": "11.4404, 75.9420", "plant_radius": 500, "verra": true}
 ```
 
 `trip.json` holds what was typed for the trip. Without it, the hand-read vehicle number and net weight from a `truth.jsonl` in a parent folder stand in. `trips/` holds real records (phone numbers, driver names), so it isn't in git.
@@ -182,7 +190,7 @@ trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773/
 Open the address it prints. It's `http://127.0.0.1:8765` unless that port is taken, in which case the app uses the next free one; choose a port with `--port`.
 
 On the page:
-1. Pick a trip from **Load a trip from trips/**, or type the vehicle number and quantity yourself.
+1. Pick a trip from **Load a trip from trips/**, or type the vehicle number and quantity yourself. Tick **Verra project** for a Verra project trip, to check the weighbridge's stamp.
 2. Change the timing limits if you need to: they start at 60 and 5 minutes. Type the plant's location (copied from Google Maps, such as `11.4404, 75.9420`) to check where unloading happened; the page remembers it.
 3. Add images to **Loading photos**, **Unloading photos** and **Weigh bills**: click **+ Add** or drop files on a box. **×** removes one.
 4. Click **Check**.
@@ -200,8 +208,9 @@ Changing the number, the quantity, a limit or an image clears the result, so a v
 ```bash
 .venv/bin/python check_proof.py KL57AB8815 --trip trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773 --quantity 1630
 .venv/bin/python check_proof.py KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg --bill slip1.jpg slip2.jpg \
-    --quantity 1630 --min-gap-tare-first 45 --min-gap-gross-first 20 --clock-slack 10 --others trips/   # this run's own limits, and flag reused images
+    --quantity 1630 --min-gap-tare-first 45 --min-gap-gross-first 15 --clock-slack 10 --others trips/   # this run's own limits, and flag reused images
 .venv/bin/python check_proof.py KL57AB8815 --trip … --plant "11.4404, 75.9420" --plant-radius 300   # unloaded at the plant?
+.venv/bin/python check_proof.py KL57AB8815 --trip … --verra   # a Verra project trip: weighbridge stamp checked
 .venv/bin/python check_proof.py KL57AB8815 --trip … --model jev-preview   # try Jev 1.14
 ```
 
@@ -236,7 +245,7 @@ The report shows accuracy per field, accuracy at each confidence level per group
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions), reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
+The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
 
 ## Real trips
 
@@ -258,7 +267,8 @@ What Jev did on that day (`run_trips.py`, `jev-latest`, about $0.10 for the 42 t
 - **Where unloading happened** (`--plant "11.4404, 75.9420"`, 22 Oct 2026, about $0.08 for the 88 unloading photos, three requests each): the hand-read stamps put 6 trips' unloading photos away from the plant, 2.9 to 41 km off (171493, 171513, 171518, 171595, 171673, 171699); every other unloading photo was within 51 m. The check flagged all 6 as a problem, five with the distance to the metre (such as "stamped at 11.4201, 75.9250, 2.9 km from the plant"), including 171513, which had been accepted. It passed 35 of the 36 trips at the plant and sent 1 to a person (neither photo picked surely); none was flagged as a problem. Jev picked 82 of 88 positions to four decimals and was sure of 77, all right.
 - **How the four decimals were found:** asked for the third and fourth digits as single Choices, Jev got the longitude's third digit right 47 times in 88 (often giving the second digit again), 67 when told the digits before it, and no better on the Lat/Long line cut out with a Box question. Picking the whole value from 100 candidates on the cut-out line was right 173 times in 176. When the two-decimal reading was torn (11.44 or 11.40, mostly), candidates for both starts are offered; before that, two photos at the plant were flagged from a misread 11.40.
 - **Dates:** every unloading photo must be dated the same day as the gross weighing (by the calendar date, so a trip weighed just before midnight and unloaded just after is flagged too). On 19 Oct every unloading photo was.
-- **Gross first** (22 Oct 2026, re-checked from saved answers with `--plant`, gross to tare at least 30 min): 171522 and 171562 are no longer flagged for being weighed gross first, but their weighings are under 30 minutes apart: 25 and 16 minutes, hand-read. Jev read both slips' times below 0.8 confidence (171522's tare as 08:50; hand-read 09:02), so both go to a person rather than being flagged as a problem; read surely, both would be flagged. 171562 is still a problem for its reused images. 171595 (gross 11:41, tare 11:42 as read) is a problem: 1 minute apart, unloading at 12:28 after the tare, and 41 km from the plant. The verdict counts didn't change: 10 accepted, 14 problems, 18 to check.
+- **Weighbridge stamp** (22 Oct 2026, 24 requests on 3 other bills, not from this day): asked as one question (stamp there with the heading's name), the weighbridge's stamp was found surely on only 1 of the 3 slips in the full check (0.88; 0.79 and 0.45 on the others). Split into whether a stamp is there and whose name it shows (9 requests, $0.005), it was surely there on all 6 slips that had it (0.82 to 0.96), with its name sure on only 3 of them. Of the 3 copies with it painted over, one was a sure no (0.15) and two went to a person (0.53 and 0.58, where a signature or ink remained). Not yet tested: a stamp of a different weighbridge, a real unstamped slip, or this day's bills.
+- **Gross first** (22 Oct 2026, re-checked from saved answers with `--plant`, gross to tare at least 10 min): 171522 and 171562 are no longer flagged for being weighed gross first; their weighings were 25 and 16 minutes apart (hand-read). Both still go to a person, because Jev read their final slips' times below 0.8 confidence (171522's tare as 08:50; hand-read 09:02). 171562 is still a problem for its reused images. 171595 (gross 11:41, tare 11:42 as read) is a problem: 1 minute apart, unloading at 12:28 after the tare, and 41 km from the plant. The verdict counts didn't change: 10 accepted, 14 problems, 18 to check.
 
 ## Cost
 
@@ -273,7 +283,8 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 
 - **Box questions need `jev-preview`.** Finding the stamp's Lat/Long line always uses Jev 1.14, whichever model the rest of the check uses.
 - **Image input is experimental.** TypeSafe calls it "dreamer-ready": fine for prototypes, not yet production quality. Accuracy and the request format can change between releases. Each request needs the `TypeSafe-Danger-Zone-Images: true` header, which the code sends.
-- **Jev can't transcribe text.** It only picks from the options it's given. It can confirm the typed number, but it can't say what a different number is. Addresses, serial numbers and weights can't be read out.
+- **Jev can't transcribe text.** It only picks from the options it's given. It can confirm the typed number, but it can't say what a different number is. Addresses, serial numbers, weights and the words on a stamp can't be read out.
+- **A stamp isn't proof either.** Rubber stamps can be copied. The check only shows a stamp with the right name is there.
 - **Jev only sees pixels.** The API strips all file metadata, so GPS data stored in the photo file never reaches it. "GPS stamp" here means the stamp is printed on the photo. The real day's photos had no GPS data in their files anyway.
 - **A GPS stamp isn't proof.** GPS camera apps can be set to any place and time. With the plant's location given, an unloading photo's printed position must be near it, but a faked stamp can show any position.
 - **Reused images** are found only among the trips under `trips/` (or the folder `run_trips.py` is given). A copy that was cropped or edited may not be found.

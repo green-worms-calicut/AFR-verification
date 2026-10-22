@@ -21,7 +21,12 @@ A photo's clock may be off the weighbridge's by up to `clock_slack`.
 
 Place: when the plant's location is given (`--plant`, never fixed in code), the latitude and longitude
 on each unloading photo's GPS stamp are read to two decimals, and at least one must place the photo
-within `plant_radius` of the plant; any clearly farther is flagged. Each run can change these limits (`Limits`). Across trips: an
+within `plant_radius` of the plant; any clearly farther is flagged. Each run can change these limits (`Limits`).
+
+Stamp, for a Verra project trip (`--verra`): the final slip must carry the weighbridge's own ink stamp. Our
+company's name (`OUR_COMPANY`) is sent so that our company's stamp, often on the slip too, isn't taken for it.
+
+Across trips: an
 image already used in another trip is flagged (`ImageIndex`), and so is a vehicle on two trips at once
 (`overlap_checks`).
 
@@ -39,8 +44,8 @@ and run_trips.py have measured accuracy on real images.
 Usage:
     .venv/bin/python check_proof.py KL57AB8815 --trip trips/.../171773 --quantity 1630
     .venv/bin/python check_proof.py KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg \\
-        --bill slip1.jpg slip2.jpg --quantity 1630 [--plant "11.4404, 75.9420" --plant-radius 500] \\
-        [--min-gap-tare-first 60] [--min-gap-gross-first 30] [--clock-slack 5] [--model jev-preview]
+        --bill slip1.jpg slip2.jpg --quantity 1630 [--plant "11.4404, 75.9420" --plant-radius 500] [--verra] \\
+        [--min-gap-tare-first 60] [--min-gap-gross-first 10] [--clock-slack 5] [--model jev-preview]
 
 The same checks run behind the test page in app.py, the trip runner run_trips.py, and the accuracy
 report in evaluate.py.
@@ -97,7 +102,7 @@ class Limits:
     """The timing rules, in minutes, and how near the plant unloading must be, in metres. The defaults can be changed for each run."""
 
     min_gap_tare_first: int = 60  # loading happens between the weighings, so they are at least this far apart
-    min_gap_gross_first: int = 30  # unloading happens between the weighings, so they are at least this far apart
+    min_gap_gross_first: int = 10  # unloading happens between the weighings, so they are at least this far apart
     clock_slack: int = 5  # the camera's clock and the weighbridge's may disagree by this much
     # How far from the plant an unloading photo's square (`plant_check`) may be. Plant photos on 19 Oct 2026
     # were stamped within 51 m of it; the nearest unloading elsewhere was 2.9 km away.
@@ -187,6 +192,16 @@ def parse_plant(value) -> tuple[float, float] | None:
         raise ValueError("Type the plant's location as latitude, longitude in decimal degrees north and east, "
                          "such as 11.4404, 75.9420.")
     return float(found[1]), float(found[2])
+
+
+def parse_switch(value, name: str) -> bool:
+    """true, "yes", 1 -> True; false, "no", 0 or nothing -> False: a tick box, or a switch in trip.json."""
+    text = str(value if value is not None else "").strip().lower()
+    if text in ("true", "yes", "1"):
+        return True
+    if text in ("", "false", "no", "0", "none"):
+        return False
+    raise ValueError(f"Give {name} as true or false.")
 
 
 def options(values: list[str], not_shown: str) -> dict:
@@ -429,11 +444,35 @@ QUESTIONS = {
                 NOT_SHOWN: "The bill has no Time In, or doesn't show which weight was taken first.",
             },
         ),
+        # Whether the weighbridge's stamp is there, and whose name it shows, are asked apart: on 22 Oct 2026 one
+        # question for both was unsure (0.45 to 0.79) on 2 of 3 clearly stamped slips.
+        "weighbridge_seal": Noul(
+            instructions="Apart from any stamp of `our_company`, is an ink stamp of the weighbridge pressed on `bill`?",
+            criteria=NoulCriteria(
+                true="A rubber stamp impression in ink, usually with the weighbridge's or its owner's name, even if "
+                     "faint, tilted, upside down or partly over the printed text or a signature.",
+                false="No ink stamp other than one of `our_company`. A printed logo or heading, a signature or "
+                      "handwriting on its own doesn't count.",
+            ),
+        ),
+        "weighbridge_name": Choice(
+            instructions="If `bill` has an ink stamp of the weighbridge, apart from any stamp of `our_company`, does "
+                         "the name in that stamp match the weighbridge's name printed in the slip's heading?",
+            criteria={
+                "different": "The stamp shows a business name that is not the one printed in the heading.",
+                "same": "The stamp shows the same name as the heading, even if shortened or only partly legible.",
+                NOT_SHOWN: "There is no weighbridge stamp, or the name in it can't be made out.",
+            },
+        ),
     },
 }
 
 # The questions that read where a photo was taken, in order: latitude, then longitude.
 PLACE = ("lat_degrees", "lat_decimals", "long_degrees", "long_decimals")
+# The questions about the weighbridge's stamp (seal) on a bill, asked only for a Verra project trip, and our company's
+# name as on its own stamp, sent with them so that stamp isn't taken for the weighbridge's.
+SEAL = ("weighbridge_seal", "weighbridge_name")
+OUR_COMPANY = "Green Worms Eco Solutions LLP, West Hill, Calicut"
 
 # Which readings to report for each slot, as (key, label, [question ids joined by the separator], separator).
 REPORT = {
@@ -459,6 +498,7 @@ NOUL_CHECKS = {
     "gps_stamp": ("GPS stamp", "GPS stamp printed on the photo", "No GPS stamp on the photo", True),
     "screen_photo": ("Taken directly", "A photo taken directly", "A photo of a screen", False),
     "weigh_bill": ("Weigh bill", "Is a weighbridge bill", "Not a weighbridge bill", True),
+    "weighbridge_seal": ("Weighbridge stamp", "The weighbridge's own stamp is on it", "No weighbridge stamp", True),
 }
 # What each Choice answer means, as (check label, {option: (status, detail)}).
 CHOICE_CHECKS = {
@@ -492,8 +532,14 @@ CHOICE_CHECKS = {
         "tare_heavier": ("fail", "Gross printed lighter than tare: the labels look swapped"),
         NOT_SHOWN: ("review", "Gross and tare labels can't be compared"),
     }),
+    "weighbridge_name": ("Weighbridge stamp's name", {
+        "same": ("pass", "The stamp's name matches the heading"),
+        "different": ("fail", "Stamped by a different weighbridge from the one in the heading"),
+        NOT_SHOWN: ("review", "The stamp's name can't be compared with the heading"),
+    }),
 }
-FINAL_ONLY = ("net_weight", "gross_vs_tare")  # bill questions that only mean something on the final slip
+# Bill questions that only count on the final slip: its net weight and labels, and the stamp proving it.
+FINAL_ONLY = ("net_weight", "gross_vs_tare", *SEAL)
 
 # A check's status is pass, fail (a problem found) or review (unsure). Nothing is rejected without a person.
 TITLES = {"pass": "Accepted", "problem": "Flagged: problem found", "review": "Flagged: please check"}
@@ -512,19 +558,23 @@ def fit(img: PILImage.Image) -> PILImage.Image:
     return img
 
 
-def questions_for(slot: str, quantity: str | None, place: bool = False) -> dict:
-    """The questions asked about one image: the net weight only when a quantity was typed, and where
-    the photo was taken only with `place` (an unloading photo, when the plant's location is given).
+def questions_for(slot: str, quantity: str | None, place: bool = False, seal: bool = False) -> dict:
+    """The questions asked about one image: the net weight only when a quantity was typed, where
+    the photo was taken only with `place` (an unloading photo, when the plant's location is given),
+    and the weighbridge's stamp only with `seal` (a bill of a Verra project trip).
     """
-    return {q: v for q, v in QUESTIONS[slot].items() if (quantity or q != "net_weight") and (place or q not in PLACE)}
+    return {q: v for q, v in QUESTIONS[slot].items()
+            if (quantity or q != "net_weight") and (place or q not in PLACE) and (seal or q not in SEAL)}
 
 
 def ask(client: TypeSafeClient, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
-        quantity: str | None = None, place: bool = False):
+        quantity: str | None = None, place: bool = False, seal: bool = False):
     state = {slot: Image.from_pil(fit(img), format="jpeg"), "vehicle_number": vehicle_number}
     if slot == "bill" and quantity:
         state["quantity_kg"] = quantity
-    return client.system_one(state=state, questions=questions_for(slot, quantity, place), model=model)
+    if seal:
+        state["our_company"] = OUR_COMPANY
+    return client.system_one(state=state, questions=questions_for(slot, quantity, place, seal), model=model)
 
 
 def top(answer, n: int = 3) -> list[tuple[str, float]]:
@@ -851,8 +901,34 @@ def choice_check(group: str, key: str, qid: str, answer: dict, vehicle_number: s
     return check(group, key, label.format(**typed), status, prefix + detail.format(**typed), answer["confidence"])
 
 
-def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None) -> list[dict]:
-    """A weighbridge slip, the final slip, the vehicle number on every slip, and the final slip's net weight and labels."""
+def seal_checks(final: dict | None) -> list[dict]:
+    """The final slip carries the weighbridge's own stamp.
+
+    It passes once it is surely there, unless its name is surely another
+    weighbridge's: like gross and tare, an unsure name would send most trips to a person for nothing.
+    """
+    if not final:
+        return [check("bill", "weighbridge_seal", "Weighbridge stamp", "review", "No final slip to look for it on")]
+    a, at, checks = final["answers"], f"{final['name']}: ", []
+    theirs, name = a["weighbridge_seal"]["yes"], a["weighbridge_name"]
+    status = noul_status(theirs, qid="weighbridge_seal")
+    if status == "pass" and name["choice"] == "different" and name["confidence"] >= CONFIDENT:
+        checks.append(choice_check("bill", "weighbridge_seal", "weighbridge_name", name, "", None, at))
+    elif status == "pass":
+        matched = name["choice"] == "same" and name["confidence"] >= CONFIDENT
+        checks.append(check("bill", "weighbridge_seal", "Weighbridge stamp", "pass",
+                            at + "The weighbridge's own stamp is on it" + ("" if matched else ", its name not surely compared"),
+                            theirs))
+    else:
+        detail = {"fail": "No weighbridge stamp", "review": "Unsure: is the weighbridge's own stamp on it?"}[status]
+        checks.append(check("bill", "weighbridge_seal", "Weighbridge stamp", status, at + detail, theirs))
+    return checks
+
+
+def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, verra: bool = False) -> list[dict]:
+    """A weighbridge slip, the final slip, the vehicle number on every slip, the final slip's net weight and labels,
+    and for a Verra project trip, its stamp.
+    """
     if not bills:
         return [check("bill", "bill_missing", "Weigh bills", "review", "None added")]
     slips = [b for b in bills if b["answers"]["weigh_bill"]["yes"] >= 0.5]
@@ -895,7 +971,7 @@ def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None) ->
             and final["answers"]["gross_vs_tare"]["choice"] != NOT_SHOWN:
         checks.append(choice_check("bill", "gross_vs_tare", "gross_vs_tare", final["answers"]["gross_vs_tare"],
                                    vehicle_number, quantity, f"{final['name']}: "))
-    return checks
+    return checks + (seal_checks(final) if verra else [])
 
 
 def photo_moments(results: list[dict]) -> list[tuple[dict, dict | None]]:
@@ -980,7 +1056,8 @@ def same_day(results: list[dict], w: dict) -> dict | None:
 
 
 def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
-                limits: Limits = Limits(), plant: tuple[float, float] | None = None) -> tuple[list[dict], dict | None]:
+                limits: Limits = Limits(), plant: tuple[float, float] | None = None,
+                verra: bool = False) -> tuple[list[dict], dict | None]:
     """Every check for a trip, and the weighings they used (None if the times couldn't be read).
 
     Tare first, the trip runs tare -> loading -> gross -> unloading: the weighings must be at least
@@ -988,14 +1065,15 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     Gross first, it runs loading -> gross -> unloading -> tare: the weighings must be at least
     `min_gap_gross_first` apart, loading photos fall before gross and unloading photos between them.
     Photos may be off by `clock_slack`, and unloading must be on the same day as the gross weighing.
-    With `plant`, unloading must be stamped within `plant_radius` of it.
+    With `plant`, unloading must be stamped within `plant_radius` of it. With `verra` (a Verra project
+    trip), the final slip must carry the weighbridge's stamp.
     """
     checks = photo_checks("loading", images.get("loading", []), vehicle_number)
     checks += photo_checks("unloading", images.get("unloading", []), vehicle_number)
     if plant and images.get("unloading"):
         checks.append(plant_check(images["unloading"], plant, limits))
     bills = images.get("bill", [])
-    checks += bill_checks(bills, vehicle_number, quantity)
+    checks += bill_checks(bills, vehicle_number, quantity, verra)
 
     final = final_slip(bills)
     w = weighings(final) if final else None
@@ -1060,9 +1138,10 @@ def decide(checks: list[dict]) -> dict:
 
 
 def verdict(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
-            limits: Limits = Limits(), extra: list[dict] = (), plant: tuple[float, float] | None = None) -> dict:
+            limits: Limits = Limits(), extra: list[dict] = (), plant: tuple[float, float] | None = None,
+            verra: bool = False) -> dict:
     """One verdict for the trip, with its checks, flags and timeline. `extra` are checks across trips."""
-    checks, w = trip_checks(images, vehicle_number, quantity, limits, plant)
+    checks, w = trip_checks(images, vehicle_number, quantity, limits, plant, verra)
     checks += list(extra)
     # Between the two weighings, for finding a vehicle on two trips at once: only when their order is clear.
     clear = any(c["key"] == "weigh_order" and c["status"] == "pass" for c in checks)
@@ -1222,27 +1301,30 @@ def add_checks(trip: dict, extra: list[dict]) -> None:
     trip["verdict"] = {**v, **decide(v["checks"] + extra)}
 
 
-def question_version(slot: str, place: bool = False) -> str:
+def question_version(slot: str, place: bool = False, seal: bool = False) -> str:
     """Changes whenever a question changes, so saved answers from older questions aren't reused.
 
-    The place questions only count with `place`, so adding them kept the answers saved before.
+    The place and stamp questions only count with `place` and `seal`, so adding them kept the answers
+    saved before. With the stamp questions, our company's name counts too, as it is sent with them.
     """
-    asked = {q: v for q, v in QUESTIONS[slot].items() if place or q not in PLACE}
+    asked = {q: v for q, v in QUESTIONS[slot].items() if (place or q not in PLACE) and (seal or q not in SEAL)}
     if place:  # and how the line is found and picked from
         asked |= {"line": LINE, "pick": pick("{axis}", "{labels}", ["{start}", "{other}"])}
-    text = json.dumps({q: v.model_dump(mode="json") for q, v in asked.items()}, sort_keys=True) + (BOX_MODEL if place else "")
+    text = json.dumps({q: v.model_dump(mode="json") for q, v in asked.items()}, sort_keys=True) + (BOX_MODEL if place else "") \
+        + (OUR_COMPANY if seal else "")
     return hashlib.md5(text.encode()).hexdigest()[:10]
 
 
 TURNING = "turn3"  # how images are turned before the answers are kept; changing it means asking again
 
 
-def answer_key(prints: dict, slot: str, vehicle_number: str, quantity: str | None, model: str, place: bool = False) -> str:
+def answer_key(prints: dict, slot: str, vehicle_number: str, quantity: str | None, model: str, place: bool = False,
+               seal: bool = False) -> str:
     """What an image's answers depend on, to save them and reuse them: the image, the questions, what was typed, the model.
 
     Not the plant's location: it isn't sent, so the same answers serve any plant.
     """
-    return "|".join([prints["md5"], slot, question_version(slot, place), TURNING, vehicle_number, quantity or "", model])
+    return "|".join([prints["md5"], slot, question_version(slot, place, seal), TURNING, vehicle_number, quantity or "", model])
 
 
 def result_from(slot: str, raw: dict, vehicle_number: str, quantity: str | None) -> dict:
@@ -1308,18 +1390,19 @@ def read_line(client: TypeSafeClient, img: PILImage.Image, raw: dict, model: str
 
 def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
             quantity: str | None = None, cache: dict | None = None, key: str | None = None,
-            place: bool = False) -> tuple[dict, PILImage.Image]:
+            place: bool = False, seal: bool = False) -> tuple[dict, PILImage.Image]:
     """Check one upright-by-EXIF RGB image in its slot. Returns the result and the image as finally sent.
 
     `quantity` is the typed quantity in kilograms, which a bill's net weight must match. With `place`,
     a photo's GPS stamp position is read too, to four decimals where it can be (`read_line`). With
-    `cache` and `key`, saved answers are used instead of asking Jev, and new answers are saved.
+    `seal`, a bill is asked about the weighbridge's stamp. With `cache` and `key`, saved answers are
+    used instead of asking Jev, and new answers are saved.
     """
     if cache is not None and key in cache:
         raw = cache[key]
         result = {**result_from(slot, raw, vehicle_number, quantity), "saved": True}
         return result, fit(img.rotate(raw["rotated"], expand=True))
-    response = ask(client, slot, img, vehicle_number, model, quantity, place)
+    response = ask(client, slot, img, vehicle_number, model, quantity, place, seal)
     tokens, requests, rotated = response.usage.input_tokens or 0, 1, 0
     turned = response.choices["orientation"]
     looks = [summary(turned)]  # each orientation answer, before each turn
@@ -1327,7 +1410,7 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
     while requests < 3 and (turn := turn_for(response.choices["orientation"], first=requests == 1)):
         img = img.rotate(turn, expand=True)
         rotated = (rotated + turn) % 360
-        response = ask(client, slot, img, vehicle_number, model, quantity, place)
+        response = ask(client, slot, img, vehicle_number, model, quantity, place, seal)
         tokens += response.usage.input_tokens or 0
         requests += 1
         looks.append(summary(response.choices["orientation"]))
@@ -1343,14 +1426,14 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
 def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]], vehicle_number: str, model: str,
                  quantity: str | None = None, limits: Limits = Limits(), index: ImageIndex | None = None,
                  trip: str | None = None, cache: dict | None = None,
-                 plant: tuple[float, float] | None = None) -> tuple[dict, dict]:
+                 plant: tuple[float, float] | None = None, verra: bool = False) -> tuple[dict, dict]:
     """Check every image of a trip in parallel and decide.
 
     Returns ({"images": {role: [result]}, "verdict": ...}, {role: [image as sent]}). An image uploaded
     twice in the trip is asked about once. With `index`, images already used in other trips (not
     `trip` itself) are flagged. `cache` holds saved answers (see `analyze`). With `plant`, the
     plant's (latitude, longitude), unloading photos are read for where they were taken and checked
-    against it.
+    against it. With `verra` (a Verra project trip), bills are checked for the weighbridge's stamp.
     """
     jobs = []  # (role, upload, image, fingerprints)
     for role in ROLES:
@@ -1366,8 +1449,9 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
     def run(job):
         role, u, img, prints = job
         slot, place = SLOT_OF[role], prints["md5"] in placed
+        seal = verra and slot == "bill"
         return analyze(client, slot, img, vehicle_number, model, quantity, cache,
-                       answer_key(prints, slot, vehicle_number, quantity, model, place), place)
+                       answer_key(prints, slot, vehicle_number, quantity, model, place, seal), place, seal)
 
     unique = [j for j in jobs if first_of[j[3]["md5"]] == j[1].name]
     with ThreadPoolExecutor(max(1, min(8, len(unique)))) as pool:
@@ -1381,13 +1465,14 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
                              "cost_usd": 0 if repeat else result["cost_usd"], "same_as": first_of[prints["md5"]] if repeat else None})
         sent[role].append(img)
     extra = [reuse_check(images, index, trip)] if index is not None else []
-    return {"images": images, "verdict": verdict(images, vehicle_number, quantity, limits, extra, plant)}, sent
+    return {"images": images, "verdict": verdict(images, vehicle_number, quantity, limits, extra, plant, verra)}, sent
 
 
 MARK = {"pass": "ok  ", "fail": "FLAG", "review": "??  "}
 
 
-def print_trip(trip: dict, vehicle_number: str, limits: Limits, plant: tuple[float, float] | None = None) -> None:
+def print_trip(trip: dict, vehicle_number: str, limits: Limits, plant: tuple[float, float] | None = None,
+               verra: bool = False) -> None:
     for role in ROLES:
         for r in trip["images"][role]:
             rotated = f", rotated {r['rotated']}°" if r["rotated"] else ""
@@ -1404,8 +1489,10 @@ def print_trip(trip: dict, vehicle_number: str, limits: Limits, plant: tuple[flo
     near = f", unloading stamped within {distance(limits.plant_radius)} of the plant at {plant[0]}, {plant[1]}" if plant else ""
     print(f"  Limits: tare first, tare to gross at least {duration(limits.min_gap_tare_first)}; gross first, gross to tare "
           f"at least {duration(limits.min_gap_gross_first)}; clock slack {duration(limits.clock_slack)}{near}")
+    if verra:
+        print("  Verra project: the final slip must carry the weighbridge's stamp")
     print("  Timeline: " + " -> ".join(f"{e['what']} {e['time']}{' (!)' if e['bad'] else ''}" for e in v["timeline"]))
-    for c in v["flags"] + [c for c in v["checks"] if c["status"] == "pass" and (c["group"] == "times" or c["key"] == "unloading_plant")]:
+    for c in v["flags"] + [c for c in v["checks"] if c["status"] == "pass" and (c["group"] == "times" or c["key"] in ("unloading_plant", *SEAL))]:
         print(f"  {MARK[c['status']]} {GROUPS[c['group']]} · {c['label']}: {c['detail']}")
     print(f"  {tokens} input tokens ≈ ${tokens * PRICE_PER_INPUT_TOKEN:.5f}")
 
@@ -1420,6 +1507,7 @@ def main() -> None:
     parser.add_argument("--quantity", help="the quantity in kilograms, such as 2570, which the final slip's net weight must match")
     parser.add_argument("--plant", help='the plant\'s latitude, longitude, such as "11.4404, 75.9420": unloading photos '
                                         "must be stamped near it. Without it, where they were taken isn't checked.")
+    parser.add_argument("--verra", action="store_true", help="a Verra project trip: the final slip must carry the weighbridge's stamp")
     for f in fields(Limits):
         parser.add_argument(f"--{f.name.replace('_', '-')}", dest=f.name, metavar={"minutes": "MIN", "metres": "M"}[LIMIT_UNITS[f.name]],
                             help=f"{LIMIT_NAMES[f.name]}, in {LIMIT_UNITS[f.name]} (default {f.default})")
@@ -1449,10 +1537,11 @@ def main() -> None:
         sys.exit(NO_KEY)
     with TypeSafeClient(api_key=key, headers=HEADERS, timeout=TIMEOUT) as client:
         try:
-            trip, _ = analyze_trip(client, uploads, number, args.model, quantity, limits, index, trip_id, plant=plant)
+            trip, _ = analyze_trip(client, uploads, number, args.model, quantity, limits, index, trip_id, plant=plant,
+                                   verra=args.verra)
         except Exception as error:
             sys.exit(f"{type(error).__name__}: {error}")
-    print_trip(trip, number, limits, plant)
+    print_trip(trip, number, limits, plant, args.verra)
 
 
 if __name__ == "__main__":
