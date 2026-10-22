@@ -55,7 +55,7 @@
   },
   "gross_hour": {
     "type": "choice",
-    "instructions": "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it, what hour is that time? Give the hour on a 24-hour clock: 2:15 AM is 02, 2:15 PM is 14, 12:30 AM is 00. Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it, what hour is that time, exactly as printed? If AM or PM is printed after it, give the hour as printed, from 01 to 12. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "00": null,
       "01": null,
@@ -151,6 +151,16 @@
       "not_shown": "The bill prints no such time, or it can't be read."
     }
   },
+  "gross_ampm": {
+    "type": "choice",
+    "instructions": "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it, is AM or PM printed after that time? Ignore any timestamp on a camera picture printed on the slip.",
+    "criteria": {
+      "none": "Neither: the time is on a 24-hour clock, such as 15:06.",
+      "am": "AM is printed after the time.",
+      "pm": "PM is printed after the time.",
+      "not_shown": "The bill prints no such time, or it can't be read."
+    }
+  },
   "gross_day": {
     "type": "choice",
     "instructions": "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it, what day of the month is its date? Ignore any timestamp on a camera picture printed on the slip.",
@@ -210,7 +220,7 @@
   },
   "tare_hour": {
     "type": "choice",
-    "instructions": "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it, what hour is that time? Give the hour on a 24-hour clock: 2:15 AM is 02, 2:15 PM is 14, 12:30 AM is 00. Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it, what hour is that time, exactly as printed? If AM or PM is printed after it, give the hour as printed, from 01 to 12. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "00": null,
       "01": null,
@@ -306,6 +316,16 @@
       "not_shown": "The bill prints no such time, or it can't be read."
     }
   },
+  "tare_ampm": {
+    "type": "choice",
+    "instructions": "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it, is AM or PM printed after that time? Ignore any timestamp on a camera picture printed on the slip.",
+    "criteria": {
+      "none": "Neither: the time is on a 24-hour clock, such as 15:06.",
+      "am": "AM is printed after the time.",
+      "pm": "PM is printed after the time.",
+      "not_shown": "The bill prints no such time, or it can't be read."
+    }
+  },
   "tare_day": {
     "type": "choice",
     "instructions": "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it, what day of the month is its date? Ignore any timestamp on a camera picture printed on the slip.",
@@ -365,7 +385,7 @@
   },
   "in_hour": {
     "type": "choice",
-    "instructions": "If `bill` prints a Time In (the first weighment, often beside a Date In), what hour is that time? Give the hour on a 24-hour clock: 2:15 AM is 02, 2:15 PM is 14, 12:30 AM is 00. Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a Time In (the first weighment, often beside a Date In), what hour is that time, exactly as printed? If AM or PM is printed after it, give the hour as printed, from 01 to 12. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "00": null,
       "01": null,
@@ -461,6 +481,16 @@
       "not_shown": "The bill prints no such time, or it can't be read."
     }
   },
+  "in_ampm": {
+    "type": "choice",
+    "instructions": "If `bill` prints a Time In (the first weighment, often beside a Date In), is AM or PM printed after that time? Ignore any timestamp on a camera picture printed on the slip.",
+    "criteria": {
+      "none": "Neither: the time is on a 24-hour clock, such as 15:06.",
+      "am": "AM is printed after the time.",
+      "pm": "PM is printed after the time.",
+      "not_shown": "The bill prints no such time, or it can't be read."
+    }
+  },
   "in_day": {
     "type": "choice",
     "instructions": "If `bill` prints a Time In (the first weighment, often beside a Date In), what day of the month is its date? Ignore any timestamp on a camera picture printed on the slip.",
@@ -520,7 +550,7 @@
   },
   "out_hour": {
     "type": "choice",
-    "instructions": "If `bill` prints a Time Out (the second weighment, often beside a Date Out), what hour is that time? Give the hour on a 24-hour clock: 2:15 AM is 02, 2:15 PM is 14, 12:30 AM is 00. Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a Time Out (the second weighment, often beside a Date Out), what hour is that time, exactly as printed? If AM or PM is printed after it, give the hour as printed, from 01 to 12. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "00": null,
       "01": null,
@@ -613,6 +643,16 @@
       "57": null,
       "58": null,
       "59": null,
+      "not_shown": "The bill prints no such time, or it can't be read."
+    }
+  },
+  "out_ampm": {
+    "type": "choice",
+    "instructions": "If `bill` prints a Time Out (the second weighment, often beside a Date Out), is AM or PM printed after that time? Ignore any timestamp on a camera picture printed on the slip.",
+    "criteria": {
+      "none": "Neither: the time is on a 24-hour clock, such as 15:06.",
+      "am": "AM is printed after the time.",
+      "pm": "PM is printed after the time.",
       "not_shown": "The bill prints no such time, or it can't be read."
     }
   },

@@ -1,5 +1,6 @@
-"""Local test page for check_proof.py: type a vehicle number and quantity, add a trip's loading photos,
-unloading photos and weigh bills (or load a trip folder from trips/), and see what Jev finds.
+"""Local test page for check_proof.py: type a vehicle number, quantity and the plant's location, add a
+trip's loading photos, unloading photos and weigh bills (or load a trip folder from trips/), and see
+what Jev finds.
 
 The API key stays in this process; the browser only talks to this server.
 
@@ -140,6 +141,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 quantity = check_proof.parse_quantity(body.get("quantity"))
+                plant = check_proof.parse_plant(body.get("plant"))
                 limits = check_proof.parse_limits(body)
             except ValueError as error:
                 self.send_json(400, {"error": str(error)})
@@ -166,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with TypeSafeClient(api_key=key, headers=check_proof.HEADERS, timeout=check_proof.TIMEOUT) as client:
                 trip, sent = check_proof.analyze_trip(client, uploads, number, model, quantity, limits,
-                                                      image_index(), trip_id)
+                                                      image_index(), trip_id, plant=plant)
         except TypeSafeError as error:
             self.send_json(502, {"error": f"Jev returned an error: {error}"})
             return
@@ -174,7 +176,7 @@ class Handler(BaseHTTPRequestHandler):
             for r, img in zip(trip["images"][role], imgs):
                 r["sent_image"] = data_url(img)
                 r["sent_size"] = list(img.size)
-        trip.update(vehicle_number=number, quantity=quantity, limits=asdict(limits), trip_id=trip_id)
+        trip.update(vehicle_number=number, quantity=quantity, plant=plant, limits=asdict(limits), trip_id=trip_id)
         self.send_json(200, trip)
 
     def log_message(self, fmt: str, *args) -> None:

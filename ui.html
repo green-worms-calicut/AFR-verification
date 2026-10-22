@@ -234,6 +234,15 @@ td.mono { white-space: nowrap; }
     </section>
 
     <section class="panel">
+      <h2>Plant</h2>
+      <label class="trip-pick"><span class="label">Location (latitude, longitude)</span><input id="plant" class="time-input" type="text" placeholder="11.4404, 75.9420" autocomplete="off" spellcheck="false"></label>
+      <div class="limits">
+        <label><span class="label">Unloading within (m)</span><input id="plant_radius" class="time-input" type="text" inputmode="numeric" value="500" autocomplete="off"></label>
+      </div>
+      <p id="plant-hint" class="hint"></p>
+    </section>
+
+    <section class="panel">
       <h2><span class="step">2</span>Proof images</h2>
       <div class="zone" data-role="loading"></div>
       <div class="zone" data-role="unloading"></div>
@@ -306,6 +315,14 @@ const validQuantity = () => !quantity() || (/^\d+(\.\d+)?\s*(kgs?)?\.?$/i.test(q
 // Whole minutes, like check_proof.parse_limits: blank keeps the default.
 const validLimit = (id) => /^\s*\d{0,4}\s*$/.test($(id).value);
 const validLimits = () => LIMITS.every(validLimit);
+// Decimal degrees north and east, like check_proof.parse_plant: blank, or "latitude, longitude".
+const plant = () => $("plant").value.trim();
+const validPlant = () => {
+  const m = plant().replace(/°/g, "").match(/^(\d{1,2}(?:\.\d+)?)\s*[,\s]\s*(\d{1,3}(?:\.\d+)?)$/);
+  return !plant() || (!!m && parseFloat(m[1]) <= 90 && parseFloat(m[2]) <= 180);
+};
+const validRadius = () => validLimit("plant_radius");
+const PLANT_HINT = "Copy it from Google Maps. Unloading photos must be stamped this near it. Leave blank to skip this check.";
 const imageCount = () => ROLES.reduce((n, role) => n + state.files[role].length, 0);
 const LIMITS_HINT = "Tare to gross: the weighings must be at least this far apart, since loading happens in between. Clock slack: how far a photo's clock may be off the weighbridge's.";
 
@@ -341,6 +358,8 @@ async function pickTrip(id) {
   $("vehicle").value = trip.typed.vehicle_number ?? "";
   $("quantity").value = trip.typed.quantity ?? "";
   for (const id of LIMITS) $(id).value = trip.typed[id] ?? $(id).defaultValue;
+  if (trip.typed.plant) $("plant").value = [].concat(trip.typed.plant).join(", ");
+  if (trip.typed.plant_radius) $("plant_radius").value = trip.typed.plant_radius;
   state.tripId = trip.id;
   state.typedFrom = trip.typed_from;
   changed();
@@ -389,6 +408,8 @@ async function check() {
         vehicle_number: vehicleNumber(),
         quantity: quantity() || null,
         ...Object.fromEntries(LIMITS.map((id) => [id, $(id).value.trim() || null])),
+        plant: plant() || null,
+        plant_radius: $("plant_radius").value.trim() || null,
         model: $("model").value,
         trip_id: state.tripId,
         images: Object.fromEntries(ROLES.map((role) => [role, state.files[role]])),
@@ -450,7 +471,7 @@ function verdictHTML(r) {
     <div class="verdict-head"><b>${esc(title)}</b><span class="mono">${esc(r.vehicle_number)}${r.trip_id ? " · trip " + esc(r.trip_id.split("/").pop()) : ""}</span></div>
     <div class="groups">${groups}</div>
     ${timelineHTML(v.timeline)}
-    <p class="note">Limits: tare to gross at least ${l.min_gap_tare_first} min, clock slack ${l.clock_slack} min. Quantity: ${r.quantity ? esc(r.quantity) + " kg" : "not typed"}.</p>
+    <p class="note">Limits: tare to gross at least ${l.min_gap_tare_first} min, clock slack ${l.clock_slack} min. Quantity: ${r.quantity ? esc(r.quantity) + " kg" : "not typed"}. Plant: ${r.plant ? esc(r.plant.join(", ")) + ", unloading within " + l.plant_radius + " m" : "not given, so where unloading happened isn't checked"}.</p>
     ${reviewHTML(r)}</section>`;
 }
 
@@ -557,6 +578,7 @@ function drawViewer() {
     <span class="label">This image</span>${own.length ? own.map(checkHTML).join("") : `<p class="note">Every answer on this image passed.</p>`}
     <span class="label">Read by Jev</span>${readings}
     <span class="label">Typed in</span><p>Vehicle <b class="mono">${esc(r.vehicle_number)}</b></p><p>Quantity <b class="mono">${esc(r.quantity ? r.quantity + " kg" : "not typed")}</b></p>
+    <p>Plant <b class="mono">${esc(r.plant ? r.plant.join(", ") : "not given")}</b></p>
     ${FLAGGED.has(v.status) && !state.decision ? decideButtons() : ""}`;
 }
 
@@ -577,10 +599,15 @@ function render() {
   for (const id of LIMITS) $(id).classList.toggle("bad", !validLimit(id));
   $("limits-hint").classList.toggle("bad", !validLimits());
   $("limits-hint").textContent = validLimits() ? LIMITS_HINT : "Type each limit as whole minutes, such as 60. Leave one blank to use its default.";
+  $("plant").classList.toggle("bad", !validPlant());
+  $("plant_radius").classList.toggle("bad", !validRadius());
+  $("plant-hint").classList.toggle("bad", !validPlant() || !validRadius());
+  $("plant-hint").textContent = !validPlant() ? "Type latitude, longitude in decimal degrees north and east, such as 11.4404, 75.9420."
+    : !validRadius() ? "Type the distance as whole metres, such as 500." : PLANT_HINT;
 
   document.querySelectorAll(".zone").forEach((el) => { el.innerHTML = zoneHTML(el.dataset.role); });
   const n = imageCount();
-  $("check").disabled = state.status === "pending" || !validNumber() || !validLimits() || !validQuantity() || !n;
+  $("check").disabled = state.status === "pending" || !validNumber() || !validLimits() || !validQuantity() || !validPlant() || !validRadius() || !n;
   $("check").textContent = state.status === "pending" ? "Checking…" : n ? `Check ${n} image${n > 1 ? "s" : ""}` : "Check";
 
   $("t-requests").textContent = state.totals.requests;
@@ -605,6 +632,7 @@ function render() {
         <li>there's a final weighbridge slip, every slip shows the number, and the net weight is the quantity you typed;</li>
         <li>tare was weighed first, at least the set time before gross;</li>
         <li>every loading photo is between the tare and gross weighings, and every unloading photo after gross;</li>
+        <li>with the plant's location, an unloading photo's GPS stamp is near the plant;</li>
         <li>no image was already used in another trip under trips/.</li>
       </ul>
       <p class="muted">Nothing is rejected automatically. A problem or an unsure answer flags the trip, and you accept or reject it.</p>
@@ -629,6 +657,11 @@ $("trip").addEventListener("change", (e) => pickTrip(e.target.value));
 $("vehicle").addEventListener("input", changed);
 $("vehicle").addEventListener("keydown", (e) => { if (e.key === "Enter" && !$("check").disabled) check(); });
 for (const id of ["quantity", ...LIMITS]) $(id).addEventListener("input", changed);
+// The plant rarely changes, so this browser remembers it.
+for (const id of ["plant", "plant_radius"]) {
+  try { const saved = localStorage.getItem(id); if (saved) $(id).value = saved; } catch { /* storage blocked: start blank */ }
+  $(id).addEventListener("input", () => { try { localStorage.setItem(id, $(id).value); } catch { /* not remembered */ } changed(); });
+}
 $("model").addEventListener("change", changed);
 $("check").addEventListener("click", check);
 $("clear").addEventListener("click", () => {

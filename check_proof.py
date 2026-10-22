@@ -14,16 +14,21 @@ Times, from the final slip's tare and gross times and the photos' GPS stamps:
   - tare is weighed before gross, at least `min_gap_tare_first` before;
   - every loading photo is between the tare and gross weighings;
   - every unloading photo is after the gross weighing.
-A photo's clock may be off the weighbridge's by up to `clock_slack`. Each run can change these limits
-(`Limits`). Across trips: an image already used in another trip is flagged (`ImageIndex`), and so is
-a vehicle on two trips at once (`overlap_checks`).
+A photo's clock may be off the weighbridge's by up to `clock_slack`.
+
+Place: when the plant's location is given (`--plant`, never fixed in code), the latitude and longitude
+on each unloading photo's GPS stamp are read to two decimals, and at least one must place the photo
+within `plant_radius` of the plant; any clearly farther is flagged. Each run can change these limits (`Limits`). Across trips: an
+image already used in another trip is flagged (`ImageIndex`), and so is a vehicle on two trips at once
+(`overlap_checks`).
 
 Nothing is rejected here. A check that finds a problem flags the trip, an unsure one asks a person
 to look, and the person accepts or rejects it.
 
 Jev can't read text out, it only picks from answers it is given, so the typed vehicle number and
 quantity go into the state and Jev judges whether the plate or bill shows them. Each part of a time
-(hour, minute, day, month) is a separate Choice question, assembled here. If Jev is sure an image
+(hour, minute, day, month) or of a GPS stamp's latitude and longitude (degrees and the first two
+decimals) is a separate Choice question, assembled here. If Jev is sure an image
 is turned, it is rotated upright and asked again. Code makes every decision from the answers
 (`checks_for`, `trip_checks`, `verdict`); the thresholds below are placeholders until evaluate.py
 and run_trips.py have measured accuracy on real images.
@@ -31,7 +36,8 @@ and run_trips.py have measured accuracy on real images.
 Usage:
     .venv/bin/python check_proof.py KL57AB8815 --trip trips/.../171773 --quantity 1630
     .venv/bin/python check_proof.py KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg \\
-        --bill slip1.jpg slip2.jpg --quantity 1630 [--min-gap-tare-first 60] [--clock-slack 5] [--model jev-preview]
+        --bill slip1.jpg slip2.jpg --quantity 1630 [--plant "11.4404, 75.9420" --plant-radius 500] \\
+        [--min-gap-tare-first 60] [--clock-slack 5] [--model jev-preview]
 
 The same checks run behind the test page in app.py, the trip runner run_trips.py, and the accuracy
 report in evaluate.py.
@@ -40,7 +46,9 @@ report in evaluate.py.
 import argparse
 import hashlib
 import io
+import itertools
 import json
+import math
 import os
 import re
 import subprocess
@@ -52,7 +60,7 @@ from pathlib import Path
 
 from PIL import Image as PILImage
 from PIL import ImageOps
-from typesafe_sdk import Choice, Image, Noul, NoulAnswer, NoulCriteria, TypeSafeClient
+from typesafe_sdk import Box, Choice, Image, Noul, NoulAnswer, NoulCriteria, TypeSafeClient
 
 PRICE_PER_INPUT_TOKEN = 0.042 / 1_000_000  # USD; output tokens are free
 MIN_SIDE, MAX_SIDE = 280, 1568  # API limits for each side of an image
@@ -83,17 +91,22 @@ IMAGE_TYPES = (".jpg", ".jpeg", ".png", ".heic")  # the .heic files seen so far 
 
 @dataclass(frozen=True)
 class Limits:
-    """The timing rules, in minutes. The defaults can be changed for each run."""
+    """The timing rules, in minutes, and how near the plant unloading must be, in metres. The defaults can be changed for each run."""
 
     min_gap_tare_first: int = 60  # loading happens between the weighings, so they are at least this far apart
     clock_slack: int = 5  # the camera's clock and the weighbridge's may disagree by this much
+    # How far from the plant an unloading photo's square (`plant_check`) may be. Plant photos on 19 Oct 2026
+    # were stamped within 51 m of it; the nearest unloading elsewhere was 2.9 km away.
+    plant_radius: int = 500
 
 
-# How each limit is described in error messages and the command-line help.
+# How each limit is described in error messages and the command-line help, and its unit.
 LIMIT_NAMES = {
     "min_gap_tare_first": "the least gap between the tare and gross weighings",
     "clock_slack": "how far a photo's clock may be off the weighbridge's",
+    "plant_radius": "how far from the plant an unloading photo's stamp may place it",
 }
+LIMIT_UNITS = {"min_gap_tare_first": "minutes", "clock_slack": "minutes", "plant_radius": "metres"}
 
 # The API key lives in the login keyring (GNOME Keyring), stored with KEY_STORE_COMMAND.
 KEY_LOOKUP = ["secret-tool", "lookup", "service", "typesafe", "account", "api"]
@@ -126,14 +139,14 @@ def normalize_vehicle_number(text: str) -> str | None:
 
 
 def parse_limits(typed: dict) -> Limits:
-    """Limits from typed minutes, such as {"clock_slack": "10"}. A blank or missing one keeps its default."""
+    """Limits from typed whole numbers, such as {"clock_slack": "10"}. A blank or missing one keeps its default."""
     values = {}
     for f in fields(Limits):
         text = str(typed.get(f.name) or "").strip()
         if not text:
             continue
         if not re.fullmatch(r"\d{1,4}", text):
-            raise ValueError(f"Type {LIMIT_NAMES[f.name]} as whole minutes, such as {f.default}.")
+            raise ValueError(f"Type {LIMIT_NAMES[f.name]} as whole {LIMIT_UNITS[f.name]}, such as {f.default}.")
         values[f.name] = int(text)
     return Limits(**values)
 
@@ -153,6 +166,22 @@ def parse_quantity(text: str | None) -> str | None:
     if "." in number:
         number = number.rstrip("0").rstrip(".")
     return "0" + number if number.startswith(".") else number
+
+
+def parse_plant(value) -> tuple[float, float] | None:
+    """'11.4404, 75.9420' or [11.4404, 75.942] -> (11.4404, 75.942): the plant's latitude and longitude.
+
+    In decimal degrees north and east, as Google Maps copies a place. None if nothing was given.
+    """
+    text = ", ".join(map(str, value)) if isinstance(value, (list, tuple)) else str(value or "")
+    text = text.replace("°", "").strip()
+    if not text:
+        return None
+    found = re.fullmatch(r"(\d{1,2}(?:\.\d+)?)\s*[,\s]\s*(\d{1,3}(?:\.\d+)?)", text)
+    if not found or float(found[1]) > 90 or float(found[2]) > 180:
+        raise ValueError("Type the plant's location as latitude, longitude in decimal degrees north and east, "
+                         "such as 11.4404, 75.9420.")
+    return float(found[1]), float(found[2])
 
 
 def options(values: list[str], not_shown: str) -> dict:
@@ -217,6 +246,61 @@ def bill_time(prefix: str, premise: str) -> dict:
     }
 
 
+def coordinate(prefix: str, axis: str, labels: str, most: int) -> dict:
+    """The two Choice questions that read the GPS stamp's latitude or longitude to two decimals (about
+    1.1 km): `{prefix}_degrees` and `{prefix}_decimals`, the first two digits after the point.
+
+    Code puts them together (`position`) and measures how far that square is from the plant (`plant_check`).
+    The third decimal isn't read: on the 88 unloading photos of 19 Oct 2026, Jev read the degrees right
+    every time and the first two decimals 168 times in 176, but the longitude's third decimal only 47 times
+    in 88 (often the second digit again), and 67 even when told the digits before it, 6 of the misses sure.
+    """
+    where = f"{STAMP} look at its {axis}, labelled {labels}, printed as a decimal number of degrees."
+    unread = f"There is no GPS stamp with a {axis} printed as a decimal number, or it can't be read."
+    return {
+        f"{prefix}_degrees": Choice(instructions=f"{where} What whole number of degrees is before the decimal point?",
+                                    criteria=options([str(d) for d in range(most + 1)], unread)),
+        f"{prefix}_decimals": Choice(instructions=f"{where} What are the first two digits after the decimal point? "
+                                                  "In 12.345678 they are 34.",
+                                     criteria=options([f"{n:02d}" for n in range(100)], unread)),
+    }
+
+
+# Reading the position to four decimals (about 11 m) takes two more requests: find the stamp's Lat/Long line,
+# then pick the value from candidates on that line cut out at full resolution (`read_line`). Asked for the
+# third and fourth digits instead, Jev often gave the second again, even on the cut-out line.
+BOX_MODEL = "jev-preview"  # Box questions need Jev 1.14
+LINE = Box(instructions="Find the line of text in the GPS stamp printed on `photo` that gives the latitude and "
+                        "longitude (Lat ... Long ...).")
+PICKS = ("lat_pick", "long_pick")
+
+
+def pick(axis: str, labels: str, starts: list[str]) -> Choice:
+    """Which four-decimal value starting with one of `starts` (such as 11.44, or 11.44 and 11.40 when the
+    two-decimal reading was torn) is the `line`'s latitude or longitude: 100 candidates per start.
+
+    Picking a whole value works where reading single digits doesn't: on the 88 unloading photos of 19 Oct
+    2026, cut-out lines were picked right 173 times in 176, and every pick at least 0.8 sure was right or
+    was a sure "can't read".
+    """
+    begins = " or ".join(starts)
+    return Choice(instructions=f"`line` is cut from a GPS stamp. Look at its {axis}, labelled {labels}. It starts with "
+                               f"{begins}. Which of these is it, up to the fourth digit after the decimal point? "
+                               "Ignore any digits after the fourth.",
+                  criteria=options([f"{start}{n:02d}" for start in starts for n in range(100)],
+                                   f"No {axis} starting with {begins} is printed, or it can't be read that far."))
+
+
+def starts_of(answers: dict[str, dict], prefix: str) -> list[str]:
+    """The likeliest two-decimal starts of a coordinate, such as ["11.44", "11.40"]: the degrees with the two
+    likeliest first-two-decimals, the second only if at least 5% likely. Jev was often torn between 44 and 40.
+    """
+    degrees = answers[f"{prefix}_degrees"]["choice"]
+    decimals = [option for i, (option, p) in enumerate(answers[f"{prefix}_decimals"]["top"][:2])
+                if option != NOT_SHOWN and (i == 0 or p >= 0.05)]
+    return [] if degrees == NOT_SHOWN else [f"{degrees}.{d}" for d in decimals]
+
+
 # How to turn the image so it is upright, by the answer to `orientation` (PIL rotates counterclockwise).
 ROTATION = {"upright": 0, "top_points_right": 90, "upside_down": 180, "top_points_left": 270}
 
@@ -270,6 +354,9 @@ QUESTIONS = {
         "stamp_minute": Choice(instructions=f"{STAMP} what minute is the time in the stamp?", criteria=options(MINUTES, NO_STAMP_TIME)),
         "stamp_day": Choice(instructions=f"{STAMP} what day of the month is the date in the stamp?", criteria=options(DAYS, NO_STAMP_DATE)),
         "stamp_month": Choice(instructions=f"{STAMP} what month (01 to 12) is the date in the stamp?", criteria=options(MONTHS, NO_STAMP_DATE)),
+        # Only asked about unloading photos when the plant's location is given: see `questions_for`.
+        **coordinate("lat", "latitude", "Lat or Latitude", 90),
+        **coordinate("long", "longitude", "Long, Lng or Longitude", 180),
     },
     "bill": {
         "orientation": orientation("bill"),
@@ -339,6 +426,9 @@ QUESTIONS = {
         ),
     },
 }
+
+# The questions that read where a photo was taken, in order: latitude, then longitude.
+PLACE = ("lat_degrees", "lat_decimals", "long_degrees", "long_decimals")
 
 # Which readings to report for each slot, as (key, label, [question ids joined by the separator], separator).
 REPORT = {
@@ -417,17 +507,19 @@ def fit(img: PILImage.Image) -> PILImage.Image:
     return img
 
 
-def questions_for(slot: str, quantity: str | None) -> dict:
-    """The questions asked about one image: the net weight only when a quantity was typed."""
-    return {q: v for q, v in QUESTIONS[slot].items() if quantity or q != "net_weight"}
+def questions_for(slot: str, quantity: str | None, place: bool = False) -> dict:
+    """The questions asked about one image: the net weight only when a quantity was typed, and where
+    the photo was taken only with `place` (an unloading photo, when the plant's location is given).
+    """
+    return {q: v for q, v in QUESTIONS[slot].items() if (quantity or q != "net_weight") and (place or q not in PLACE)}
 
 
 def ask(client: TypeSafeClient, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
-        quantity: str | None = None):
+        quantity: str | None = None, place: bool = False):
     state = {slot: Image.from_pil(fit(img), format="jpeg"), "vehicle_number": vehicle_number}
     if slot == "bill" and quantity:
         state["quantity_kg"] = quantity
-    return client.system_one(state=state, questions=questions_for(slot, quantity), model=model)
+    return client.system_one(state=state, questions=questions_for(slot, quantity, place), model=model)
 
 
 def top(answer, n: int = 3) -> list[tuple[str, float]]:
@@ -460,7 +552,28 @@ def readings_for(slot: str, answers: dict[str, dict]) -> list[dict]:
             "parts": parts,
             "min_confidence": min(p["confidence"] for p in parts),
         })
+    if all(q in answers for q in PLACE):
+        readings.append(position(answers))
     return readings
+
+
+def position(answers: dict[str, dict]) -> dict:
+    """The GPS stamp's latitude and longitude as a reading: "11.4404, 75.9419" when picked to four decimals
+    (`read_line`), otherwise "11.44, 75.94" from the two-decimal questions. `coarse` is always the two-decimal one.
+
+    The plant's location isn't in the questions, so these answers stay right whichever plant is checked.
+    """
+    parts = [{"id": q, **answers[q]} for q in PLACE]
+    missing = any(p["choice"] == NOT_SHOWN for p in parts)
+    c = [p["choice"] for p in parts]
+    coarse = {"value": None if missing else f"{c[0]}.{c[1]}, {c[2]}.{c[3]}", "missing": missing,
+              "min_confidence": min(p["confidence"] for p in parts)}
+    reading = {"key": "position", "label": "photo position", "parts": parts, "coarse": coarse, **coarse}
+    picks = [{"id": q, **answers[q]} for q in PICKS if q in answers]
+    if len(picks) == 2 and all(p["choice"] != NOT_SHOWN for p in picks):
+        reading |= {"value": ", ".join(p["choice"] for p in picks), "missing": False, "parts": picks,
+                    "min_confidence": min(p["confidence"] for p in picks)}
+    return reading
 
 
 def to_24h(hhmm: str, ampm: str) -> str:
@@ -628,6 +741,95 @@ def photo_checks(role: str, results: list[dict], vehicle_number: str) -> list[di
     ]
 
 
+def metres_between(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """The distance between two (latitude, longitude) points over the earth's surface, in metres (haversine)."""
+    (lat1, lon1), (lat2, lon2) = (map(math.radians, p) for p in (a, b))
+    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    return 2 * 6_371_000 * math.asin(math.sqrt(h))
+
+
+def distance(metres: float) -> str:
+    """40 -> '40 m', 1234 -> '1.2 km', 38210 -> '38 km'."""
+    return f"{round(metres)} m" if metres < 1000 else f"{metres / 1000:.1f} km" if metres < 10_000 else f"{metres / 1000:.0f} km"
+
+
+def from_square(value: str, plant: tuple[float, float]) -> float:
+    """How far the plant is from the square a position reading such as "11.44, 75.94" stands for, in metres.
+
+    The stamp's later digits are cut off, so "11.44, 75.94" is anywhere from 11.44 to 11.45 and 75.94 to
+    75.95, a square about 1.1 km across, and "11.4404, 75.9419" a square about 11 m across. 0 when the
+    plant is in the square.
+    """
+    corner = [float(x) for x in value.split(", ")]
+    size = 10.0 ** -len(value.split(", ")[0].partition(".")[2])
+    nearest = [min(max(at, low), low + size) for at, low in zip(plant, corner)]
+    return metres_between(plant, tuple(nearest))
+
+
+def chance_away(answers: dict[str, dict], plant: tuple[float, float], radius: float) -> float:
+    """The probability that a photo's two-decimal reading places it farther than `radius` from the plant,
+    over every combination of the likeliest answers (each place question's top five).
+
+    An unsure digit can still be clear about the plant: 11.16 or 11.11 are both far from 11.44.
+    """
+    away = 0.0
+    for combo in itertools.product(*(answers[q]["top"] for q in PLACE)):
+        chosen = [option for option, _ in combo]
+        if NOT_SHOWN not in chosen and from_square(f"{chosen[0]}.{chosen[1]}, {chosen[2]}.{chosen[3]}", plant) > radius:
+            away += math.prod(p for _, p in combo)
+    return away
+
+
+def plant_check(results: list[dict], plant: tuple[float, float], limits: Limits) -> dict:
+    """At least one unloading photo stamped within `plant_radius` of the plant; any stamped farther is a problem.
+
+    Within the radius takes a position picked surely to four decimals (a square about 11 m across), so the
+    distance is known to the metre. Away can also be shown by the two-decimal reading: when even the
+    nearest point of its 1.1 km square (`from_square`) is past the radius, read surely or by `chance_away`.
+    But a two-decimal "away" against another photo surely near asks a person: on 19 Oct 2026 two photos
+    at the plant were read 11.40 or 11.14 for 11.44, 84% sure. Like the plate, one photo is enough to
+    pass, and anything less sure asks a person.
+    """
+    radius, label = limits.plant_radius, "At the plant"
+    near, away, unsure, unread = [], [], [], []  # near and away: (result, detail, certainty, metres, to four decimals)
+    for r in results:
+        p = next((x for x in r["readings"] if x["key"] == "position"), None)
+        if not p:
+            unread.append(r)
+            continue
+        if not p["missing"] and p["value"] != p["coarse"]["value"] and p["min_confidence"] >= CONFIDENT:
+            m = from_square(p["value"], plant)
+            (near if m <= radius else away).append((r, f"at {p['value']}, {distance(m)} from the plant", p["min_confidence"], m, True))
+            continue
+        c = p["coarse"]
+        if not c["missing"] and c["min_confidence"] >= CONFIDENT:
+            if (m := from_square(c["value"], plant)) > radius:
+                away.append((r, f"at {c['value']}, at least {distance(m)} from the plant", c["min_confidence"], m, False))
+                continue
+        elif (no := chance_away(r["answers"], plant, radius)) >= YES:
+            read = f"read as {c['value']}" if c["value"] else "partly read"
+            away.append((r, f"away from the plant ({no:.0%} likely, {read})", no, None, False))
+            continue
+        (unread if c["missing"] else unsure).append(r)
+    closest = min(near, key=lambda x: x[3], default=None)
+    if away and (any(x[4] for x in away) or not near):
+        r, detail, c, _, _ = next((x for x in away if x[4]), away[0])
+        return check("unloading", "unloading_plant", label, "fail",
+                     f"{r['name']} is stamped {detail} (within {distance(radius)} allowed)", c)
+    if away:
+        (r, detail, _, _, _), (n, there, c, _, _) = away[0], closest
+        return check("unloading", "unloading_plant", label, "review",
+                     f"{r['name']} seems stamped {detail}, but {n['name']} is {there}", c)
+    if near:
+        r, detail, c, _, _ = closest
+        return check("unloading", "unloading_plant", label, "pass",
+                     f"{len(near)} of {len(results)} stamped within {distance(radius)}: {r['name']} {detail}", c)
+    if unsure:
+        return check("unloading", "unloading_plant", label, "review",
+                     f"Position not read surely enough to the metre on {names(unsure)}")
+    return check("unloading", "unloading_plant", label, "review", f"GPS stamp position can't be read on {names(unread)}")
+
+
 def final_slip(bills: list[dict]) -> dict | None:
     """The slip with both weights and the net, the one the times and net weight come from."""
     slips = [b for b in bills if b["answers"]["weigh_bill"]["yes"] >= 0.5]
@@ -762,15 +964,18 @@ def same_day(results: list[dict], w: dict) -> dict | None:
 
 
 def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
-                limits: Limits = Limits()) -> tuple[list[dict], dict | None]:
+                limits: Limits = Limits(), plant: tuple[float, float] | None = None) -> tuple[list[dict], dict | None]:
     """Every check for a trip, and the weighings they used (None if the times couldn't be read).
 
     The trip runs tare -> loading -> gross -> unloading. Gross first is a problem; the weighings must
     be at least `min_gap_tare_first` apart; loading photos fall between them and unloading photos
-    after gross, give or take `clock_slack`, and on the same day as the gross weighing.
+    after gross, give or take `clock_slack`, and on the same day as the gross weighing. With `plant`,
+    unloading must be stamped within `plant_radius` of it.
     """
     checks = photo_checks("loading", images.get("loading", []), vehicle_number)
     checks += photo_checks("unloading", images.get("unloading", []), vehicle_number)
+    if plant and images.get("unloading"):
+        checks.append(plant_check(images["unloading"], plant, limits))
     bills = images.get("bill", [])
     checks += bill_checks(bills, vehicle_number, quantity)
 
@@ -833,9 +1038,9 @@ def decide(checks: list[dict]) -> dict:
 
 
 def verdict(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
-            limits: Limits = Limits(), extra: list[dict] = ()) -> dict:
+            limits: Limits = Limits(), extra: list[dict] = (), plant: tuple[float, float] | None = None) -> dict:
     """One verdict for the trip, with its checks, flags and timeline. `extra` are checks across trips."""
-    checks, w = trip_checks(images, vehicle_number, quantity, limits)
+    checks, w = trip_checks(images, vehicle_number, quantity, limits, plant)
     checks += list(extra)
     # From tare to gross, for finding a vehicle on two trips at once: only when clearly read as tare first.
     clear = any(c["key"] == "weigh_order" and c["status"] == "pass" for c in checks)
@@ -995,18 +1200,27 @@ def add_checks(trip: dict, extra: list[dict]) -> None:
     trip["verdict"] = {**v, **decide(v["checks"] + extra)}
 
 
-def question_version(slot: str) -> str:
-    """Changes whenever a question changes, so saved answers from older questions aren't reused."""
-    text = json.dumps({q: v.model_dump(mode="json") for q, v in QUESTIONS[slot].items()}, sort_keys=True)
+def question_version(slot: str, place: bool = False) -> str:
+    """Changes whenever a question changes, so saved answers from older questions aren't reused.
+
+    The place questions only count with `place`, so adding them kept the answers saved before.
+    """
+    asked = {q: v for q, v in QUESTIONS[slot].items() if place or q not in PLACE}
+    if place:  # and how the line is found and picked from
+        asked |= {"line": LINE, "pick": pick("{axis}", "{labels}", ["{start}", "{other}"])}
+    text = json.dumps({q: v.model_dump(mode="json") for q, v in asked.items()}, sort_keys=True) + (BOX_MODEL if place else "")
     return hashlib.md5(text.encode()).hexdigest()[:10]
 
 
 TURNING = "turn3"  # how images are turned before the answers are kept; changing it means asking again
 
 
-def answer_key(prints: dict, slot: str, vehicle_number: str, quantity: str | None, model: str) -> str:
-    """What an image's answers depend on, to save them and reuse them: the image, the questions, what was typed, the model."""
-    return "|".join([prints["md5"], slot, question_version(slot), TURNING, vehicle_number, quantity or "", model])
+def answer_key(prints: dict, slot: str, vehicle_number: str, quantity: str | None, model: str, place: bool = False) -> str:
+    """What an image's answers depend on, to save them and reuse them: the image, the questions, what was typed, the model.
+
+    Not the plant's location: it isn't sent, so the same answers serve any plant.
+    """
+    return "|".join([prints["md5"], slot, question_version(slot, place), TURNING, vehicle_number, quantity or "", model])
 
 
 def result_from(slot: str, raw: dict, vehicle_number: str, quantity: str | None) -> dict:
@@ -1036,18 +1250,54 @@ def turn_for(answer, first: bool) -> int:
     return 0
 
 
+def cut_line(img: PILImage.Image, box) -> PILImage.Image:
+    """The stamp's Lat/Long line cut from the full-resolution image, by a Box answer's edges (fractions of
+    the width and height), with a little room around it so no digit is cut off.
+    """
+    w, h = img.size
+    tall = (box.bottom - box.top) * h
+    edges = (box.left * w - 0.03 * w, box.top * h - 0.6 * tall, box.right * w + 0.03 * w, box.bottom * h + 0.6 * tall)
+    left, top, right, bottom = (round(min(max(e, 0), side)) for e, side in zip(edges, (w, h, w, h)))
+    return img.crop((left, top, max(right, left + 1), max(bottom, top + 1)))
+
+
+def read_line(client: TypeSafeClient, img: PILImage.Image, raw: dict, model: str) -> dict:
+    """Add the position picked to four decimals (`lat_pick`, `long_pick`) to an unloading photo's answers.
+
+    The stamp's Lat/Long line is found with a Box question (on BOX_MODEL), cut out of the upright
+    full-resolution photo, and Jev picks each value from the 100 that start with its two-decimal reading
+    (`starts_of`). Nothing is added when that reading has an unread part.
+    """
+    a = raw["answers"]
+    lat, long = starts_of(a, "lat"), starts_of(a, "long")
+    if not lat or not long:
+        return raw
+    found = client.system_one(state={"photo": Image.from_pil(fit(img), format="jpeg")}, questions={"line": LINE},
+                              model=BOX_MODEL)
+    box = found.answers["line"]
+    line = Image.from_pil(fit(cut_line(img, box.box)), format="jpeg")
+    questions = {"lat_pick": pick("latitude", "Lat or Latitude", lat), "long_pick": pick("longitude", "Long, Lng or Longitude", long)}
+    picked = client.system_one(state={"line": line}, questions=questions, model=model)
+    tokens = (found.usage.input_tokens or 0) + (picked.usage.input_tokens or 0)
+    return {**raw, "requests": raw["requests"] + 2, "input_tokens": raw["input_tokens"] + tokens,
+            "line": {**box.box.model_dump(), "confidence": box.confidence},
+            "answers": {**a, **{q: summary(x) for q, x in picked.answers.items()}}}
+
+
 def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
-            quantity: str | None = None, cache: dict | None = None, key: str | None = None) -> tuple[dict, PILImage.Image]:
+            quantity: str | None = None, cache: dict | None = None, key: str | None = None,
+            place: bool = False) -> tuple[dict, PILImage.Image]:
     """Check one upright-by-EXIF RGB image in its slot. Returns the result and the image as finally sent.
 
-    `quantity` is the typed quantity in kilograms, which a bill's net weight must match. With `cache`
-    and `key`, saved answers are used instead of asking Jev, and new answers are saved.
+    `quantity` is the typed quantity in kilograms, which a bill's net weight must match. With `place`,
+    a photo's GPS stamp position is read too, to four decimals where it can be (`read_line`). With
+    `cache` and `key`, saved answers are used instead of asking Jev, and new answers are saved.
     """
     if cache is not None and key in cache:
         raw = cache[key]
         result = {**result_from(slot, raw, vehicle_number, quantity), "saved": True}
         return result, fit(img.rotate(raw["rotated"], expand=True))
-    response = ask(client, slot, img, vehicle_number, model, quantity)
+    response = ask(client, slot, img, vehicle_number, model, quantity, place)
     tokens, requests, rotated = response.usage.input_tokens or 0, 1, 0
     turned = response.choices["orientation"]
     looks = [summary(turned)]  # each orientation answer, before each turn
@@ -1055,12 +1305,14 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
     while requests < 3 and (turn := turn_for(response.choices["orientation"], first=requests == 1)):
         img = img.rotate(turn, expand=True)
         rotated = (rotated + turn) % 360
-        response = ask(client, slot, img, vehicle_number, model, quantity)
+        response = ask(client, slot, img, vehicle_number, model, quantity, place)
         tokens += response.usage.input_tokens or 0
         requests += 1
         looks.append(summary(response.choices["orientation"]))
     raw = {"model": response.model, "requests": requests, "orientation": summary(turned), "rotated": rotated, "looks": looks,
            "answers": {q: summary(a) for q, a in response.answers.items()}, "input_tokens": tokens}
+    if place:
+        raw = read_line(client, img, raw, model)
     if cache is not None and key:
         cache[key] = raw
     return result_from(slot, raw, vehicle_number, quantity), fit(img)
@@ -1068,12 +1320,15 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
 
 def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]], vehicle_number: str, model: str,
                  quantity: str | None = None, limits: Limits = Limits(), index: ImageIndex | None = None,
-                 trip: str | None = None, cache: dict | None = None) -> tuple[dict, dict]:
+                 trip: str | None = None, cache: dict | None = None,
+                 plant: tuple[float, float] | None = None) -> tuple[dict, dict]:
     """Check every image of a trip in parallel and decide.
 
     Returns ({"images": {role: [result]}, "verdict": ...}, {role: [image as sent]}). An image uploaded
     twice in the trip is asked about once. With `index`, images already used in other trips (not
-    `trip` itself) are flagged. `cache` holds saved answers (see `analyze`).
+    `trip` itself) are flagged. `cache` holds saved answers (see `analyze`). With `plant`, the
+    plant's (latitude, longitude), unloading photos are read for where they were taken and checked
+    against it.
     """
     jobs = []  # (role, upload, image, fingerprints)
     for role in ROLES:
@@ -1083,12 +1338,14 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
     first_of = {}
     for _, u, _, prints in jobs:
         first_of.setdefault(prints["md5"], u.name)
+    # Asked where it was taken: an unloading photo, also when the same file is a loading photo too.
+    placed = {prints["md5"] for role, _, _, prints in jobs if role == "unloading"} if plant else set()
 
     def run(job):
         role, u, img, prints = job
-        slot = SLOT_OF[role]
+        slot, place = SLOT_OF[role], prints["md5"] in placed
         return analyze(client, slot, img, vehicle_number, model, quantity, cache,
-                       answer_key(prints, slot, vehicle_number, quantity, model))
+                       answer_key(prints, slot, vehicle_number, quantity, model, place), place)
 
     unique = [j for j in jobs if first_of[j[3]["md5"]] == j[1].name]
     with ThreadPoolExecutor(max(1, min(8, len(unique)))) as pool:
@@ -1102,13 +1359,13 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
                              "cost_usd": 0 if repeat else result["cost_usd"], "same_as": first_of[prints["md5"]] if repeat else None})
         sent[role].append(img)
     extra = [reuse_check(images, index, trip)] if index is not None else []
-    return {"images": images, "verdict": verdict(images, vehicle_number, quantity, limits, extra)}, sent
+    return {"images": images, "verdict": verdict(images, vehicle_number, quantity, limits, extra, plant)}, sent
 
 
 MARK = {"pass": "ok  ", "fail": "FLAG", "review": "??  "}
 
 
-def print_trip(trip: dict, vehicle_number: str, limits: Limits) -> None:
+def print_trip(trip: dict, vehicle_number: str, limits: Limits, plant: tuple[float, float] | None = None) -> None:
     for role in ROLES:
         for r in trip["images"][role]:
             rotated = f", rotated {r['rotated']}°" if r["rotated"] else ""
@@ -1122,9 +1379,10 @@ def print_trip(trip: dict, vehicle_number: str, limits: Limits) -> None:
     v = trip["verdict"]
     tokens = sum(r["input_tokens"] for rs in trip["images"].values() for r in rs)
     print(f"\nVehicle {vehicle_number}: {v['title']}")
-    print(f"  Limits: tare to gross at least {duration(limits.min_gap_tare_first)}, clock slack {duration(limits.clock_slack)}")
+    near = f", unloading stamped within {distance(limits.plant_radius)} of the plant at {plant[0]}, {plant[1]}" if plant else ""
+    print(f"  Limits: tare to gross at least {duration(limits.min_gap_tare_first)}, clock slack {duration(limits.clock_slack)}{near}")
     print("  Timeline: " + " -> ".join(f"{e['what']} {e['time']}{' (!)' if e['bad'] else ''}" for e in v["timeline"]))
-    for c in v["flags"] + [c for c in v["checks"] if c["status"] == "pass" and c["group"] == "times"]:
+    for c in v["flags"] + [c for c in v["checks"] if c["status"] == "pass" and (c["group"] == "times" or c["key"] == "unloading_plant")]:
         print(f"  {MARK[c['status']]} {GROUPS[c['group']]} · {c['label']}: {c['detail']}")
     print(f"  {tokens} input tokens ≈ ${tokens * PRICE_PER_INPUT_TOKEN:.5f}")
 
@@ -1137,9 +1395,11 @@ def main() -> None:
     parser.add_argument("--unloading", type=Path, nargs="+", default=[], help="unloading photos, with GPS stamps")
     parser.add_argument("--bill", type=Path, nargs="+", default=[], help="weighbridge slips")
     parser.add_argument("--quantity", help="the quantity in kilograms, such as 2570, which the final slip's net weight must match")
+    parser.add_argument("--plant", help='the plant\'s latitude, longitude, such as "11.4404, 75.9420": unloading photos '
+                                        "must be stamped near it. Without it, where they were taken isn't checked.")
     for f in fields(Limits):
-        parser.add_argument(f"--{f.name.replace('_', '-')}", dest=f.name, metavar="MIN",
-                            help=f"{LIMIT_NAMES[f.name]}, in minutes (default {f.default})")
+        parser.add_argument(f"--{f.name.replace('_', '-')}", dest=f.name, metavar={"minutes": "MIN", "metres": "M"}[LIMIT_UNITS[f.name]],
+                            help=f"{LIMIT_NAMES[f.name]}, in {LIMIT_UNITS[f.name]} (default {f.default})")
     parser.add_argument("--others", type=Path, help="a folder of other trips, to flag images used again (such as trips/)")
     parser.add_argument("--model", default="jev-latest", help="jev-latest (1.13), jev-preview (1.14), or a pinned ID")
     args = parser.parse_args()
@@ -1149,6 +1409,7 @@ def main() -> None:
         parser.error(f"{args.vehicle_number!r} doesn't look like a vehicle number. Use 4 to 12 letters and digits.")
     try:
         quantity = parse_quantity(args.quantity)
+        plant = parse_plant(args.plant)
         limits = parse_limits(vars(args))
     except ValueError as error:
         parser.error(str(error))
@@ -1165,10 +1426,10 @@ def main() -> None:
         sys.exit(NO_KEY)
     with TypeSafeClient(api_key=key, headers=HEADERS, timeout=TIMEOUT) as client:
         try:
-            trip, _ = analyze_trip(client, uploads, number, args.model, quantity, limits, index, trip_id)
+            trip, _ = analyze_trip(client, uploads, number, args.model, quantity, limits, index, trip_id, plant=plant)
         except Exception as error:
             sys.exit(f"{type(error).__name__}: {error}")
-    print_trip(trip, number, limits)
+    print_trip(trip, number, limits, plant)
 
 
 if __name__ == "__main__":

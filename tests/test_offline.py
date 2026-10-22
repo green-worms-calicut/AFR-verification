@@ -60,6 +60,14 @@ def fake_answers(slot: str, picks: dict, body: bytes | None = None) -> dict:
             "confidence": conf,
             "probabilities": {o: conf if o == choice else others.get(o, rest) for o in options},
         }
+    # The stamp's Lat/Long line (a Box question), and the four-decimal values picked from it.
+    if body is not None and b'"line":{"type":"box"' in body:
+        answers["line"] = {"type": "box", "box": picks.get("line", {"top": 0.3, "bottom": 0.7, "left": 0.2, "right": 0.8}),
+                           "confidence": 0.9}
+    for qid in check_proof.PICKS:
+        if body is not None and f'"{qid}":{{'.encode() in body:
+            choice, conf = picks.get(qid, (check_proof.NOT_SHOWN, 0.3))
+            answers[qid] = {"type": "choice", "choice": choice, "confidence": conf, "probabilities": {choice: conf, "other": 1 - conf}}
     return {"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 1000, "output_tokens": 30}}
 
 
@@ -75,6 +83,24 @@ def at(prefix: str, hhmm: str, ddmm: str = "15/10", confidence: float = 0.95, am
     (hour, minute), (day, month) = hhmm.split(":"), ddmm.split("/")
     return {f"{prefix}_hour": (hour, confidence), f"{prefix}_minute": (minute, confidence), f"{prefix}_ampm": (ampm, confidence),
             f"{prefix}_day": (day, confidence), f"{prefix}_month": (month, confidence)}
+
+
+def stamped_at(lat: str, long: str, confidence: float = 0.95, picked: float | None = 0.95) -> dict:
+    """Picks for a photo's GPS stamp position, such as stamped_at("11.440404", "75.941976"): two decimals,
+    then the four-decimal values picked from its line (with confidence `picked`, or none picked).
+    """
+    picks = {}
+    for prefix, value in (("lat", lat), ("long", long)):
+        degrees, decimals = value.split(".")
+        picks |= {f"{prefix}_degrees": (degrees, confidence), f"{prefix}_decimals": (decimals[:2], confidence)}
+        if picked is not None:
+            picks[f"{prefix}_pick"] = (f"{degrees}.{decimals[:4]}", picked)
+    return picks
+
+
+PLANT = (11.4404, 75.942)  # a plant given as input; the tests' photos are stamped near it or far from it
+AT_PLANT = stamped_at("11.440404", "75.941976")  # picked as 11.4404, 75.9419: the plant is on that square's edge
+PULATH = stamped_at("11.164949", "76.154944")  # 38 km away
 
 
 def not_printed(*prefixes: str) -> dict:
@@ -207,10 +233,10 @@ def make_trip(loading=(LOADING, LOADING), unloading=(UNLOADING, UNLOADING), bill
     return uploads, FakeJev(by_colour=by_colour)
 
 
-def run_trip(quantity=QUANTITY, limits=Limits(), index=None, trip_id=None, cache=None, **kw):
+def run_trip(quantity=QUANTITY, limits=Limits(), index=None, trip_id=None, cache=None, plant=None, **kw):
     uploads, jev = make_trip(**kw)
     with jev.client() as client:
-        trip, _ = check_proof.analyze_trip(client, uploads, NUMBER, "jev-latest", quantity, limits, index, trip_id, cache)
+        trip, _ = check_proof.analyze_trip(client, uploads, NUMBER, "jev-latest", quantity, limits, index, trip_id, cache, plant)
     return trip, jev
 
 
@@ -271,11 +297,32 @@ class TypedValueTests(unittest.TestCase):
                 check_proof.parse_quantity(typed)
 
     def test_parse_limits_keeps_defaults_for_blanks(self):
-        self.assertEqual(check_proof.parse_limits({}), Limits(60, 5))
+        self.assertEqual(check_proof.parse_limits({}), Limits(60, 5, 500))
+        self.assertEqual(check_proof.parse_limits({"plant_radius": "250"}).plant_radius, 250)
         self.assertEqual(check_proof.parse_limits({"min_gap_tare_first": " 90 ", "clock_slack": "0"}), Limits(90, 0))
         for bad in ("five", "-5", "1.5", "99999"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 check_proof.parse_limits({"clock_slack": bad})
+
+    def test_parse_plant(self):
+        for typed, plant in [("11.4404, 75.9420", PLANT), ("11.4404,75.942", PLANT), (" 11.4404 75.942 ", PLANT),
+                             ("11.4404°, 75.942°", PLANT), ([11.4404, 75.942], PLANT), ("", None), (None, None)]:
+            with self.subTest(typed=typed):
+                self.assertEqual(check_proof.parse_plant(typed), plant)
+        for typed in ("Raroth", "11.4404", "-11.4404, 75.942", "91, 75", "11.44, 181", "11.44 N, 75.94 E"):
+            with self.subTest(typed=typed), self.assertRaises(ValueError):
+                check_proof.parse_plant(typed)
+
+    def test_a_photo_at_the_plant_is_never_away_for_the_cut_off_digits(self):
+        self.assertEqual(check_proof.from_square("11.44, 75.94", PLANT), 0)
+        # A plant just inside its square: a photo 50 m away, across the line, reads as the next square.
+        self.assertLess(check_proof.from_square("11.43, 75.94", (11.4402, 75.942)), 25)
+        self.assertGreater(check_proof.from_square("11.42, 75.92", PLANT), 1500)  # 171493, unloaded 2.9 km away
+
+    def test_distances(self):
+        self.assertAlmostEqual(check_proof.metres_between((11.4404, 75.942), (11.4414, 75.942)), 111, delta=1)
+        self.assertAlmostEqual(check_proof.metres_between(PLANT, (11.164949, 76.154944)), 38_300, delta=200)
+        self.assertEqual([check_proof.distance(m) for m in (40.4, 500, 1234, 38_210)], ["40 m", "500 m", "1.2 km", "38 km"])
 
     def test_duration(self):
         self.assertEqual([check_proof.duration(m) for m in (0, 13, 60, 75, 348)], ["0 min", "13 min", "1 h", "1 h 15 min", "5 h 48 min"])
@@ -459,6 +506,99 @@ class TripTests(unittest.TestCase):
         v = run_trip(unloading=({**UNLOADING, "stamp_minute": ("09", 0.5)},))[0]["verdict"]
         self.assertEqual(by_key(v["checks"])["unloading_timing"]["status"], "review")
 
+    def test_without_a_plant_where_unloading_happened_is_not_asked(self):
+        trip, jev = run_trip()
+        self.assertNotIn("unloading_plant", by_key(trip["verdict"]["checks"]))
+        self.assertFalse(any(b"lat_degrees" in sent(r) for r in jev.requests))
+        self.assertNotIn("position", {x["key"] for x in trip["images"]["unloading"][0]["readings"]})
+
+    def test_unloading_at_the_plant_given(self):
+        trip, jev = run_trip(unloading=({**UNLOADING, **AT_PLANT}, {**UNLOADING, **AT_PLANT}), plant=PLANT)
+        v = trip["verdict"]
+        self.assertEqual(v["status"], "pass", v["flags"])
+        self.assertEqual(by_key(v["checks"])["unloading_plant"]["detail"],
+                         "2 of 2 stamped within 500 m: unloading1.jpg at 11.4404, 75.9419, 0 m from the plant")
+        position = next(x for x in trip["images"]["unloading"][0]["readings"] if x["key"] == "position")
+        self.assertEqual((position["value"], position["coarse"]["value"]), ("11.4404, 75.9419", "11.44, 75.94"))
+        # Only the unloading photos are asked where they were taken: the photo questions, then the line is found
+        # (a Box question, on Jev 1.14) and the four-decimal values picked from candidates starting 11.44 and 75.94.
+        bodies = [sent(r) for r in jev.requests]
+        self.assertEqual(sum(b"lat_degrees" in b for b in bodies), 2)
+        boxes = [b for b in bodies if b'"type":"box"' in b]
+        self.assertEqual(len(boxes), 2)
+        self.assertTrue(all(b'"jev-preview"' in b for b in boxes))
+        picks = [b for b in bodies if b'"lat_pick":{' in b]
+        self.assertEqual(len(picks), 2)
+        self.assertTrue(all(b'"11.4400":null' in b and b'"11.4499":null' in b and b'"75.9400":null' in b for b in picks))
+        self.assertEqual(trip["images"]["unloading"][0]["requests"], 3)
+
+    def test_unloading_away_from_the_plant_is_a_problem(self):
+        v = run_trip(unloading=({**UNLOADING, **AT_PLANT}, {**UNLOADING, **PULATH}), plant=PLANT)[0]["verdict"]
+        self.assertEqual(v["status"], "problem")
+        self.assertEqual(by_key(v["checks"])["unloading_plant"]["detail"],
+                         "unloading2.jpg is stamped at 11.1649, 76.1549, 38 km from the plant (within 500 m allowed)")
+        c = by_key(run_trip(unloading=({**UNLOADING, **PULATH},), plant=PLANT, limits=Limits(plant_radius=50_000))[0]["verdict"]["checks"])
+        self.assertEqual(c["unloading_plant"]["status"], "pass")
+
+    def test_the_distance_is_measured_to_the_metre(self):
+        # 600 m north: the same 0.01° square as the plant, so only the four-decimal pick shows it.
+        north = {**UNLOADING, **stamped_at("11.445804", "75.942076")}
+        c = by_key(run_trip(unloading=(north,), plant=PLANT)[0]["verdict"]["checks"])["unloading_plant"]
+        self.assertEqual((c["status"], c["detail"]),
+                         ("fail", "unloading1.jpg is stamped at 11.4458, 75.9420, 600 m from the plant (within 500 m allowed)"))
+        c = by_key(run_trip(unloading=(north,), plant=PLANT, limits=Limits(plant_radius=700))[0]["verdict"]["checks"])
+        self.assertEqual(c["unloading_plant"]["status"], "pass")
+        # Picked unsurely, the two-decimal square can't tell 600 m from 0 m, so a person looks.
+        unsure = {**UNLOADING, **stamped_at("11.445804", "75.942076", picked=0.6)}
+        c = by_key(run_trip(unloading=(unsure,), plant=PLANT)[0]["verdict"]["checks"])["unloading_plant"]
+        self.assertEqual((c["status"], c["detail"]), ("review", "Position not read surely enough to the metre on unloading1.jpg"))
+        # And when the line can't be read, likewise; nothing is picked when the two decimals can't be read.
+        unread = {**UNLOADING, **stamped_at("11.440404", "75.941976", picked=None)}
+        self.assertEqual(by_key(run_trip(unloading=(unread,), plant=PLANT)[0]["verdict"]["checks"])["unloading_plant"]["status"], "review")
+        trip, jev = run_trip(unloading=({**UNLOADING, **AT_PLANT, "lat_degrees": ("not_shown", 0.9)},), plant=PLANT)
+        self.assertFalse(any(b'"type":"box"' in sent(r) for r in jev.requests))
+
+    def test_a_torn_two_decimal_reading_against_a_sure_one_asks_a_person(self):
+        # As 171535 on 19 Oct 2026: one photo read 11.40 (11.44 on the stamp) and its line not picked,
+        # the other picked surely at the plant.
+        torn = {**UNLOADING, **stamped_at("11.400404", "75.941976", confidence=0.97, picked=None)}
+        c = by_key(run_trip(unloading=(torn, {**UNLOADING, **AT_PLANT}), plant=PLANT)[0]["verdict"]["checks"])["unloading_plant"]
+        self.assertEqual(c["status"], "review")
+        self.assertEqual(c["detail"], "unloading1.jpg seems stamped at 11.40, 75.94, at least 3.4 km from the plant, "
+                                      "but unloading2.jpg is at 11.4404, 75.9419, 0 m from the plant")
+
+    def test_the_two_likeliest_starts_are_offered(self):
+        torn = {**UNLOADING, **AT_PLANT, "lat_decimals": ("40", 0.5, {"44": 0.45})}
+        _, jev = run_trip(unloading=(torn,), plant=PLANT)
+        body = next(b for b in map(sent, jev.requests) if b'"lat_pick":{' in b)
+        self.assertIn(b"starts with 11.40 or 11.44", body)
+        self.assertTrue(b'"11.4000":null' in body and b'"11.4499":null' in body)
+        self.assertIn(b"starts with 75.94.", body)  # the other options were each under 5% likely
+
+    def test_one_clear_position_at_the_plant_is_enough(self):
+        unread = {**UNLOADING, **AT_PLANT, "long_decimals": ("not_shown", 0.9)}
+        c = by_key(run_trip(unloading=(unread, {**UNLOADING, **AT_PLANT}), plant=PLANT)[0]["verdict"]["checks"])
+        self.assertEqual((c["unloading_plant"]["status"], c["unloading_plant"]["detail"]),
+                         ("pass", "1 of 2 stamped within 500 m: unloading2.jpg at 11.4404, 75.9419, 0 m from the plant"))
+        c = by_key(run_trip(unloading=(unread,), plant=PLANT)[0]["verdict"]["checks"])
+        self.assertEqual((c["unloading_plant"]["status"], c["unloading_plant"]["detail"]),
+                         ("review", "GPS stamp position can't be read on unloading1.jpg"))
+        # Unsure digits that are far from the plant whichever way they're read are still a problem.
+        either = {**UNLOADING, **stamped_at("11.164949", "76.154944", confidence=0.97, picked=None),
+                  "lat_decimals": ("16", 0.55, {"11": 0.43})}
+        c = by_key(run_trip(unloading=(either,), plant=PLANT)[0]["verdict"]["checks"])
+        self.assertEqual(c["unloading_plant"]["status"], "fail")
+        self.assertTrue(c["unloading_plant"]["detail"].startswith("unloading1.jpg is stamped away from the plant (9"), c["unloading_plant"])
+        # And unsure between the plant's square and another 4 km off asks a person, as here.
+        split = {**UNLOADING, **stamped_at("11.440404", "75.941976", picked=None), "lat_decimals": ("44", 0.55, {"40": 0.43})}
+        c = by_key(run_trip(unloading=(split,), plant=PLANT)[0]["verdict"]["checks"])
+        self.assertEqual(c["unloading_plant"]["status"], "review")
+        # An unsure reading of a far place isn't a problem yet: a person looks.
+        unsure = {**UNLOADING, **stamped_at("11.164949", "76.154944", confidence=0.5, picked=None)}
+        c = by_key(run_trip(unloading=(unsure,), plant=PLANT)[0]["verdict"]["checks"])
+        self.assertEqual((c["unloading_plant"]["status"], c["unloading_plant"]["detail"]),
+                         ("review", "Position not read surely enough to the metre on unloading1.jpg"))
+
     def test_one_clear_matching_plate_per_kind_is_enough(self):
         hidden = {**LOADING, "plate": ("partly_readable", 0.9), "plate_number": ("cannot_tell", 0.9)}
         c = by_key(run_trip(loading=(hidden, LOADING))[0]["verdict"]["checks"])
@@ -611,6 +751,16 @@ class SavedAnswerTests(unittest.TestCase):
         keys = {check_proof.answer_key(prints, "bill", NUMBER, q, "jev-latest") for q in ("2570", "840")}
         self.assertEqual(len(keys), 2)
 
+    def test_reading_the_position_is_saved_apart_and_serves_any_plant(self):
+        cache = {}
+        unloading = ({**UNLOADING, **AT_PLANT}, {**UNLOADING, **AT_PLANT})
+        run_trip(cache=cache)
+        _, jev = run_trip(cache=cache, unloading=unloading, plant=PLANT)
+        self.assertEqual(len(jev.requests), 6)  # only the unloading photos, asked again with the place questions, found and picked
+        uploads, _ = make_trip(unloading=unloading)
+        far, _ = check_proof.analyze_trip(None, uploads, NUMBER, "jev-latest", QUANTITY, cache=cache, plant=(11.1649, 76.1549))
+        self.assertEqual(by_key(far["verdict"]["checks"])["unloading_plant"]["status"], "fail")
+
 
 class QuestionTests(unittest.TestCase):
     def test_time_and_date_questions_state_their_premise_and_allow_not_shown(self):
@@ -637,6 +787,17 @@ class QuestionTests(unittest.TestCase):
             self.assertEqual(set(outcomes), set(check_proof.QUESTIONS[slot][qid].criteria), qid)
         for qid in check_proof.NOUL_CHECKS:
             self.assertTrue(any(qid in qs for qs in check_proof.QUESTIONS.values()), qid)
+
+    def test_place_questions_state_their_premise_and_allow_not_shown(self):
+        for qid in check_proof.PLACE:
+            question = check_proof.QUESTIONS["photo"][qid]
+            with self.subTest(qid=qid):
+                self.assertTrue(question.instructions.startswith(check_proof.STAMP))
+                self.assertIn(check_proof.NOT_SHOWN, question.criteria)
+                self.assertLessEqual(len(question.criteria), 255)
+        self.assertEqual(set(check_proof.questions_for("photo", None)) | set(check_proof.PLACE),
+                         set(check_proof.questions_for("photo", None, place=True)))
+        self.assertNotEqual(check_proof.question_version("photo"), check_proof.question_version("photo", place=True))
 
     def test_question_version_changes_with_the_questions(self):
         before = check_proof.question_version("photo")
@@ -741,6 +902,18 @@ class RunTripsTests(unittest.TestCase):
         self.assertEqual(fields, {"photo time", "plate matches", "slip kind", "bill number", "tare time", "gross time", "weighing order"})
 
 
+class RunTripsPlaceTests(unittest.TestCase):
+    def test_compare_positions_with_hand_read_values(self):
+        unloading = ({**UNLOADING, **AT_PLANT}, {**UNLOADING, **stamped_at("11.440504", "75.941976")})
+        trip, _ = run_trip(unloading=unloading, plant=PLANT)
+        truth = json.loads(json.dumps(TRUTH))
+        for name in ("unloading1.jpg", "unloading2.jpg"):
+            truth["photos"][name] |= {"lat": 11.440404, "long": 75.941976}
+        items = [i for i in run_trips.compare(trip, truth, {"vehicle_number": NUMBER}) if i["field"] == "photo position"]
+        self.assertEqual([(i["image"], i["expected"], i["right"]) for i in items],
+                         [("unloading1.jpg", "11.4404, 75.9419", True), ("unloading2.jpg", "11.4404, 75.9419", False)])
+
+
 class AppTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -801,7 +974,7 @@ class AppTests(unittest.TestCase):
             self.assertIn(b"Proof Check Bench", response.read())
         status, body = self.get("/api/status")
         self.assertTrue(body["key_set"])
-        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "clock_slack": 5})
+        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "clock_slack": 5, "plant_radius": 500})
 
     def test_lists_and_loads_trip_folders(self):
         status, trips = self.get("/api/trips")
@@ -821,7 +994,9 @@ class AppTests(unittest.TestCase):
                                              "bill": [self.image(COLOURS[7])]}})
         self.assertEqual(status, 200, body)
         self.assertEqual((body["vehicle_number"], body["quantity"]), (NUMBER, QUANTITY))
-        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "clock_slack": 10})
+        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "clock_slack": 10, "plant_radius": 500})
+        self.assertIsNone(body["plant"])
+        self.assertNotIn("unloading_plant", by_key(body["verdict"]["checks"]))
         self.assertEqual(body["verdict"]["title"], "Accepted", body["verdict"]["flags"])
         self.assertEqual(body["images"]["bill"][0]["rotated"], 90)
         self.assertEqual(by_key(body["verdict"]["checks"])["reused"]["status"], "pass")
@@ -847,6 +1022,21 @@ class AppTests(unittest.TestCase):
                                   "images": {"loading": [self.image(COLOURS[0])]}})
         self.assertEqual(status, 400)
         self.assertIn("whole minutes", body["error"])
+
+    def test_checks_the_plant_given(self):
+        self.jev.by_colour = {COLOURS[8]: [{**UNLOADING, **PULATH}]}
+        status, body = self.post({"vehicle_number": NUMBER, "model": "jev-latest", "plant": "11.4404, 75.9420",
+                                  "plant_radius": "300", "images": {"unloading": [self.image(COLOURS[8])]}})
+        self.assertEqual(status, 200, body)
+        self.assertEqual((body["plant"], body["limits"]["plant_radius"]), ([11.4404, 75.942], 300))
+        c = by_key(body["verdict"]["checks"])["unloading_plant"]
+        self.assertEqual((c["status"], c["detail"]), ("fail", "x.jpg is stamped at 11.1649, 76.1549, 38 km from the plant (within 300 m allowed)"))
+
+    def test_rejects_a_plant_that_is_not_a_position(self):
+        status, body = self.post({"vehicle_number": NUMBER, "plant": "Raroth", "model": "jev-latest",
+                                  "images": {"loading": [self.image(COLOURS[0])]}})
+        self.assertEqual(status, 400)
+        self.assertIn("latitude, longitude", body["error"])
 
     def test_rejects_a_quantity_that_is_not_a_number(self):
         status, body = self.post({"vehicle_number": NUMBER, "quantity": "lots", "model": "jev-latest",

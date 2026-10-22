@@ -1,6 +1,6 @@
 # Jev proof check
 
-Checks the proof sent in for a waste-collection trip, using [TypeSafe's Jev model](https://docs.typesafe.ai). You type the trip's vehicle number and quantity in kilograms, add its **loading photos**, **unloading photos** and **weigh bills**, and it checks them against each other and against what you typed.
+Checks the proof sent in for a waste-collection trip, using [TypeSafe's Jev model](https://docs.typesafe.ai). You type the trip's vehicle number and quantity in kilograms (and, optionally, the plant's location), add its **loading photos**, **unloading photos** and **weigh bills**, and it checks them against each other and against what you typed.
 
 A trip runs **tare → loading → gross → unloading**: the empty vehicle is weighed (tare), loaded and photographed, weighed loaded (gross), and photographed again where it unloads. A trip weighed gross first is flagged.
 
@@ -22,6 +22,9 @@ A trip runs **tare → loading → gross → unloading**: the empty vehicle is w
 - Was every unloading photo taken after the gross weighing, on the same day?
 
 A photo's clock may be off the weighbridge's by up to 5 minutes (the clock slack). The 60 and 5 are defaults: you can change them for each run.
+
+**Place**, when you give the plant's location
+- Was the trip unloaded at the plant? At least one unloading photo's GPS stamp must place it within 500 m of the plant, and a photo stamped farther away is a problem. Positions are read to four decimals, so the distance is known to about 10 m. The plant's latitude and longitude are an input (`--plant "11.4404, 75.9420"`, a field on the page, or `"plant"` in `trip.json`), never written into the code, and the 500 m is a default you can change.
 
 **Across trips**
 - Was any image already used in another trip? The same file, or a look-alike copy.
@@ -51,6 +54,19 @@ Jev is a "System One" model. A chat model writes text; Jev doesn't. You send it 
 | `plate_number` | choice | Is the plate the typed number: `different`, `same`, `cannot_tell` |
 | `stamp_hour`, `stamp_minute` | choice | Time in the GPS stamp: `00`–`23`, `00`–`59`, or `not_shown` |
 | `stamp_day`, `stamp_month` | choice | Date in the GPS stamp: `01`–`31`, `01`–`12`, or `not_shown` |
+
+**Unloading photos, when the plant's location is given:** 4 more questions, then 2 more requests
+
+| Question | Type | Answers |
+|-|-|-|
+| `lat_degrees`, `long_degrees` | choice | Whole degrees of the stamp's latitude and longitude: `0`–`90`, `0`–`180`, or `not_shown` |
+| `lat_decimals`, `long_decimals` | choice | The first two digits after the decimal point: `00`–`99`, or `not_shown` |
+| `line` | box | Where the stamp's Lat/Long line is, asked of `jev-preview` (Box questions need Jev 1.14) |
+| `lat_pick`, `long_pick` | choice | On that line cut out at full resolution: which of the 100 values starting with the two-decimal reading it is, such as `11.4400`–`11.4499`, or `not_shown` |
+
+Jev can't read a number out, so a position is read in steps. The degrees and first two decimals are asked as Choices on the photo, like a time. Asked for the third and fourth digits the same way, Jev often gave the second one again, so instead code finds the stamp's Lat/Long line with a Box question, cuts it out of the full-resolution photo, and asks Jev which of 100 candidates (`11.4400` to `11.4499`) the line shows. Picking a whole value works where single digits don't (see [Real trips](#real-trips)).
+
+Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`); code measures how far the plant is from the nearest point of that square, and more than `plant_radius` (500 m) is a problem. A trip passes only on a position picked surely to four decimals. When the pick is unsure, the two-decimal reading (a square about 1.1 km across) can still show a photo is away, read surely or by adding up Jev's probabilities over the likeliest readings (`chance_away`: 11.16 or 11.11 are both far from 11.44), but it can't show one is within 500 m, so that photo goes to a person. The plant's location is never sent to Jev, so the same answers serve any plant, and changing the plant or the distance needs no new request. Only the printed stamp is read: phone apps strip the GPS data from the file (4 of the day's 260 images kept it).
 
 **Each weigh bill:** 23 questions
 
@@ -93,6 +109,7 @@ All of this is in code (`check_proof.trip_checks`, `decide`, `verdict`), not in 
 | Loading photos | every one between tare and gross, give or take 5 min | a stamp time unreadable or unsure | any outside |
 | Unloading photos | every one after gross, give or take 5 min | a stamp time unreadable or unsure | any before |
 | Same day as gross | every unloading photo dated the gross weighing's day | a stamp date unreadable or unsure | any on another day |
+| At the plant (with `--plant`) | at least one unloading photo's stamp, picked surely to four decimals, places it within 500 m of the plant | no photo read surely to four decimals | any photo's stamp places it farther away: four decimals picked surely, or two read surely or at least 80% likely |
 | Images not used in other trips | none seen in another trip | a look-alike copy | the same file |
 | One trip at a time (`run_trips.py`) | – | – | the vehicle is on another trip at the same time |
 
@@ -100,7 +117,7 @@ Any choice answer, or time or date reading, below 80% confidence also goes to a 
 
 The trip is **Flagged: problem found** if any check finds a problem, **Flagged: please check** if any check is unsure, and **Accepted** only when every check passes. Problems are listed first, and a timeline shows tare, loading, gross and unloading in time order, with any out of place in red.
 
-The timing limits are `check_proof.Limits`: `min_gap_tare_first` (60) and `clock_slack` (5), in minutes. Each run can change them, on the page, the command line, or a trip's `trip.json`.
+The limits are `check_proof.Limits`: `min_gap_tare_first` (60) and `clock_slack` (5), in minutes, and `plant_radius` (500), in metres. Each run can change them, on the page, the command line, or a trip's `trip.json`.
 
 The 0.8 and 0.2 thresholds (`CONFIDENT`, `YES`, `NO` in `check_proof.py`), and the 0.5 rotation cut-off (`ROTATE`), are placeholders. Choose real ones with `run_trips.py` and `evaluate.py` (below).
 
@@ -147,7 +164,8 @@ trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773/
   collection1.jpg  collection2.jpg     loading photos (also loading*.jpg)
   unloading1.jpg   unloading2.jpg      unloading photos
   weighbill1.jpg   weighbill2.jpg      weigh bills (also bill*.jpg; .heic files that are really JPEGs work too)
-  trip.json                            optional: {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10}
+  trip.json                            optional: {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10,
+                                                  "plant": "11.4404, 75.9420", "plant_radius": 500}
 ```
 
 `trip.json` holds what was typed for the trip. Without it, the hand-read vehicle number and net weight from a `truth.jsonl` in a parent folder stand in. `trips/` holds real records (phone numbers, driver names), so it isn't in git.
@@ -162,7 +180,7 @@ Open the address it prints. It's `http://127.0.0.1:8765` unless that port is tak
 
 On the page:
 1. Pick a trip from **Load a trip from trips/**, or type the vehicle number and quantity yourself.
-2. Change the timing limits if you need to: they start at 60 and 5 minutes.
+2. Change the timing limits if you need to: they start at 60 and 5 minutes. Type the plant's location (copied from Google Maps, such as `11.4404, 75.9420`) to check where unloading happened; the page remembers it.
 3. Add images to **Loading photos**, **Unloading photos** and **Weigh bills**: click **+ Add** or drop files on a box. **×** removes one.
 4. Click **Check**.
 
@@ -180,6 +198,7 @@ Changing the number, the quantity, a limit or an image clears the result, so a v
 .venv/bin/python check_proof.py KL57AB8815 --trip trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773 --quantity 1630
 .venv/bin/python check_proof.py KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg --bill slip1.jpg slip2.jpg \
     --quantity 1630 --min-gap-tare-first 45 --clock-slack 10 --others trips/   # this run's own limits, and flag reused images
+.venv/bin/python check_proof.py KL57AB8815 --trip … --plant "11.4404, 75.9420" --plant-radius 300   # unloaded at the plant?
 .venv/bin/python check_proof.py KL57AB8815 --trip … --model jev-preview   # try Jev 1.14
 ```
 
@@ -191,6 +210,7 @@ Prints each image's answers and readings, then the verdict, timeline, limits and
 .venv/bin/python run_trips.py trips/inward-2026-10-19              # asks Jev about every trip, saves the answers in eval/
 .venv/bin/python run_trips.py trips/inward-2026-10-19 --cached     # re-checks with saved answers: free
 .venv/bin/python run_trips.py trips/inward-2026-10-19 --only 171773 171496 --json eval/two.json
+.venv/bin/python run_trips.py trips/inward-2026-10-19 --plant "11.4404, 75.9420"   # every trip without its own plant in trip.json
 ```
 
 It prints a line per trip (verdict and first flags), the totals, and, where `truth.jsonl` has hand-read values, how often Jev read each kind of value right, with every wrong reading. Saved answers are reused whenever the image, questions, typed values and model are the same, so after changing a rule or a threshold, `--cached` re-checks the whole day without asking Jev again.
@@ -213,11 +233,11 @@ The report shows accuracy per field, accuracy at each confidence level per group
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, one clear plate per kind, every photo's timing with the clock slack, gross first, the gap, past midnight, limits per run, missing images and quantity), reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
+The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, one clear plate per kind, every photo's timing with the clock slack, gross first, the gap, past midnight, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions), reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
 
 ## Real trips
 
-`trips/inward-2026-10-19/` holds one plant's inward log for 19 Oct 2026: 48 trips, 42 with weigh bills. `truth.jsonl` there has values read by hand from every image of those 42 (plates, stamp times, slip weights and times), to measure Jev against. They were read by Claude subagents, not yet checked by a person.
+`trips/inward-2026-10-19/` holds one plant's inward log for 19 Oct 2026: 48 trips, 42 with weigh bills. `truth.jsonl` there has values read by hand from every image of those 42 (plates, stamp times and positions, slip weights and times), to measure Jev against. They were read by Claude subagents (the unloading positions by Claude, checked against tesseract text recognition), not yet checked by a person.
 
 What the day showed, from the hand-read values:
 - 38 trips were weighed tare first, 3 gross first, and 1 unclear (two weighings 9 seconds apart).
@@ -232,11 +252,13 @@ What Jev did on that day (`run_trips.py`, `jev-latest`, about $0.10 for the 42 t
 - **Sideways slips:** most slips are photographed sideways. Jev is sure a slip is sideways but close to a coin flip on which way, so the likelier way is tried and the next look decides between upright and upside down (`turn_for`). Before this, 33 of 43 sideways slips were read sideways, and bill times were right only about 3 in 4.
 - **Wrong typed values:** ten real trips checked with the vehicle number's last two characters swapped were all flagged (9 as a problem, 1 to check), and with the quantity's digits swapped all 10 were flagged by the net weight. Jev twice said "same" to a wrong number on a single image, but the other images caught it, so a trip is safer than any single image.
 - **AM/PM:** asked to convert "03:06:08 PM" itself, Jev often answered 03; the bill hour is now read as printed with AM or PM asked separately. Photo stamps are read right with the conversion, so they're unchanged.
+- **Where unloading happened** (`--plant "11.4404, 75.9420"`, 22 Oct 2026, about $0.08 for the 88 unloading photos, three requests each): the hand-read stamps put 6 trips' unloading photos away from the plant, 2.9 to 41 km off (171493, 171513, 171518, 171595, 171673, 171699); every other unloading photo was within 51 m. The check flagged all 6 as a problem, five with the distance to the metre (such as "stamped at 11.4201, 75.9250, 2.9 km from the plant"), including 171513, which had been accepted. It passed 35 of the 36 trips at the plant and sent 1 to a person (neither photo picked surely); none was flagged as a problem. Jev picked 82 of 88 positions to four decimals and was sure of 77, all right.
+- **How the four decimals were found:** asked for the third and fourth digits as single Choices, Jev got the longitude's third digit right 47 times in 88 (often giving the second digit again), 67 when told the digits before it, and no better on the Lat/Long line cut out with a Box question. Picking the whole value from 100 candidates on the cut-out line was right 173 times in 176. When the two-decimal reading was torn (11.44 or 11.40, mostly), candidates for both starts are offered; before that, two photos at the plant were flagged from a misread 11.40.
 - **Dates:** every unloading photo must be dated the same day as the gross weighing (by the calendar date, so a trip weighed just before midnight and unloaded just after is flagged too). On 19 Oct every unloading photo was.
 
 ## Cost
 
-Jev charges **$0.042 per million input tokens**; output is free. Images count as input tokens at the same rate: a photo or slip is about 10,000 tokens, so a trip of 6 images is about $0.003, and the whole real day about $0.15. The page, the command line and `run_trips.py` show the exact count and cost.
+Jev charges **$0.042 per million input tokens**; output is free. Images count as input tokens at the same rate: a photo or slip is about 10,000 tokens, so a trip of 6 images is about $0.003, and the whole real day about $0.15. With `--plant`, each unloading photo takes two more requests (finding and reading its Lat/Long line), about $0.001 more per photo. The page, the command line and `run_trips.py` show the exact count and cost.
 
 | Model | Alias | Notes |
 |-|-|-|
@@ -245,10 +267,11 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 
 ## Limits
 
+- **Box questions need `jev-preview`.** Finding the stamp's Lat/Long line always uses Jev 1.14, whichever model the rest of the check uses.
 - **Image input is experimental.** TypeSafe calls it "dreamer-ready": fine for prototypes, not yet production quality. Accuracy and the request format can change between releases. Each request needs the `TypeSafe-Danger-Zone-Images: true` header, which the code sends.
 - **Jev can't transcribe text.** It only picks from the options it's given. It can confirm the typed number, but it can't say what a different number is. Addresses, serial numbers and weights can't be read out.
 - **Jev only sees pixels.** The API strips all file metadata, so GPS data stored in the photo file never reaches it. "GPS stamp" here means the stamp is printed on the photo. The real day's photos had no GPS data in their files anyway.
-- **A GPS stamp isn't proof.** GPS camera apps can be set to any place and time. Where the photo was taken isn't checked yet.
+- **A GPS stamp isn't proof.** GPS camera apps can be set to any place and time. With the plant's location given, an unloading photo's printed position must be near it, but a faked stamp can show any position.
 - **Reused images** are found only among the trips under `trips/` (or the folder `run_trips.py` is given). A copy that was cropped or edited may not be found.
 - **Net weight in kilograms.** The quantity is compared with the final slip's net weight as a number of kilograms.
 - **Other weighbridge layouts.** Slips with only FIRST/SECOND weights and one print time (Lakshmi), or Date In/Out without gross and tare labels (Bhavani), aren't read yet; their trips go to a person.
@@ -275,7 +298,7 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 
 ## Ideas not built yet
 
-- **Where photos were taken.** Check the GPS stamp's place against the collection point and the plant, and the travel time from loading to the gross weighing.
+- **Where loading photos were taken.** Check loading photos against each collection point, the same way unloading photos are checked against the plant, and the travel time from loading to the gross weighing.
 - **More slip layouts.** Read Lakshmi's two print times (first and final slip) and Bhavani's Date In/Out by which weight is heavier.
 - **Records as input.** Take the vehicle number and quantity from the inward log export instead of `trip.json`.
 - **Teach by example.** If answers are unsure on real images, describe each option with a few example images as well as words.

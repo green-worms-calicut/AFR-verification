@@ -2,12 +2,14 @@
 
 A trip folder holds collection*/loading* photos, unloading* photos and weighbill* images, as in the
 inward log export. What was typed for the trip comes from trip.json in its folder:
-    {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10}
+    {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10, "plant": "11.4404, 75.9420"}
 Without one, the hand-read vehicle number and final-slip net weight from truth.jsonl (in the folder
-given or a parent) stand in for it, so the run checks Jev against the images themselves.
+given or a parent) stand in for it, so the run checks Jev against the images themselves. The plant's
+location comes from --plant for every trip, unless a trip.json gives its own.
 
 Usage:
     .venv/bin/python run_trips.py trips/inward-2026-10-19              # asks Jev, saves answers in eval/
+    .venv/bin/python run_trips.py trips/inward-2026-10-19 --plant "11.4404, 75.9420"   # and checks unloading at the plant
     .venv/bin/python run_trips.py trips/inward-2026-10-19 --cached     # re-checks saved answers, no requests
     .venv/bin/python run_trips.py trips/inward-2026-10-19 --only 171773 171496 --model jev-preview
 
@@ -59,6 +61,12 @@ def hhmm(text: str | None) -> str | None:
     return text.split()[-1] if text else None
 
 
+def cut(degrees: float, places: int) -> str:
+    """11.440404, 4 -> '11.4404': cut off at `places` decimals, as Jev reads them."""
+    whole, _, decimals = f"{degrees:.6f}".partition(".")
+    return f"{whole}.{decimals[:places]}"
+
+
 def compare(trip: dict, truth: dict, typed: dict) -> list[dict]:
     """What Jev read against the hand-read values, one item per value both have."""
     items = []
@@ -73,6 +81,10 @@ def compare(trip: dict, truth: dict, typed: dict) -> list[dict]:
             t = truth["photos"].get(r["name"], {})
             reading = next(x for x in r["readings"] if x["key"] == "photo_time")
             add("photo time", r["name"], hhmm(t.get("stamp_at")), reading["value"])
+            place = next((x for x in r["readings"] if x["key"] == "position"), None)
+            if place and t.get("lat") is not None:  # to the decimals Jev read: four when picked, otherwise two
+                places = len((place["value"] or "0.00").split(", ")[0].partition(".")[2])
+                add("photo position", r["name"], f"{cut(t['lat'], places)}, {cut(t['long'], places)}", place["value"])
             plate = t.get("plate")
             if plate:
                 expected = "same" if plate == number else "cannot_tell" if plate in ("unreadable", "not_visible") else "different"
@@ -100,12 +112,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("root", type=Path, help="a folder of trip folders, such as trips/inward-2026-10-19")
     parser.add_argument("--only", nargs="+", default=[], help="trip ids (folder names) to check")
+    parser.add_argument("--plant", help='the plant\'s latitude, longitude, such as "11.4404, 75.9420", for trips '
+                                        "whose trip.json doesn't give one: unloading photos must be stamped near it")
     parser.add_argument("--cached", action="store_true", help="use saved answers only; trips without them are skipped")
     parser.add_argument("--model", default="jev-latest", help="jev-latest (1.13), jev-preview (1.14), or a pinned ID")
     parser.add_argument("--workers", type=int, default=2, help="trips checked at once (each asks about its images at once)")
     parser.add_argument("--json", type=Path, help="also write every trip's full result to this file")
     args = parser.parse_args()
 
+    try:
+        plant = check_proof.parse_plant(args.plant)
+    except ValueError as error:
+        parser.error(str(error))
     folders = [f for f in find_trips(args.root) if not args.only or f.name in args.only]
     truth = find_truth(args.root)
     index = check_proof.ImageIndex.of_folders(args.root)
@@ -145,14 +163,16 @@ def main() -> None:
             return
         number = check_proof.normalize_vehicle_number(typed["vehicle_number"])
         quantity = check_proof.parse_quantity(typed.get("quantity"))
-        limits = check_proof.parse_limits(typed)
         try:
+            limits = check_proof.parse_limits(typed)
+            trip_plant = check_proof.parse_plant(typed["plant"]) if typed.get("plant") else plant
             trip, _ = check_proof.analyze_trip(client, check_proof.read_trip_folder(folder), number, args.model,
-                                               quantity, limits, index, trip_id, saved)
+                                               quantity, limits, index, trip_id, saved, trip_plant)
         except Exception as error:
             skipped[folder.name] = f"{type(error).__name__}: {error}"
             return
-        results[folder.name] = {**trip, "vehicle_number": number, "quantity": quantity, "typed_from": source}
+        results[folder.name] = {**trip, "vehicle_number": number, "quantity": quantity, "plant": trip_plant,
+                                "typed_from": source}
         with lock:
             cache_path.parent.mkdir(exist_ok=True)
             cache_path.write_text(json.dumps(dict(saved)))
