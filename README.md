@@ -2,7 +2,9 @@
 
 Checks the proof sent in for a waste-collection trip, using [TypeSafe's Jev model](https://docs.typesafe.ai). You type the trip's vehicle number and quantity in kilograms (and, optionally, the plant's location), add its **loading photos**, **unloading photos** and **weigh bills**, and it checks them against each other and against what you typed.
 
-A trip runs **tare → loading → gross → unloading**: the empty vehicle is weighed (tare), loaded and photographed, weighed loaded (gross), and photographed again where it unloads. A trip weighed gross first is flagged.
+A trip runs one of two ways, worked out from which weighing came first on the final slip:
+- **Tare first: tare → loading → gross → unloading.** The empty vehicle is weighed (tare), loaded and photographed, weighed loaded (gross), and photographed again where it unloads.
+- **Gross first: loading → gross → unloading → tare.** The vehicle is loaded and photographed, weighed loaded at the plant's weighbridge (gross), unloaded and photographed, then weighed empty (tare).
 
 **Photos** (each loading and unloading photo)
 - Does it show a vehicle, with a GPS stamp printed on it?
@@ -17,11 +19,11 @@ A trip runs **tare → loading → gross → unloading**: the empty vehicle is w
 - Is the gross heavier than the tare? If not, the labels look swapped.
 
 **Times**, from the final slip and the photos' GPS stamps
-- Was the tare weighed first, at least 60 minutes before the gross?
-- Was every loading photo taken between the tare and gross weighings?
-- Was every unloading photo taken after the gross weighing, on the same day?
+- Tare first: were the weighings at least 60 minutes apart, every loading photo taken between them, and every unloading photo after the gross weighing?
+- Gross first: were the weighings at least 30 minutes apart, every loading photo taken before the gross weighing, and every unloading photo between the gross and tare weighings?
+- Was every unloading photo taken on the same day as the gross weighing?
 
-A photo's clock may be off the weighbridge's by up to 5 minutes (the clock slack). The 60 and 5 are defaults: you can change them for each run.
+A photo's clock may be off the weighbridge's by up to 5 minutes (the clock slack). The 60, 30 and 5 are defaults: you can change them for each run.
 
 **Place**, when you give the plant's location
 - Was the trip unloaded at the plant? At least one unloading photo's GPS stamp must place it within 500 m of the plant, and a photo stamped farther away is a problem. Positions are read to four decimals, so the distance is known to about 10 m. The plant's latitude and longitude are an input (`--plant "11.4404, 75.9420"`, a field on the page, or `"plant"` in `trip.json`), never written into the code, and the 500 m is a default you can change.
@@ -104,10 +106,11 @@ All of this is in code (`check_proof.trip_checks`, `decide`, `verdict`), not in 
 | Bills match | every slip `same` | any slip unclear | any slip `different` |
 | Net weight (final slip) | `same` | `not_shown`, or no quantity typed | `different` |
 | Gross heavier than tare (final slip) | `gross_heavier` | `not_shown` | `tare_heavier` |
-| Weighing order | tare first | a time unreadable, or both the same | gross first |
-| Tare to gross | at least 60 min apart | a time unsure | less |
-| Loading photos | every one between tare and gross, give or take 5 min | a stamp time unreadable or unsure | any outside |
-| Unloading photos | every one after gross, give or take 5 min | a stamp time unreadable or unsure | any before |
+| Weighing order | tare first or gross first, clearly | a time unreadable or unsure, or both the same | – |
+| Tare to gross (tare first) | at least 60 min apart | a time unsure | less |
+| Gross to tare (gross first) | at least 30 min apart | a time unsure | less |
+| Loading photos | every one between tare and gross (tare first) or before gross (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
+| Unloading photos | every one after gross (tare first) or between gross and tare (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
 | Same day as gross | every unloading photo dated the gross weighing's day | a stamp date unreadable or unsure | any on another day |
 | At the plant (with `--plant`) | at least one unloading photo's stamp, picked surely to four decimals, places it within 500 m of the plant | no photo read surely to four decimals | any photo's stamp places it farther away: four decimals picked surely, or two read surely or at least 80% likely |
 | Images not used in other trips | none seen in another trip | a look-alike copy | the same file |
@@ -115,9 +118,9 @@ All of this is in code (`check_proof.trip_checks`, `decide`, `verdict`), not in 
 
 Any choice answer, or time or date reading, below 80% confidence also goes to a person.
 
-The trip is **Flagged: problem found** if any check finds a problem, **Flagged: please check** if any check is unsure, and **Accepted** only when every check passes. Problems are listed first, and a timeline shows tare, loading, gross and unloading in time order, with any out of place in red.
+The trip is **Flagged: problem found** if any check finds a problem, **Flagged: please check** if any check is unsure, and **Accepted** only when every check passes. Problems are listed first, and a timeline shows the weighings and photos in time order, with any out of place in red.
 
-The limits are `check_proof.Limits`: `min_gap_tare_first` (60) and `clock_slack` (5), in minutes, and `plant_radius` (500), in metres. Each run can change them, on the page, the command line, or a trip's `trip.json`.
+The limits are `check_proof.Limits`: `min_gap_tare_first` (60), `min_gap_gross_first` (30) and `clock_slack` (5), in minutes, and `plant_radius` (500), in metres. Each run can change them, on the page, the command line, or a trip's `trip.json`.
 
 The 0.8 and 0.2 thresholds (`CONFIDENT`, `YES`, `NO` in `check_proof.py`), and the 0.5 rotation cut-off (`ROTATE`), are placeholders. Choose real ones with `run_trips.py` and `evaluate.py` (below).
 
@@ -197,7 +200,7 @@ Changing the number, the quantity, a limit or an image clears the result, so a v
 ```bash
 .venv/bin/python check_proof.py KL57AB8815 --trip trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773 --quantity 1630
 .venv/bin/python check_proof.py KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg --bill slip1.jpg slip2.jpg \
-    --quantity 1630 --min-gap-tare-first 45 --clock-slack 10 --others trips/   # this run's own limits, and flag reused images
+    --quantity 1630 --min-gap-tare-first 45 --min-gap-gross-first 20 --clock-slack 10 --others trips/   # this run's own limits, and flag reused images
 .venv/bin/python check_proof.py KL57AB8815 --trip … --plant "11.4404, 75.9420" --plant-radius 300   # unloaded at the plant?
 .venv/bin/python check_proof.py KL57AB8815 --trip … --model jev-preview   # try Jev 1.14
 ```
@@ -233,7 +236,7 @@ The report shows accuracy per field, accuracy at each confidence level per group
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, one clear plate per kind, every photo's timing with the clock slack, gross first, the gap, past midnight, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions), reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
+The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions), reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
 
 ## Real trips
 
@@ -241,7 +244,7 @@ The tests use a fake Jev API that tells the test images apart by colour, so they
 
 What the day showed, from the hand-read values:
 - 38 trips were weighed tare first, 3 gross first, and 1 unclear (two weighings 9 seconds apart).
-- In every genuine trip the loading photos fall between tare and gross, and the unloading photos come after gross.
+- In every genuine tare-first trip the loading photos fall between tare and gross, and the unloading photos come after gross. In the gross-first trips 171522 and 171562, the loading photos come before gross and the unloading photos between gross and tare, which are 25 and 16 minutes apart. The third, 171493, has its gross and tare labels swapped on the final slip.
 - Images were reused across trips: 171531 and 171566 are the same files; 171496 uses 171562's loading photos and 171531's unloading photos and bill; 171654 and 171655 share a bill and unloading photos.
 - About half the trips use the G W weighbridge (a time printed with each weight). The rest use Lakshmi, Bhavani and other slips, which print times or labels differently.
 
@@ -255,6 +258,7 @@ What Jev did on that day (`run_trips.py`, `jev-latest`, about $0.10 for the 42 t
 - **Where unloading happened** (`--plant "11.4404, 75.9420"`, 22 Oct 2026, about $0.08 for the 88 unloading photos, three requests each): the hand-read stamps put 6 trips' unloading photos away from the plant, 2.9 to 41 km off (171493, 171513, 171518, 171595, 171673, 171699); every other unloading photo was within 51 m. The check flagged all 6 as a problem, five with the distance to the metre (such as "stamped at 11.4201, 75.9250, 2.9 km from the plant"), including 171513, which had been accepted. It passed 35 of the 36 trips at the plant and sent 1 to a person (neither photo picked surely); none was flagged as a problem. Jev picked 82 of 88 positions to four decimals and was sure of 77, all right.
 - **How the four decimals were found:** asked for the third and fourth digits as single Choices, Jev got the longitude's third digit right 47 times in 88 (often giving the second digit again), 67 when told the digits before it, and no better on the Lat/Long line cut out with a Box question. Picking the whole value from 100 candidates on the cut-out line was right 173 times in 176. When the two-decimal reading was torn (11.44 or 11.40, mostly), candidates for both starts are offered; before that, two photos at the plant were flagged from a misread 11.40.
 - **Dates:** every unloading photo must be dated the same day as the gross weighing (by the calendar date, so a trip weighed just before midnight and unloaded just after is flagged too). On 19 Oct every unloading photo was.
+- **Gross first** (22 Oct 2026, re-checked from saved answers with `--plant`, gross to tare at least 30 min): 171522 and 171562 are no longer flagged for being weighed gross first, but their weighings are under 30 minutes apart: 25 and 16 minutes, hand-read. Jev read both slips' times below 0.8 confidence (171522's tare as 08:50; hand-read 09:02), so both go to a person rather than being flagged as a problem; read surely, both would be flagged. 171562 is still a problem for its reused images. 171595 (gross 11:41, tare 11:42 as read) is a problem: 1 minute apart, unloading at 12:28 after the tare, and 41 km from the plant. The verdict counts didn't change: 10 accepted, 14 problems, 18 to check.
 
 ## Cost
 

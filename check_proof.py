@@ -1,8 +1,10 @@
 """Check a whole trip's proof images against what was typed in: loading photos, unloading photos and weigh bills.
 
-The trip runs tare -> loading -> gross -> unloading: the empty vehicle is weighed (tare), loaded and
-photographed, weighed loaded (gross), and photographed again where it unloads. A trip weighed gross
-first is flagged.
+A trip runs one of two ways, worked out from which weighing came first:
+  - tare first: tare -> loading -> gross -> unloading. The empty vehicle is weighed (tare), loaded and
+    photographed, weighed loaded (gross), and photographed again where it unloads;
+  - gross first: loading -> gross -> unloading -> tare. The vehicle is loaded and photographed, weighed
+    loaded at the plant's weighbridge (gross), unloaded and photographed, then weighed empty (tare).
 
 Photos (each loading and unloading photo): does it show a vehicle, is a GPS stamp printed on it, is
 it a photo taken directly rather than a photo of a screen, and does one photo of each kind clearly
@@ -11,9 +13,10 @@ ignored), a final slip with both weights, the typed vehicle number on every slip
 quantity as the final slip's net weight, and gross heavier than tare?
 
 Times, from the final slip's tare and gross times and the photos' GPS stamps:
-  - tare is weighed before gross, at least `min_gap_tare_first` before;
-  - every loading photo is between the tare and gross weighings;
-  - every unloading photo is after the gross weighing.
+  - tare first: the weighings at least `min_gap_tare_first` apart, every loading photo between them,
+    and every unloading photo after gross;
+  - gross first: the weighings at least `min_gap_gross_first` apart, every loading photo before gross,
+    and every unloading photo between gross and tare.
 A photo's clock may be off the weighbridge's by up to `clock_slack`.
 
 Place: when the plant's location is given (`--plant`, never fixed in code), the latitude and longitude
@@ -37,7 +40,7 @@ Usage:
     .venv/bin/python check_proof.py KL57AB8815 --trip trips/.../171773 --quantity 1630
     .venv/bin/python check_proof.py KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg \\
         --bill slip1.jpg slip2.jpg --quantity 1630 [--plant "11.4404, 75.9420" --plant-radius 500] \\
-        [--min-gap-tare-first 60] [--clock-slack 5] [--model jev-preview]
+        [--min-gap-tare-first 60] [--min-gap-gross-first 30] [--clock-slack 5] [--model jev-preview]
 
 The same checks run behind the test page in app.py, the trip runner run_trips.py, and the accuracy
 report in evaluate.py.
@@ -94,6 +97,7 @@ class Limits:
     """The timing rules, in minutes, and how near the plant unloading must be, in metres. The defaults can be changed for each run."""
 
     min_gap_tare_first: int = 60  # loading happens between the weighings, so they are at least this far apart
+    min_gap_gross_first: int = 30  # unloading happens between the weighings, so they are at least this far apart
     clock_slack: int = 5  # the camera's clock and the weighbridge's may disagree by this much
     # How far from the plant an unloading photo's square (`plant_check`) may be. Plant photos on 19 Oct 2026
     # were stamped within 51 m of it; the nearest unloading elsewhere was 2.9 km away.
@@ -102,11 +106,12 @@ class Limits:
 
 # How each limit is described in error messages and the command-line help, and its unit.
 LIMIT_NAMES = {
-    "min_gap_tare_first": "the least gap between the tare and gross weighings",
+    "min_gap_tare_first": "the least gap between the tare and gross weighings, when tare is first",
+    "min_gap_gross_first": "the least gap between the gross and tare weighings, when gross is first",
     "clock_slack": "how far a photo's clock may be off the weighbridge's",
     "plant_radius": "how far from the plant an unloading photo's stamp may place it",
 }
-LIMIT_UNITS = {"min_gap_tare_first": "minutes", "clock_slack": "minutes", "plant_radius": "metres"}
+LIMIT_UNITS = {"min_gap_tare_first": "minutes", "min_gap_gross_first": "minutes", "clock_slack": "minutes", "plant_radius": "metres"}
 
 # The API key lives in the login keyring (GNOME Keyring), stored with KEY_STORE_COMMAND.
 KEY_LOOKUP = ["secret-tool", "lookup", "service", "typesafe", "account", "api"]
@@ -902,41 +907,52 @@ def photo_moments(results: list[dict]) -> list[tuple[dict, dict | None]]:
     return out
 
 
-def photo_timing(role: str, results: list[dict], w: dict, limits: Limits) -> dict | None:
-    """Every loading photo between tare and gross, or every unloading photo after gross, give or take the clock slack."""
+def photo_window(role: str, tare_first: bool) -> tuple[str | None, str | None]:
+    """Which weighings a loading or unloading photo must fall between: (after, before), None where open.
+
+    Tare first, loading is between tare and gross and unloading after gross. Gross first, loading is
+    before gross and unloading between gross and tare.
+    """
+    if role == "loading":
+        return ("tare", "gross") if tare_first else (None, "gross")
+    return ("gross", None) if tare_first else ("gross", "tare")
+
+
+def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_first: bool = True) -> dict | None:
+    """Every loading or unloading photo in its window of the weighings (`photo_window`), give or take the clock slack."""
     if not results:
         return None
     slack = limits.clock_slack
     allowing = f", allowing {duration(slack)} clock difference" if slack else ""
-    tare, gross = w["tare"], w["gross"]
-    label = "Between tare and gross" if role == "loading" else "After gross"
+    after, before = photo_window(role, tare_first)
+    shown = dict(zip(("tare", "gross"), show(w["tare"], w["gross"])))
+    label = (f"Between {after} and {before}" if after and before else f"After {after}" if after else f"Before {before}")
     taken = photo_moments(results)
     unread = [r for r, m in taken if not m]
     wrong, unsure, times = [], [], []
     for r, m in taken:
         if not m:
             continue
-        if role == "loading":
-            ok = minutes_between(tare, m) >= -slack and minutes_between(m, gross) >= -slack
-        else:
-            ok = minutes_between(gross, m) >= -slack
+        early = bool(after) and minutes_between(w[after], m) < -slack
+        late = bool(before) and minutes_between(m, w[before]) < -slack
         certainty = min(m["certainty"], w["certainty"])
-        (unsure if certainty < CONFIDENT else times if ok else wrong).append((r, m))
+        (unsure if certainty < CONFIDENT else wrong if early or late else times).append((r, m, early))
     word = "Loading" if role == "loading" else "Unloading"
-    t, g = show(tare, gross)
     if wrong:
-        r, m = wrong[0]
-        p = show(m, tare, gross)[0]
-        where = (f"before tare {t}" if minutes_between(tare, m) < -slack else f"after gross {g}") if role == "loading" else f"before gross {g}"
+        r, m, early = wrong[0]
+        p = show(m, w["tare"], w["gross"])[0]
+        where = f"before {after} {shown[after]}" if early else f"after {before} {shown[before]}"
         return check(role, f"{role}_timing", label, "fail", f"{word} {p} ({r['name']}) is {where}{allowing}",
                      min(m["certainty"], w["certainty"]))
     if unread:
         return check(role, f"{role}_timing", label, "review", f"GPS stamp time can't be read on {names(unread)}")
     if unsure:
-        return check(role, f"{role}_timing", label, "review", f"Unsure reading of {names([r for r, _ in unsure])}")
-    when = ", ".join(sorted({show(m, tare, gross)[0] for _, m in times}))
-    detail = f"{word} {when} is between tare {t} and gross {g}" if role == "loading" else f"{word} {when} is after gross {g}"
-    return check(role, f"{role}_timing", label, "pass", detail, min(min(m["certainty"] for _, m in times), w["certainty"]))
+        return check(role, f"{role}_timing", label, "review", f"Unsure reading of {names([r for r, *_ in unsure])}")
+    when = ", ".join(sorted({show(m, w["tare"], w["gross"])[0] for _, m, _ in times}))
+    window = (f"between {after} {shown[after]} and {before} {shown[before]}" if after and before
+              else f"after {after} {shown[after]}" if after else f"before {before} {shown[before]}")
+    return check(role, f"{role}_timing", label, "pass", f"{word} {when} is {window}",
+                 min(min(m["certainty"] for _, m, _ in times), w["certainty"]))
 
 
 def same_day(results: list[dict], w: dict) -> dict | None:
@@ -967,10 +983,12 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
                 limits: Limits = Limits(), plant: tuple[float, float] | None = None) -> tuple[list[dict], dict | None]:
     """Every check for a trip, and the weighings they used (None if the times couldn't be read).
 
-    The trip runs tare -> loading -> gross -> unloading. Gross first is a problem; the weighings must
-    be at least `min_gap_tare_first` apart; loading photos fall between them and unloading photos
-    after gross, give or take `clock_slack`, and on the same day as the gross weighing. With `plant`,
-    unloading must be stamped within `plant_radius` of it.
+    Tare first, the trip runs tare -> loading -> gross -> unloading: the weighings must be at least
+    `min_gap_tare_first` apart, loading photos fall between them and unloading photos after gross.
+    Gross first, it runs loading -> gross -> unloading -> tare: the weighings must be at least
+    `min_gap_gross_first` apart, loading photos fall before gross and unloading photos between them.
+    Photos may be off by `clock_slack`, and unloading must be on the same day as the gross weighing.
+    With `plant`, unloading must be stamped within `plant_radius` of it.
     """
     checks = photo_checks("loading", images.get("loading", []), vehicle_number)
     checks += photo_checks("unloading", images.get("unloading", []), vehicle_number)
@@ -992,18 +1010,22 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     if gap == 0:
         checks.append(check("times", "weigh_order", "Weighing order", "review", f"Tare and gross both at {g}"))
         return checks, w
-    if gap < 0:
-        checks.append(timing_check("times", "weigh_order", "Weighing order", False, "",
-                                   f"Gross first ({g}), then tare ({t}): the trip should be weighed tare first", w["certainty"]))
-        return checks, w
-    checks.append(timing_check("times", "weigh_order", "Weighing order", True,
-                               f"Tare first ({t}), then gross ({g}), from {w['source']}", "", w["certainty"]))
-    least = limits.min_gap_tare_first
-    checks.append(timing_check("times", "weigh_gap", "Tare to gross", gap >= least,
-                               f"{duration(gap)} apart (at least {duration(least)})",
-                               f"Only {duration(gap)} apart (at least {duration(least)} needed)", w["certainty"]))
+    tare_first = gap > 0
+    order = f"Tare first ({t}), then gross ({g})" if tare_first else f"Gross first ({g}), then tare ({t})"
+    checks.append(timing_check("times", "weigh_order", "Weighing order", True, f"{order}, from {w['source']}", "",
+                               w["certainty"]))
+    if tare_first:
+        least = limits.min_gap_tare_first
+        checks.append(timing_check("times", "weigh_gap", "Tare to gross", gap >= least,
+                                   f"{duration(gap)} apart (at least {duration(least)})",
+                                   f"Only {duration(gap)} apart (at least {duration(least)} needed)", w["certainty"]))
+    else:
+        least = limits.min_gap_gross_first
+        checks.append(timing_check("times", "weigh_gap", "Gross to tare", -gap >= least,
+                                   f"{duration(-gap)} apart (at least {duration(least)})",
+                                   f"Only {duration(-gap)} apart (at least {duration(least)} needed)", w["certainty"]))
     for role in ("loading", "unloading"):
-        if c := photo_timing(role, images.get(role, []), w, limits):
+        if c := photo_timing(role, images.get(role, []), w, limits, tare_first):
             checks.append(c)
     if c := same_day(images.get("unloading", []), w):
         checks.append(c)
@@ -1042,9 +1064,9 @@ def verdict(images: dict[str, list[dict]], vehicle_number: str, quantity: str | 
     """One verdict for the trip, with its checks, flags and timeline. `extra` are checks across trips."""
     checks, w = trip_checks(images, vehicle_number, quantity, limits, plant)
     checks += list(extra)
-    # From tare to gross, for finding a vehicle on two trips at once: only when clearly read as tare first.
+    # Between the two weighings, for finding a vehicle on two trips at once: only when their order is clear.
     clear = any(c["key"] == "weigh_order" and c["status"] == "pass" for c in checks)
-    window = [w["tare"]["at"], w["gross"]["at"]] if w and clear else None
+    window = sorted([w["tare"]["at"], w["gross"]["at"]]) if w and clear else None
     return {**decide(checks), "timeline": timeline(images, w, checks),
             "window": [t.isoformat() for t in window] if window else None}
 
@@ -1176,7 +1198,7 @@ def reuse_check(images: dict[str, list[dict]], index: ImageIndex, trip: str | No
 
 
 def overlap_checks(trips: dict[str, dict]) -> dict[str, dict]:
-    """A vehicle can't be on two trips at once: {trip: check} for each trip whose tare-to-gross window overlaps
+    """A vehicle can't be on two trips at once: {trip: check} for each trip whose window between weighings overlaps
     another trip's with the same vehicle number. `trips` maps a trip id to {"vehicle_number", "verdict"}.
     """
     windows = {}
@@ -1380,7 +1402,8 @@ def print_trip(trip: dict, vehicle_number: str, limits: Limits, plant: tuple[flo
     tokens = sum(r["input_tokens"] for rs in trip["images"].values() for r in rs)
     print(f"\nVehicle {vehicle_number}: {v['title']}")
     near = f", unloading stamped within {distance(limits.plant_radius)} of the plant at {plant[0]}, {plant[1]}" if plant else ""
-    print(f"  Limits: tare to gross at least {duration(limits.min_gap_tare_first)}, clock slack {duration(limits.clock_slack)}{near}")
+    print(f"  Limits: tare first, tare to gross at least {duration(limits.min_gap_tare_first)}; gross first, gross to tare "
+          f"at least {duration(limits.min_gap_gross_first)}; clock slack {duration(limits.clock_slack)}{near}")
     print("  Timeline: " + " -> ".join(f"{e['what']} {e['time']}{' (!)' if e['bad'] else ''}" for e in v["timeline"]))
     for c in v["flags"] + [c for c in v["checks"] if c["status"] == "pass" and (c["group"] == "times" or c["key"] == "unloading_plant")]:
         print(f"  {MARK[c['status']]} {GROUPS[c['group']]} · {c['label']}: {c['detail']}")

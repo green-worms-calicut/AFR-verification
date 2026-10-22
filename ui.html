@@ -227,7 +227,8 @@ td.mono { white-space: nowrap; }
     <section class="panel">
       <h2>Timing limits <span class="muted" style="font-weight:400">(minutes)</span></h2>
       <div class="limits">
-        <label><span class="label">Tare to gross, at least</span><input id="min_gap_tare_first" class="time-input" type="text" inputmode="numeric" value="60" autocomplete="off"></label>
+        <label><span class="label">Tare first: tare to gross, at least</span><input id="min_gap_tare_first" class="time-input" type="text" inputmode="numeric" value="60" autocomplete="off"></label>
+        <label><span class="label">Gross first: gross to tare, at least</span><input id="min_gap_gross_first" class="time-input" type="text" inputmode="numeric" value="30" autocomplete="off"></label>
         <label><span class="label">Clock slack</span><input id="clock_slack" class="time-input" type="text" inputmode="numeric" value="5" autocomplete="off"></label>
       </div>
       <p id="limits-hint" class="hint"></p>
@@ -287,12 +288,12 @@ td.mono { white-space: nowrap; }
 <script>
 const ROLES = ["loading", "unloading", "bill"];
 const ROLE = {
-  loading: { title: "Loading photos", one: "Loading photo", empty: "After the tare weighing, with GPS stamps" },
+  loading: { title: "Loading photos", one: "Loading photo", empty: "Before the gross weighing, with GPS stamps" },
   unloading: { title: "Unloading photos", one: "Unloading photo", empty: "After the gross weighing, at the plant" },
   bill: { title: "Weigh bills", one: "Weigh bill", empty: "The first and final slips" },
 };
 const GROUPS = [["loading", "Loading photos"], ["unloading", "Unloading photos"], ["bill", "Weigh bills"], ["times", "Times"], ["trips", "Other trips"]];
-const LIMITS = ["min_gap_tare_first", "clock_slack"];
+const LIMITS = ["min_gap_tare_first", "min_gap_gross_first", "clock_slack"];
 const FLAGGED = new Set(["problem", "review"]);
 const ICON = { pass: "✓", fail: "✕", review: "?" };
 const ROTATE_LABEL = { 90: "Rotated 90° counter-clockwise", 180: "Rotated 180°", 270: "Rotated 90° clockwise" };
@@ -324,7 +325,7 @@ const validPlant = () => {
 const validRadius = () => validLimit("plant_radius");
 const PLANT_HINT = "Copy it from Google Maps. Unloading photos must be stamped this near it. Leave blank to skip this check.";
 const imageCount = () => ROLES.reduce((n, role) => n + state.files[role].length, 0);
-const LIMITS_HINT = "Tare to gross: the weighings must be at least this far apart, since loading happens in between. Clock slack: how far a photo's clock may be off the weighbridge's.";
+const LIMITS_HINT = "Tare first (tare, loading, gross, unloading): the weighings must be at least this far apart, since loading happens in between. Gross first (loading, gross, unloading, tare): at least this far apart, since unloading happens in between. Clock slack: how far a photo's clock may be off the weighbridge's.";
 
 async function loadStatus() {
   const chip = $("key");
@@ -471,7 +472,7 @@ function verdictHTML(r) {
     <div class="verdict-head"><b>${esc(title)}</b><span class="mono">${esc(r.vehicle_number)}${r.trip_id ? " · trip " + esc(r.trip_id.split("/").pop()) : ""}</span></div>
     <div class="groups">${groups}</div>
     ${timelineHTML(v.timeline)}
-    <p class="note">Limits: tare to gross at least ${l.min_gap_tare_first} min, clock slack ${l.clock_slack} min. Quantity: ${r.quantity ? esc(r.quantity) + " kg" : "not typed"}. Plant: ${r.plant ? esc(r.plant.join(", ")) + ", unloading within " + l.plant_radius + " m" : "not given, so where unloading happened isn't checked"}.</p>
+    <p class="note">Limits: tare first, tare to gross at least ${l.min_gap_tare_first} min; gross first, gross to tare at least ${l.min_gap_gross_first} min; clock slack ${l.clock_slack} min. Quantity: ${r.quantity ? esc(r.quantity) + " kg" : "not typed"}. Plant: ${r.plant ? esc(r.plant.join(", ")) + ", unloading within " + l.plant_radius + " m" : "not given, so where unloading happened isn't checked"}.</p>
     ${reviewHTML(r)}</section>`;
 }
 

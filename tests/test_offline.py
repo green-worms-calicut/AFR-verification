@@ -297,9 +297,9 @@ class TypedValueTests(unittest.TestCase):
                 check_proof.parse_quantity(typed)
 
     def test_parse_limits_keeps_defaults_for_blanks(self):
-        self.assertEqual(check_proof.parse_limits({}), Limits(60, 5, 500))
+        self.assertEqual(check_proof.parse_limits({}), Limits(60, 30, 5, 500))
         self.assertEqual(check_proof.parse_limits({"plant_radius": "250"}).plant_radius, 250)
-        self.assertEqual(check_proof.parse_limits({"min_gap_tare_first": " 90 ", "clock_slack": "0"}), Limits(90, 0))
+        self.assertEqual(check_proof.parse_limits({"min_gap_tare_first": " 90 ", "clock_slack": "0"}), Limits(90, clock_slack=0))
         for bad in ("five", "-5", "1.5", "99999"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 check_proof.parse_limits({"clock_slack": bad})
@@ -454,13 +454,41 @@ class TripTests(unittest.TestCase):
         self.assertEqual(c["bill_found"]["detail"], "No slip clearly shows both weights and the net")
         self.assertEqual(c["weigh_order"]["status"], "review")
 
-    def test_gross_first_is_a_problem(self):
-        v = run_trip(bill=({**FINAL, **at("gross", "02:00"), **at("tare", "02:20")},))[0]["verdict"]
+    def test_gross_first_runs_loading_gross_unloading_tare(self):
+        # As 171522 on 19 Oct 2026: loading 08:06, gross 08:37, unloading 08:46, tare 09:02.
+        gross_first = {**FINAL, **at("gross", "03:30"), **at("tare", "04:15")}
+        trip, _ = run_trip(bill=(gross_first,))
+        v = trip["verdict"]
+        self.assertEqual(v["status"], "pass", v["flags"])
+        c = by_key(v["checks"])
+        self.assertEqual(c["weigh_order"]["detail"], "Gross first (03:30), then tare (04:15), from the times printed with each weight")
+        self.assertEqual((c["weigh_gap"]["label"], c["weigh_gap"]["detail"]), ("Gross to tare", "45 min apart (at least 30 min)"))
+        self.assertEqual((c["loading_timing"]["label"], c["loading_timing"]["detail"]), ("Before gross", "Loading 02:40 is before gross 03:30"))
+        self.assertEqual((c["unloading_timing"]["label"], c["unloading_timing"]["detail"]),
+                         ("Between gross and tare", "Unloading 04:09 is between gross 03:30 and tare 04:15"))
+        self.assertEqual([e["what"] for e in v["timeline"]], ["Loading photos", "Gross", "Unloading photos", "Tare"])
+        self.assertEqual([t[5:16] for t in v["window"]], ["10-15T03:30", "10-15T04:15"])
+
+    def test_gross_first_weighings_too_close_are_a_problem(self):
+        v = run_trip(bill=({**FINAL, **at("gross", "03:50"), **at("tare", "04:10")},))[0]["verdict"]
         self.assertEqual(v["status"], "problem")
-        self.assertEqual(by_key(v["checks"])["weigh_order"]["detail"],
-                         "Gross first (02:00), then tare (02:20): the trip should be weighed tare first")
-        self.assertNotIn("loading_timing", by_key(v["checks"]))
+        self.assertEqual(by_key(v["checks"])["weigh_gap"]["detail"], "Only 20 min apart (at least 30 min needed)")
         self.assertTrue(all(e["bad"] for e in v["timeline"] if e["what"] in ("Tare", "Gross")))
+        v = run_trip(bill=({**FINAL, **at("gross", "03:50"), **at("tare", "04:10")},), limits=Limits(min_gap_gross_first=15))[0]["verdict"]
+        self.assertEqual(v["status"], "pass", v["flags"])
+
+    def test_gross_first_photos_out_of_place_are_a_problem(self):
+        gross_first = {**FINAL, **at("gross", "03:30"), **at("tare", "04:15")}
+        v = run_trip(loading=({**LOADING, **stamp("04:00")},), bill=(gross_first,))[0]["verdict"]
+        self.assertEqual(v["status"], "problem")
+        self.assertEqual(by_key(v["checks"])["loading_timing"]["detail"],
+                         "Loading 04:00 (collection1.jpg) is after gross 03:30, allowing 5 min clock difference")
+        v = run_trip(unloading=(UNLOADING, {**UNLOADING, **stamp("04:25")}), bill=(gross_first,))[0]["verdict"]
+        self.assertEqual(by_key(v["checks"])["unloading_timing"]["detail"],
+                         "Unloading 04:25 (unloading2.jpg) is after tare 04:15, allowing 5 min clock difference")
+        v = run_trip(unloading=({**UNLOADING, **stamp("03:20")},), bill=(gross_first,))[0]["verdict"]
+        self.assertEqual(by_key(v["checks"])["unloading_timing"]["detail"],
+                         "Unloading 03:20 (unloading1.jpg) is before gross 03:30, allowing 5 min clock difference")
 
     def test_weighings_too_close_are_a_problem(self):
         v = run_trip(bill=(FIRST, {**FINAL, **at("tare", "03:00")}))[0]["verdict"]
@@ -974,7 +1002,7 @@ class AppTests(unittest.TestCase):
             self.assertIn(b"Proof Check Bench", response.read())
         status, body = self.get("/api/status")
         self.assertTrue(body["key_set"])
-        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "clock_slack": 5, "plant_radius": 500})
+        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "min_gap_gross_first": 30, "clock_slack": 5, "plant_radius": 500})
 
     def test_lists_and_loads_trip_folders(self):
         status, trips = self.get("/api/trips")
@@ -994,7 +1022,7 @@ class AppTests(unittest.TestCase):
                                              "bill": [self.image(COLOURS[7])]}})
         self.assertEqual(status, 200, body)
         self.assertEqual((body["vehicle_number"], body["quantity"]), (NUMBER, QUANTITY))
-        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "clock_slack": 10, "plant_radius": 500})
+        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "min_gap_gross_first": 30, "clock_slack": 10, "plant_radius": 500})
         self.assertIsNone(body["plant"])
         self.assertNotIn("unloading_plant", by_key(body["verdict"]["checks"]))
         self.assertEqual(body["verdict"]["title"], "Accepted", body["verdict"]["flags"])
