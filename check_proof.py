@@ -10,7 +10,7 @@ Photos (each loading and unloading photo): does it show a vehicle, is a GPS stam
 it a photo taken directly rather than a photo of a screen, and does one photo of each kind clearly
 show the typed vehicle number? Weigh bills: is there a weighbridge slip (handwritten notes are
 ignored), a final slip with both weights, the typed vehicle number on every slip, the typed
-quantity as the final slip's net weight, and gross heavier than tare?
+quantity as the final slip's net weight, gross heavier than tare, and a material entered?
 
 Times, from the final slip's tare and gross times and the photos' GPS stamps:
   - tare first: the weighings at least `min_gap_tare_first` apart, every loading photo between them,
@@ -234,6 +234,8 @@ GROSS = "If `bill` prints a date and time for the gross (loaded) weight itself, 
 TARE = "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it,"
 TIME_IN = "If `bill` prints a Time In (the first weighment, often beside a Date In),"
 TIME_OUT = "If `bill` prints a Time Out (the second weighment, often beside a Date Out),"
+PRINTED = ("If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a "
+           "weight (the date may be labelled Bill Date or Date),")
 NOT_CAMERA = "Ignore any timestamp on a camera picture printed on the slip."
 NO_BILL_TIME = "The bill prints no such time, or it can't be read."
 NO_BILL_DATE = "The bill prints no such date, or it can't be read."
@@ -253,7 +255,11 @@ def bill_time(prefix: str, premise: str) -> dict:
         f"{prefix}_hour": Choice(instructions=f"{premise} what hour is that time, exactly as printed? If AM or PM is "
                                               f"printed after it, give the hour as printed, from 01 to 12. {NOT_CAMERA}",
                                  criteria=options(HOURS, NO_BILL_TIME)),
-        f"{prefix}_minute": Choice(instructions=f"{premise} what minute is that time? {NOT_CAMERA}",
+        # On 19 Oct 2026 the minute was the unsure part of 19 of 30 unsure bill times, often with the seconds
+        # second (07:02:14 read 02 at 0.76, 14 at 0.13), and once read as the seconds (09:46:54 as 09:54).
+        f"{prefix}_minute": Choice(instructions=f"{premise} what minute is that time: the two digits right after the "
+                                                f"hour? If seconds are printed too, as in 07:02:14, the minute is the "
+                                                f"middle pair (02), not the last (14). {NOT_CAMERA}",
                                    criteria=options(MINUTES, NO_BILL_TIME)),
         f"{prefix}_ampm": Choice(instructions=f"{premise} is AM or PM printed after that time? {NOT_CAMERA}",
                                  criteria={"none": "Neither: the time is on a 24-hour clock, such as 15:06.",
@@ -436,12 +442,34 @@ QUESTIONS = {
         **bill_time("tare", TARE),
         **bill_time("in", TIME_IN),
         **bill_time("out", TIME_OUT),
+        # Lakshmi slips print no time beside the weights, only this one, so a trip's weighing times come from its
+        # first and final slips' (`weighings`).
+        **bill_time("printed", PRINTED),
+        # Compares the weights rather than reading labels: Kuttiyadi slips print First Wt and Second Wt with no
+        # Time In, and label both times Gross (22 Oct 2026).
         "first_weight": Choice(
-            instructions="Which weight on `bill` was taken first, at the Time In (the first weighment)?",
+            instructions="On `bill`, is the weight taken first (at the Time In, or labelled First Wt or First Weight) "
+                         "lighter or heavier than the weight taken second (at the Time Out, or labelled Second Wt or "
+                         "Second Weight)? Compare the two numbers, whatever else they are labelled.",
             criteria={
-                "tare": "The tare (empty) weight: the bill shows it with the Time In, or labels it the first weight.",
-                "gross": "The gross (loaded) weight: the bill shows it with the Time In, or labels it the first weight.",
-                NOT_SHOWN: "The bill has no Time In, or doesn't show which weight was taken first.",
+                "tare": "The first weight is the smaller number: the vehicle was weighed empty first.",
+                "gross": "The first weight is the larger number: the vehicle was weighed loaded first.",
+                NOT_SHOWN: "The bill doesn't show which weight was taken first, or the two weights can't be read.",
+            },
+        ),
+        # Whether anything is entered, not what: Jev can't read the material out. `filled` isn't first (see `bill_number`).
+        # Lakshmi slips have no label but print "Loaded with kyilandi plastic" (23 Oct 2026: Jev 0.66-0.86 sure
+        # it was filled before "Loaded with" was named). EMPTY or LOAD alone names no material.
+        "material": Choice(
+            instructions="Is the material or product carried filled in on `bill`? The bill may label it Material, "
+                         "Product, Item, Commodity or Goods, or write it after Loaded with.",
+            criteria={
+                "blank": "The bill has such a label, but nothing is entered next to it, or only Nil, NA, a dash or 0.",
+                "empty_or_load": "The entry only says the vehicle is empty or loaded, such as EMPTY, LOAD or LOADED, "
+                                 "without naming any material.",
+                "no_field": "The bill has no Material, Product or similar label, and no Loaded with line.",
+                "filled": "A material is named, such as Plastic, Mixed Waste or Cloth, printed or handwritten, "
+                          "including after Loaded with.",
             },
         ),
         # Whether the weighbridge's stamp is there, and whose name it shows, are asked apart: on 22 Oct 2026 one
@@ -489,6 +517,8 @@ REPORT = {
         ("in_date", "date in", ["in_day", "in_month"], "/"),
         ("out_time", "time out", ["out_hour", "out_minute", "out_ampm"], ":"),
         ("out_date", "date out", ["out_day", "out_month"], "/"),
+        ("printed_time", "print time", ["printed_hour", "printed_minute", "printed_ampm"], ":"),
+        ("printed_date", "print date", ["printed_day", "printed_month"], "/"),
     ],
 }
 
@@ -532,14 +562,20 @@ CHOICE_CHECKS = {
         "tare_heavier": ("fail", "Gross printed lighter than tare: the labels look swapped"),
         NOT_SHOWN: ("review", "Gross and tare labels can't be compared"),
     }),
-    "weighbridge_name": ("Weighbridge stamp's name", {
-        "same": ("pass", "The stamp's name matches the heading"),
+    "material": ("Material entered", {
+        "filled": ("pass", "A material is entered"),
+        "blank": ("fail", "No material entered"),
+        "empty_or_load": ("fail", "Material entered as EMPTY or LOAD, not a material"),
+        "no_field": ("review", "No material field on the slip"),
+    }),
+    "weighbridge_name": ("Weighbridge stamp", {
+        "same": ("pass", "The weighbridge's own stamp is on it, with the heading's name"),
         "different": ("fail", "Stamped by a different weighbridge from the one in the heading"),
         NOT_SHOWN: ("review", "The stamp's name can't be compared with the heading"),
     }),
 }
-# Bill questions that only count on the final slip: its net weight and labels, and the stamp proving it.
-FINAL_ONLY = ("net_weight", "gross_vs_tare", *SEAL)
+# Bill questions that only count on the final slip: its net weight, labels and material, and the stamp proving it.
+FINAL_ONLY = ("net_weight", "gross_vs_tare", "material", *SEAL)
 
 # A check's status is pass, fail (a problem found) or review (unsure). Nothing is rejected without a person.
 TITLES = {"pass": "Accepted", "problem": "Flagged: problem found", "review": "Flagged: please check"}
@@ -719,12 +755,14 @@ def show(*moments: dict) -> list[str]:
     return [m["time"] if one_day else f"{m['time']} on {m['date']}" for m in moments]
 
 
-def weighings(bill: dict) -> dict | None:
+def weighings(bill: dict, first_slip: dict | None = None) -> dict | None:
     """When the gross and tare weights were taken: {"gross": moment, "tare": moment, "certainty", "source"}.
 
-    A bill prints a date and time with each weight, or only a Time In and Time Out, with `first_weight`
-    saying which weight was taken at Time In. If both layouts can be read, the surer one is used.
-    None if neither can be read.
+    A bill prints a date and time with each weight, or only a Time In and Time Out (or a first and second
+    weighing time), with `first_weight` saying whether the first weight is the tare (lighter) or the gross
+    (heavier). Or, as Lakshmi's, only one time at the top of each slip: then the first weighing is when
+    `first_slip` (one weight) was printed, and the second when this final slip was. The surest layout that
+    can be read is used. None if none can be read.
     """
     r = {x["key"]: x for x in bill["readings"]}
     found = []
@@ -739,7 +777,21 @@ def weighings(bill: dict) -> dict | None:
         found.append({"gross": gross, "tare": tare,
                       "certainty": min(time_in["certainty"], time_out["certainty"], first["confidence"]),
                       "source": f"Time In and Time Out, {first['choice']} first"})
+    if first_slip and first["choice"] != NOT_SHOWN:
+        before = {x["key"]: x for x in first_slip["readings"]}
+        earlier, later = moment(before["printed_time"], before["printed_date"]), moment(r["printed_time"], r["printed_date"])
+        if earlier and later:
+            gross, tare = (earlier, later) if first["choice"] == "gross" else (later, earlier)
+            found.append({"gross": gross, "tare": tare,
+                          "certainty": min(earlier["certainty"], later["certainty"], first["confidence"]),
+                          "source": f"the times printed at the top of the first and final slips, {first['choice']} first"})
     return max(found, key=lambda w: w["certainty"], default=None)
+
+
+def first_slip(bills: list[dict]) -> dict | None:
+    """The slip from the first weighing, with one weight: the surest one."""
+    slips = [b for b in bills if b["answers"]["weigh_bill"]["yes"] >= 0.5 and b["answers"]["slip_kind"]["choice"] == "one_weight"]
+    return max(slips, key=lambda b: b["answers"]["slip_kind"]["confidence"], default=None)
 
 
 def check(group: str, key: str, label: str, status: str, detail: str, certainty: float | None = None) -> dict:
@@ -904,21 +956,16 @@ def choice_check(group: str, key: str, qid: str, answer: dict, vehicle_number: s
 def seal_checks(final: dict | None) -> list[dict]:
     """The final slip carries the weighbridge's own stamp.
 
-    It passes once it is surely there, unless its name is surely another
-    weighbridge's: like gross and tare, an unsure name would send most trips to a person for nothing.
+    It passes when it is surely there and its name surely matches the slip's heading; a name surely another
+    weighbridge's is a problem, and an unsure one goes to a person.
     """
     if not final:
         return [check("bill", "weighbridge_seal", "Weighbridge stamp", "review", "No final slip to look for it on")]
     a, at, checks = final["answers"], f"{final['name']}: ", []
     theirs, name = a["weighbridge_seal"]["yes"], a["weighbridge_name"]
     status = noul_status(theirs, qid="weighbridge_seal")
-    if status == "pass" and name["choice"] == "different" and name["confidence"] >= CONFIDENT:
+    if status == "pass":
         checks.append(choice_check("bill", "weighbridge_seal", "weighbridge_name", name, "", None, at))
-    elif status == "pass":
-        matched = name["choice"] == "same" and name["confidence"] >= CONFIDENT
-        checks.append(check("bill", "weighbridge_seal", "Weighbridge stamp", "pass",
-                            at + "The weighbridge's own stamp is on it" + ("" if matched else ", its name not surely compared"),
-                            theirs))
     else:
         detail = {"fail": "No weighbridge stamp", "review": "Unsure: is the weighbridge's own stamp on it?"}[status]
         checks.append(check("bill", "weighbridge_seal", "Weighbridge stamp", status, at + detail, theirs))
@@ -926,8 +973,8 @@ def seal_checks(final: dict | None) -> list[dict]:
 
 
 def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, verra: bool = False) -> list[dict]:
-    """A weighbridge slip, the final slip, the vehicle number on every slip, the final slip's net weight and labels,
-    and for a Verra project trip, its stamp.
+    """A weighbridge slip, the final slip, the vehicle number on every slip, the final slip's net weight, labels and
+    material, and for a Verra project trip, its stamp.
     """
     if not bills:
         return [check("bill", "bill_missing", "Weigh bills", "review", "None added")]
@@ -971,6 +1018,11 @@ def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, ve
             and final["answers"]["gross_vs_tare"]["choice"] != NOT_SHOWN:
         checks.append(choice_check("bill", "gross_vs_tare", "gross_vs_tare", final["answers"]["gross_vs_tare"],
                                    vehicle_number, quantity, f"{final['name']}: "))
+    if final:
+        checks.append(choice_check("bill", "material", "material", final["answers"]["material"], vehicle_number, quantity,
+                                   f"{final['name']}: "))
+    else:
+        checks.append(check("bill", "material", "Material entered", "review", "No final slip to read it from"))
     return checks + (seal_checks(final) if verra else [])
 
 
@@ -1076,7 +1128,7 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     checks += bill_checks(bills, vehicle_number, quantity, verra)
 
     final = final_slip(bills)
-    w = weighings(final) if final else None
+    w = weighings(final, first_slip(bills)) if final else None
     gap = minutes_between(w["tare"], w["gross"]) if w else None  # positive when the tare was taken first
     if not bills:
         return checks, None
@@ -1092,6 +1144,18 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     order = f"Tare first ({t}), then gross ({g})" if tare_first else f"Gross first ({g}), then tare ({t})"
     checks.append(timing_check("times", "weigh_order", "Weighing order", True, f"{order}, from {w['source']}", "",
                                w["certainty"]))
+    if w["source"].startswith("Time In"):
+        # Time In should be the tare (19 Oct 2026: on every In/Out slip). The heavier weight at Time In means the
+        # details were entered swapped, or the vehicle was weighed loaded first: either way a person looks.
+        first = final["answers"]["first_weight"]
+        if first["choice"] == "gross":
+            status = "fail" if first["confidence"] >= CONFIDENT else "review"
+            checks.append(check("times", "time_in_tare", "Time In with the tare", status,
+                                f"{final['name']}: the heavier weight is at Time In ({g}): In and Out look swapped, "
+                                "or the vehicle was weighed loaded first", first["confidence"]))
+        else:
+            checks.append(check("times", "time_in_tare", "Time In with the tare", "pass",
+                                f"{final['name']}: the lighter weight is at Time In ({t})", first["confidence"]))
     if tare_first:
         least = limits.min_gap_tare_first
         checks.append(timing_check("times", "weigh_gap", "Tare to gross", gap >= least,
@@ -1310,7 +1374,10 @@ def question_version(slot: str, place: bool = False, seal: bool = False) -> str:
     asked = {q: v for q, v in QUESTIONS[slot].items() if (place or q not in PLACE) and (seal or q not in SEAL)}
     if place:  # and how the line is found and picked from
         asked |= {"line": LINE, "pick": pick("{axis}", "{labels}", ["{start}", "{other}"])}
-    text = json.dumps({q: v.model_dump(mode="json") for q, v in asked.items()}, sort_keys=True) + (BOX_MODEL if place else "") \
+    if slot == "bill":  # and how the slip is found and cut out
+        asked |= {"slip": SLIP}
+    text = json.dumps({q: v.model_dump(mode="json") for q, v in asked.items()}, sort_keys=True) \
+        + (BOX_MODEL if place or slot == "bill" else "") \
         + (OUR_COMPANY if seal else "")
     return hashlib.md5(text.encode()).hexdigest()[:10]
 
@@ -1365,6 +1432,37 @@ def cut_line(img: PILImage.Image, box) -> PILImage.Image:
     return img.crop((left, top, max(right, left + 1), max(bottom, top + 1)))
 
 
+# Every bill is cut to its slip before it is read (`analyze`). Bills photographed as a strip across a tall
+# phone photo end up in small print once scaled to MAX_SIDE. On 21 final slips of 19 Oct 2026 (23 Oct run),
+# times read on the cut-out slip were right 21 times and sure 15, against 20 and 13 on the whole photo;
+# a Maliyekkal slip 19% of its photo went from wrong to right and 0.97 sure.
+SLIP = Box(instructions="Find the printed weighbridge slip (weighment slip) in `bill`: the whole paper slip, from its "
+                        "heading to its last printed line. If the same slip is printed twice, as an original and a "
+                        "duplicate copy, find the upper copy only.")
+
+
+def cut_slip(img: PILImage.Image, box: dict) -> PILImage.Image:
+    """The slip cut from the full-resolution image, by a Box answer's edges (fractions of the width and height),
+    with a little room around it.
+    """
+    w, h = img.size
+    wide, tall = (box["right"] - box["left"]) * w, (box["bottom"] - box["top"]) * h
+    edges = (box["left"] * w - 0.03 * wide, box["top"] * h - 0.03 * tall,
+             box["right"] * w + 0.03 * wide, box["bottom"] * h + 0.03 * tall)
+    left, top, right, bottom = (round(min(max(e, 0), side)) for e, side in zip(edges, (w, h, w, h)))
+    return img.crop((left, top, max(right, left + 1), max(bottom, top + 1)))
+
+
+def find_slip(client: TypeSafeClient, img: PILImage.Image) -> tuple[dict, int]:
+    """Where the slip is in a bill image, turned or not: its edges and confidence (a Box answer on BOX_MODEL),
+    and the request's input tokens.
+    """
+    found = client.system_one(state={"bill": Image.from_pil(fit(img), format="jpeg")}, questions={"slip": SLIP},
+                              model=BOX_MODEL)
+    box = found.answers["slip"]
+    return {**box.box.model_dump(), "confidence": box.confidence}, found.usage.input_tokens or 0
+
+
 def read_line(client: TypeSafeClient, img: PILImage.Image, raw: dict, model: str) -> dict:
     """Add the position picked to four decimals (`lat_pick`, `long_pick`) to an unloading photo's answers.
 
@@ -1395,27 +1493,37 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
 
     `quantity` is the typed quantity in kilograms, which a bill's net weight must match. With `place`,
     a photo's GPS stamp position is read too, to four decimals where it can be (`read_line`). With
-    `seal`, a bill is asked about the weighbridge's stamp. With `cache` and `key`, saved answers are
-    used instead of asking Jev, and new answers are saved.
+    `seal`, a bill is asked about the weighbridge's stamp. A bill is first cut to its slip (`find_slip`),
+    then turned upright. With `cache` and `key`, saved answers are used instead of asking Jev, and new
+    answers are saved.
     """
     if cache is not None and key in cache:
         raw = cache[key]
         result = {**result_from(slot, raw, vehicle_number, quantity), "saved": True}
+        if raw.get("slip"):
+            img = cut_slip(img, raw["slip"])
         return result, fit(img.rotate(raw["rotated"], expand=True))
+    slip, tokens, requests = None, 0, 0
+    if slot == "bill":
+        slip, tokens = find_slip(client, img)
+        img, requests = cut_slip(img, slip), 1
     response = ask(client, slot, img, vehicle_number, model, quantity, place, seal)
-    tokens, requests, rotated = response.usage.input_tokens or 0, 1, 0
+    tokens, requests, rotated = tokens + (response.usage.input_tokens or 0), requests + 1, 0
     turned = response.choices["orientation"]
     looks = [summary(turned)]  # each orientation answer, before each turn
     # At most two turns: the likelier sideways guess, then half a turn if that left it upside down.
-    while requests < 3 and (turn := turn_for(response.choices["orientation"], first=requests == 1)):
+    looked = 1
+    while looked < 3 and (turn := turn_for(response.choices["orientation"], first=looked == 1)):
         img = img.rotate(turn, expand=True)
         rotated = (rotated + turn) % 360
         response = ask(client, slot, img, vehicle_number, model, quantity, place, seal)
         tokens += response.usage.input_tokens or 0
         requests += 1
+        looked += 1
         looks.append(summary(response.choices["orientation"]))
     raw = {"model": response.model, "requests": requests, "orientation": summary(turned), "rotated": rotated, "looks": looks,
-           "answers": {q: summary(a) for q, a in response.answers.items()}, "input_tokens": tokens}
+           "answers": {q: summary(a) for q, a in response.answers.items()}, "input_tokens": tokens,
+           **({"slip": slip} if slip else {})}
     if place:
         raw = read_line(client, img, raw, model)
     if cache is not None and key:

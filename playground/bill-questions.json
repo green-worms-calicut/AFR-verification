@@ -86,7 +86,7 @@
   },
   "gross_minute": {
     "type": "choice",
-    "instructions": "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it, what minute is that time? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it, what minute is that time: the two digits right after the hour? If seconds are printed too, as in 07:02:14, the minute is the middle pair (02), not the last (14). Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "00": null,
       "01": null,
@@ -251,7 +251,7 @@
   },
   "tare_minute": {
     "type": "choice",
-    "instructions": "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it, what minute is that time? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it, what minute is that time: the two digits right after the hour? If seconds are printed too, as in 07:02:14, the minute is the middle pair (02), not the last (14). Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "00": null,
       "01": null,
@@ -416,7 +416,7 @@
   },
   "in_minute": {
     "type": "choice",
-    "instructions": "If `bill` prints a Time In (the first weighment, often beside a Date In), what minute is that time? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a Time In (the first weighment, often beside a Date In), what minute is that time: the two digits right after the hour? If seconds are printed too, as in 07:02:14, the minute is the middle pair (02), not the last (14). Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "00": null,
       "01": null,
@@ -581,7 +581,7 @@
   },
   "out_minute": {
     "type": "choice",
-    "instructions": "If `bill` prints a Time Out (the second weighment, often beside a Date Out), what minute is that time? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a Time Out (the second weighment, often beside a Date Out), what minute is that time: the two digits right after the hour? If seconds are printed too, as in 07:02:14, the minute is the middle pair (02), not the last (14). Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "00": null,
       "01": null,
@@ -713,13 +713,188 @@
       "not_shown": "The bill prints no such date, or it can't be read."
     }
   },
+  "printed_hour": {
+    "type": "choice",
+    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what hour is that time, exactly as printed? If AM or PM is printed after it, give the hour as printed, from 01 to 12. Ignore any timestamp on a camera picture printed on the slip.",
+    "criteria": {
+      "00": null,
+      "01": null,
+      "02": null,
+      "03": null,
+      "04": null,
+      "05": null,
+      "06": null,
+      "07": null,
+      "08": null,
+      "09": null,
+      "10": null,
+      "11": null,
+      "12": null,
+      "13": null,
+      "14": null,
+      "15": null,
+      "16": null,
+      "17": null,
+      "18": null,
+      "19": null,
+      "20": null,
+      "21": null,
+      "22": null,
+      "23": null,
+      "not_shown": "The bill prints no such time, or it can't be read."
+    }
+  },
+  "printed_minute": {
+    "type": "choice",
+    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what minute is that time: the two digits right after the hour? If seconds are printed too, as in 07:02:14, the minute is the middle pair (02), not the last (14). Ignore any timestamp on a camera picture printed on the slip.",
+    "criteria": {
+      "00": null,
+      "01": null,
+      "02": null,
+      "03": null,
+      "04": null,
+      "05": null,
+      "06": null,
+      "07": null,
+      "08": null,
+      "09": null,
+      "10": null,
+      "11": null,
+      "12": null,
+      "13": null,
+      "14": null,
+      "15": null,
+      "16": null,
+      "17": null,
+      "18": null,
+      "19": null,
+      "20": null,
+      "21": null,
+      "22": null,
+      "23": null,
+      "24": null,
+      "25": null,
+      "26": null,
+      "27": null,
+      "28": null,
+      "29": null,
+      "30": null,
+      "31": null,
+      "32": null,
+      "33": null,
+      "34": null,
+      "35": null,
+      "36": null,
+      "37": null,
+      "38": null,
+      "39": null,
+      "40": null,
+      "41": null,
+      "42": null,
+      "43": null,
+      "44": null,
+      "45": null,
+      "46": null,
+      "47": null,
+      "48": null,
+      "49": null,
+      "50": null,
+      "51": null,
+      "52": null,
+      "53": null,
+      "54": null,
+      "55": null,
+      "56": null,
+      "57": null,
+      "58": null,
+      "59": null,
+      "not_shown": "The bill prints no such time, or it can't be read."
+    }
+  },
+  "printed_ampm": {
+    "type": "choice",
+    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), is AM or PM printed after that time? Ignore any timestamp on a camera picture printed on the slip.",
+    "criteria": {
+      "none": "Neither: the time is on a 24-hour clock, such as 15:06.",
+      "am": "AM is printed after the time.",
+      "pm": "PM is printed after the time.",
+      "not_shown": "The bill prints no such time, or it can't be read."
+    }
+  },
+  "printed_day": {
+    "type": "choice",
+    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what day of the month is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "criteria": {
+      "01": null,
+      "02": null,
+      "03": null,
+      "04": null,
+      "05": null,
+      "06": null,
+      "07": null,
+      "08": null,
+      "09": null,
+      "10": null,
+      "11": null,
+      "12": null,
+      "13": null,
+      "14": null,
+      "15": null,
+      "16": null,
+      "17": null,
+      "18": null,
+      "19": null,
+      "20": null,
+      "21": null,
+      "22": null,
+      "23": null,
+      "24": null,
+      "25": null,
+      "26": null,
+      "27": null,
+      "28": null,
+      "29": null,
+      "30": null,
+      "31": null,
+      "not_shown": "The bill prints no such date, or it can't be read."
+    }
+  },
+  "printed_month": {
+    "type": "choice",
+    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what month (01 to 12) is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "criteria": {
+      "01": null,
+      "02": null,
+      "03": null,
+      "04": null,
+      "05": null,
+      "06": null,
+      "07": null,
+      "08": null,
+      "09": null,
+      "10": null,
+      "11": null,
+      "12": null,
+      "not_shown": "The bill prints no such date, or it can't be read."
+    }
+  },
   "first_weight": {
     "type": "choice",
-    "instructions": "Which weight on `bill` was taken first, at the Time In (the first weighment)?",
+    "instructions": "On `bill`, is the weight taken first (at the Time In, or labelled First Wt or First Weight) lighter or heavier than the weight taken second (at the Time Out, or labelled Second Wt or Second Weight)? Compare the two numbers, whatever else they are labelled.",
     "criteria": {
-      "tare": "The tare (empty) weight: the bill shows it with the Time In, or labels it the first weight.",
-      "gross": "The gross (loaded) weight: the bill shows it with the Time In, or labels it the first weight.",
-      "not_shown": "The bill has no Time In, or doesn't show which weight was taken first."
+      "tare": "The first weight is the smaller number: the vehicle was weighed empty first.",
+      "gross": "The first weight is the larger number: the vehicle was weighed loaded first.",
+      "not_shown": "The bill doesn't show which weight was taken first, or the two weights can't be read."
+    }
+  },
+  "material": {
+    "type": "choice",
+    "instructions": "Is the material or product carried filled in on `bill`? The bill may label it Material, Product, Item, Commodity or Goods, or write it after Loaded with.",
+    "criteria": {
+      "blank": "The bill has such a label, but nothing is entered next to it, or only Nil, NA, a dash or 0.",
+      "empty_or_load": "The entry only says the vehicle is empty or loaded, such as EMPTY, LOAD or LOADED, without naming any material.",
+      "no_field": "The bill has no Material, Product or similar label, and no Loaded with line.",
+      "filled": "A material is named, such as Plastic, Mixed Waste or Cloth, printed or handwritten, including after Loaded with."
     }
   },
   "weighbridge_seal": {

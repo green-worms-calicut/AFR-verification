@@ -116,7 +116,7 @@ LOADING = {**PHOTO, **stamp("02:40")}
 UNLOADING = PHOTO
 BILL_CHECKS = {"orientation": ("upright", 0.95), "weigh_bill": 0.96, "bill_number": ("same", 0.9)}
 STAMPED = {"weighbridge_seal": 0.9, "weighbridge_name": ("same", 0.9)}  # the weighbridge's stamp clearly on the slip
-FINAL = {**BILL_CHECKS, **STAMPED, "slip_kind": ("both_weights", 0.92), "net_weight": ("same", 0.9),
+FINAL = {**BILL_CHECKS, **STAMPED, "slip_kind": ("both_weights", 0.92), "net_weight": ("same", 0.9), "material": ("filled", 0.9),
          "gross_vs_tare": ("gross_heavier", 0.9), **at("tare", "02:00"), **at("gross", "03:30"),
          **not_printed("in", "out"), "first_weight": ("not_shown", 0.9)}
 FIRST = {**BILL_CHECKS, "slip_kind": ("one_weight", 0.9), "net_weight": ("different", 0.9),
@@ -127,6 +127,9 @@ TALLY = {"orientation": ("upright", 0.9), "weigh_bill": 0.04, "slip_kind": ("not
 # Only Time In and Time Out, with the tare taken at Time In.
 IN_OUT_FINAL = {**FINAL, **not_printed("gross", "tare"), **at("in", "02:00"), **at("out", "03:30"),
                 "first_weight": ("tare", 0.92)}
+# Lakshmi: no time beside the weights, one printed at the top of each slip: the first slip at the tare, the final at the gross.
+LAKSHMI_FIRST = {**FIRST, **not_printed("tare"), **at("printed", "02:00")}
+LAKSHMI_FINAL = {**FINAL, **not_printed("gross", "tare", "in", "out"), **at("printed", "03:30"), "first_weight": ("tare", 0.92)}
 SIDEWAYS = {"orientation": ("top_points_right", 0.93)}
 NOT_A_VEHICLE = {"orientation": ("upright", 0.9), "shows_vehicle": 0.03, "gps_stamp": 0.04,
                  "plate": ("not_visible", 0.95), "plate_number": ("cannot_tell", 0.9)}
@@ -171,6 +174,7 @@ class FakeJev:
         self.responses = {"photo": list(photo), "bill": list(bill)}
         self.by_colour = {c: list(picks) for c, picks in (by_colour or {}).items()}
         self.requests: list[httpx2.Request] = []
+        self.slip = {"top": 0.0, "bottom": 1.0, "left": 0.0, "right": 1.0}
         self.lock = threading.Lock()
 
     def colour_of(self, body: bytes):
@@ -186,6 +190,9 @@ class FakeJev:
         with self.lock:
             self.requests.append(request)
             body = sent(request)
+            if b'"slip":{"type":"box"' in body:  # where a bill's slip is: the whole image, unless a test says otherwise
+                return httpx2.Response(200, json={"model": "jev-1.14.0", "usage": {"input_tokens": 1000, "output_tokens": 4},
+                                                  "answers": {"slip": {"type": "box", "box": self.slip, "confidence": 0.95}}})
             slot = "bill" if b"weigh_bill" in body else "photo"
             colour = self.colour_of(body) if self.by_colour else None
             if colour:
@@ -347,13 +354,32 @@ class TypedValueTests(unittest.TestCase):
 class AnalyzeTests(unittest.TestCase):
     def test_sideways_bill_is_rotated_and_asked_again(self):
         result, sent_img, jev = analyze("bill", SIDEWAYS, FINAL)
-        self.assertEqual(len(jev.requests), 2)
+        self.assertEqual(len(jev.requests), 3)  # the slip found, then asked, turned and asked again
         self.assertEqual(jev.requests[0].headers["TypeSafe-Danger-Zone-Images"], "true")
         self.assertEqual(result["rotated"], 90)
         self.assertGreater(sent_img.width, sent_img.height)  # portrait photo of a landscape slip, now landscape
         readings = {r["key"]: r["value"] for r in result["readings"]}
         self.assertEqual((readings["tare_time"], readings["gross_time"], readings["in_time"]), ("02:00", "03:30", None))
-        self.assertEqual(result["input_tokens"], 2000)
+        self.assertEqual(result["input_tokens"], 3000)
+
+    def test_a_bill_is_cut_to_its_slip_before_it_is_read(self):
+        jev = FakeJev(bill=(FINAL,))
+        jev.slip = {"top": 0.25, "bottom": 0.75, "left": 0.0, "right": 1.0}
+        img = PILImage.new("RGB", (400, 1200), "white")
+        with jev.client() as client:
+            result, sent_img = check_proof.analyze(client, "bill", img, NUMBER, "jev-latest", QUANTITY, cache := {}, "k")
+        first = sent(jev.requests[0]).replace(b" ", b"")
+        self.assertIn(b'"slip":{"type":"box"', first)
+        self.assertIn(f'"model":"{check_proof.BOX_MODEL}"'.encode(), first)
+        self.assertEqual((result["requests"], result["slip"]["top"]), (2, 0.25))
+        # Half the photo's height, with a little room: 400 x 636 before scaling, so wider than half as tall as before.
+        self.assertAlmostEqual(sent_img.width / sent_img.height, 400 / 636, places=2)
+        # Saved answers cut the image the same way, without asking.
+        _, again = check_proof.analyze(None, "bill", img, NUMBER, "jev-latest", QUANTITY, cache, "k")
+        self.assertEqual(again.size, sent_img.size)
+        # Photos aren't cut.
+        _, _, jev = analyze("photo", PHOTO)
+        self.assertFalse(any(b'"slip":{"type":"box"' in sent(r) for r in jev.requests))
 
     def test_vehicle_number_and_quantity_are_sent_in_the_state(self):
         _, _, jev = analyze("photo", PHOTO)
@@ -361,26 +387,26 @@ class AnalyzeTests(unittest.TestCase):
         self.assertIn(b'"vehicle_number":"KL05AF9341"', body)
         self.assertNotIn(b"quantity_kg", body)
         _, _, jev = analyze("bill", FINAL)
-        body = sent(jev.requests[0]).replace(b" ", b"")
+        body = sent(jev.requests[1]).replace(b" ", b"")  # after the slip is found
         self.assertIn(b'"quantity_kg":"2570"', body)
         self.assertIn(b'"net_weight":{', body)
         result, _, jev = analyze("bill", FINAL, quantity=None)
-        self.assertNotIn(b"net_weight", sent(jev.requests[0]))
+        self.assertNotIn(b"net_weight", sent(jev.requests[1]))
         self.assertNotIn("net_weight", by_key(result["checks"]))
 
     def test_surely_sideways_but_unsure_which_way_is_turned_and_checked(self):
         # As the real sideways slips: 55% one way, 40% the other, under 10% upright.
         split = {**FINAL, "orientation": ("top_points_left", 0.4, {"top_points_right": 0.35, "upright": 0.15})}
         result, sent_img, jev = analyze("bill", split, {**FINAL, "orientation": ("upright", 0.9)})
-        self.assertEqual((len(jev.requests), result["rotated"]), (2, 270))
+        self.assertEqual((len(jev.requests), result["rotated"]), (3, 270))
         self.assertGreater(sent_img.width, sent_img.height)
         # The guess was the wrong way: the second look says upside down, so it's turned half round and asked again.
         result, _, jev = analyze("bill", split, {**FINAL, "orientation": ("upside_down", 0.85)}, FINAL)
-        self.assertEqual((len(jev.requests), result["rotated"], len(result["looks"])), (3, 90, 3))
+        self.assertEqual((len(jev.requests), result["rotated"], len(result["looks"])), (4, 90, 3))
         # As 171492's slip: upside down only 49% "confident", but far likelier than upright.
         unsure_flip = {**FINAL, "orientation": ("upside_down", 0.49, {"upright": 0.1, "top_points_left": 0.19})}
         result, _, jev = analyze("bill", split, unsure_flip, FINAL)
-        self.assertEqual((len(jev.requests), result["rotated"]), (3, 90))
+        self.assertEqual((len(jev.requests), result["rotated"]), (4, 90))
 
     def test_unsure_orientation_is_not_rotated(self):
         result, _, jev = analyze("photo", {**PHOTO, "orientation": ("top_points_left", 0.4)})
@@ -389,7 +415,7 @@ class AnalyzeTests(unittest.TestCase):
     def test_rotates_at_the_lower_rotation_cut_off(self):
         # 0.56 is what the real Jev gave the sideways sample bill: below CONFIDENT, above ROTATE.
         result, _, jev = analyze("bill", {**FINAL, "orientation": ("top_points_right", 0.56)}, FINAL)
-        self.assertEqual((len(jev.requests), result["rotated"]), (2, 90))
+        self.assertEqual((len(jev.requests), result["rotated"]), (3, 90))  # the slip found, then two looks
 
     def test_good_photo_passes_every_check(self):
         result, _, _ = analyze("photo", PHOTO)
@@ -429,7 +455,7 @@ class TripTests(unittest.TestCase):
         trip, jev = run_trip()
         v = trip["verdict"]
         self.assertEqual((v["status"], v["title"], v["flags"]), ("pass", "Accepted", []))
-        self.assertEqual(len(jev.requests), 6)
+        self.assertEqual(len(jev.requests), 8)
         c = by_key(v["checks"])
         self.assertEqual(c["weigh_order"]["detail"], "Tare first (02:00), then gross (03:30), from the times printed with each weight")
         self.assertEqual(c["weigh_gap"]["detail"], "1 h 30 min apart (at least 1 h)")
@@ -550,6 +576,24 @@ class TripTests(unittest.TestCase):
         self.assertFalse(any(b"lat_degrees" in sent(r) for r in jev.requests))
         self.assertNotIn("position", {x["key"] for x in trip["images"]["unloading"][0]["readings"]})
 
+    def test_material_entered_on_the_final_slip(self):
+        trip, _ = run_trip()
+        c = by_key(trip["verdict"]["checks"])["material"]
+        self.assertEqual((c["status"], c["detail"]), ("pass", "weighbill2.jpg: A material is entered"))
+        # The first slip's material isn't checked.
+        self.assertNotIn("material", by_key(trip["images"]["bill"][0]["checks"]))
+        for answer, status, detail in ((("blank", 0.9), "fail", "weighbill2.jpg: No material entered"),
+                                       (("empty_or_load", 0.9), "fail", "weighbill2.jpg: Material entered as EMPTY or LOAD, not a material"),
+                                       (("no_field", 0.85), "review", "weighbill2.jpg: No material field on the slip"),
+                                       (("filled", 0.6), "review", "weighbill2.jpg: Unsure: a material is entered")):
+            with self.subTest(answer=answer):
+                v = run_trip(bill=(FIRST, {**FINAL, "material": answer}))[0]["verdict"]
+                self.assertEqual((by_key(v["checks"])["material"]["status"], by_key(v["checks"])["material"]["detail"]),
+                                 (status, detail))
+                self.assertEqual(v["status"], "problem" if status == "fail" else "review")
+        v = run_trip(bill=(FIRST,))[0]["verdict"]
+        self.assertEqual(by_key(v["checks"])["material"]["status"], "review")
+
     def test_not_a_verra_project_trip_the_stamp_is_not_asked(self):
         trip, jev = run_trip()
         self.assertFalse(any(b"weighbridge_seal" in sent(r) or b"our_company" in sent(r) for r in jev.requests))
@@ -560,7 +604,7 @@ class TripTests(unittest.TestCase):
         v = trip["verdict"]
         self.assertEqual(v["status"], "pass", v["flags"])
         c = by_key(v["checks"])
-        self.assertEqual(c["weighbridge_seal"]["detail"], "weighbill2.jpg: The weighbridge's own stamp is on it")
+        self.assertEqual(c["weighbridge_seal"]["detail"], "weighbill2.jpg: The weighbridge's own stamp is on it, with the heading's name")
         bills = [sent(r) for r in jev.requests if b"weigh_bill" in sent(r)]
         self.assertTrue(bills and all(b"weighbridge_seal" in b and check_proof.OUR_COMPANY.encode() in b for b in bills))
         self.assertFalse(any(b"weighbridge_seal" in sent(r) for r in jev.requests if b"weigh_bill" not in sent(r)))
@@ -578,12 +622,12 @@ class TripTests(unittest.TestCase):
         v = run_trip(bill=(FIRST,), verra=True)[0]["verdict"]
         self.assertEqual(by_key(v["checks"])["weighbridge_seal"]["status"], "review")
 
-    def test_a_weighbridge_stamp_surely_there_passes_though_its_name_is_unsure(self):
+    def test_a_weighbridge_stamp_surely_there_with_an_unsure_name_asks_a_person(self):
         # As on 22 Oct 2026: a faint, upside-down stamp, surely there (0.88), its name unsure (0.46).
         bill = {**FINAL, "weighbridge_seal": 0.88, "weighbridge_name": ("same", 0.46)}
         c = by_key(run_trip(bill=(FIRST, bill), verra=True)[0]["verdict"]["checks"])["weighbridge_seal"]
         self.assertEqual((c["status"], c["detail"]),
-                         ("pass", "weighbill2.jpg: The weighbridge's own stamp is on it, its name not surely compared"))
+                         ("review", "weighbill2.jpg: Unsure: the weighbridge's own stamp is on it, with the heading's name"))
 
     def test_unloading_at_the_plant_given(self):
         trip, jev = run_trip(unloading=({**UNLOADING, **AT_PLANT}, {**UNLOADING, **AT_PLANT}), plant=PLANT)
@@ -597,7 +641,7 @@ class TripTests(unittest.TestCase):
         # (a Box question, on Jev 1.14) and the four-decimal values picked from candidates starting 11.44 and 75.94.
         bodies = [sent(r) for r in jev.requests]
         self.assertEqual(sum(b"lat_degrees" in b for b in bodies), 2)
-        boxes = [b for b in bodies if b'"type":"box"' in b]
+        boxes = [b for b in bodies if b'"line":{"type":"box"' in b]
         self.assertEqual(len(boxes), 2)
         self.assertTrue(all(b'"jev-preview"' in b for b in boxes))
         picks = [b for b in bodies if b'"lat_pick":{' in b]
@@ -629,7 +673,7 @@ class TripTests(unittest.TestCase):
         unread = {**UNLOADING, **stamped_at("11.440404", "75.941976", picked=None)}
         self.assertEqual(by_key(run_trip(unloading=(unread,), plant=PLANT)[0]["verdict"]["checks"])["unloading_plant"]["status"], "review")
         trip, jev = run_trip(unloading=({**UNLOADING, **AT_PLANT, "lat_degrees": ("not_shown", 0.9)},), plant=PLANT)
-        self.assertFalse(any(b'"type":"box"' in sent(r) for r in jev.requests))
+        self.assertFalse(any(b'"line":{"type":"box"' in sent(r) for r in jev.requests))
 
     def test_a_torn_two_decimal_reading_against_a_sure_one_asks_a_person(self):
         # As 171535 on 19 Oct 2026: one photo read 11.40 (11.44 on the stamp) and its line not picked,
@@ -708,7 +752,7 @@ class TripTests(unittest.TestCase):
 
     def test_the_same_file_twice_is_asked_about_once(self):
         trip, jev = run_trip(bill=(FINAL, FINAL), same=[("bill", 0, "bill", 1)])
-        self.assertEqual(len(jev.requests), 5)
+        self.assertEqual(len(jev.requests), 6)
         second = trip["images"]["bill"][1]
         self.assertEqual((second["same_as"], second["requests"], second["input_tokens"]), ("weighbill1.jpg", 0, 0))
         self.assertEqual(trip["verdict"]["status"], "pass")
@@ -751,6 +795,42 @@ class TripTests(unittest.TestCase):
     def test_time_in_and_out_layout(self):
         v = run_trip(bill=(IN_OUT_FINAL,))[0]["verdict"]
         self.assertEqual(v["status"], "pass")
+        self.assertEqual(by_key(v["checks"])["weigh_order"]["detail"],
+                         "Tare first (02:00), then gross (03:30), from Time In and Time Out, tare first")
+        self.assertEqual(by_key(v["checks"])["time_in_tare"]["status"], "pass")
+
+    def test_times_printed_at_the_top_of_the_first_and_final_slips(self):
+        v = run_trip(bill=(LAKSHMI_FIRST, LAKSHMI_FINAL))[0]["verdict"]
+        self.assertEqual(v["status"], "pass", v["flags"])
+        self.assertEqual(by_key(v["checks"])["weigh_order"]["detail"], "Tare first (02:00), then gross (03:30), from the times "
+                                                                       "printed at the top of the first and final slips, tare first")
+        # Without the first slip there's no first weighing time.
+        v = run_trip(bill=(LAKSHMI_FINAL,))[0]["verdict"]
+        self.assertEqual(by_key(v["checks"])["weigh_order"]["detail"], "Tare and gross times can't be read from the final slip")
+        # The first weight heavier: weighed loaded first, so the first slip's time is the gross.
+        v = run_trip(bill=(LAKSHMI_FIRST, {**LAKSHMI_FINAL, "first_weight": ("gross", 0.9)}))[0]["verdict"]
+        self.assertTrue(by_key(v["checks"])["weigh_order"]["detail"].startswith("Gross first (02:00), then tare (03:30)"))
+
+    def test_the_heavier_weight_at_time_in_is_flagged(self):
+        # Details entered swapped, or weighed loaded first: a problem a person looks at.
+        v = run_trip(bill=({**IN_OUT_FINAL, "first_weight": ("gross", 0.9)},))[0]["verdict"]
+        c = by_key(v["checks"])["time_in_tare"]
+        self.assertEqual((c["status"], c["detail"]),
+                         ("fail", "weighbill1.jpg: the heavier weight is at Time In (02:00): In and Out look swapped, "
+                                  "or the vehicle was weighed loaded first"))
+        self.assertEqual(v["status"], "problem")
+        c = by_key(run_trip(bill=({**IN_OUT_FINAL, "first_weight": ("gross", 0.6)},))[0]["verdict"]["checks"])["time_in_tare"]
+        self.assertEqual(c["status"], "review")
+        # Slips with a time beside each weight aren't In/Out slips, so this isn't checked.
+        self.assertNotIn("time_in_tare", by_key(run_trip()[0]["verdict"]["checks"]))
+
+    def test_first_and_second_weights_with_both_times_labelled_gross(self):
+        # As Jev read a Kuttiyadi slip on 22 Oct 2026: both times labelled Gross, so the times with each weight
+        # were unsure (gross 0.61), but read surely as first and second, and the first weight is the lighter.
+        bill = {**FINAL, **at("gross", "03:30", confidence=0.61), **at("tare", "02:00", confidence=0.8),
+                **at("in", "02:00", confidence=1.0), **at("out", "03:30", confidence=1.0), "first_weight": ("tare", 0.95)}
+        v = run_trip(bill=(bill,))[0]["verdict"]
+        self.assertEqual(v["status"], "pass", v["flags"])
         self.assertEqual(by_key(v["checks"])["weigh_order"]["detail"],
                          "Tare first (02:00), then gross (03:30), from Time In and Time Out, tare first")
 
@@ -815,7 +895,7 @@ class SavedAnswerTests(unittest.TestCase):
     def test_saved_answers_are_reused_without_asking(self):
         cache = {}
         first, jev = run_trip(cache=cache)
-        self.assertEqual((len(jev.requests), len(cache)), (6, 6))
+        self.assertEqual((len(jev.requests), len(cache)), (8, 6))  # each bill's slip is found, then asked about
         uploads, _ = make_trip()
         again, _ = check_proof.analyze_trip(None, uploads, NUMBER, "jev-latest", QUANTITY, Limits(), cache=cache)
         self.assertEqual(again["verdict"]["checks"], first["verdict"]["checks"])
@@ -844,7 +924,7 @@ class SavedAnswerTests(unittest.TestCase):
 class QuestionTests(unittest.TestCase):
     def test_time_and_date_questions_state_their_premise_and_allow_not_shown(self):
         premises = {"stamp": check_proof.STAMP, "gross": check_proof.GROSS, "tare": check_proof.TARE,
-                    "in": check_proof.TIME_IN, "out": check_proof.TIME_OUT}
+                    "in": check_proof.TIME_IN, "out": check_proof.TIME_OUT, "printed": check_proof.PRINTED}
         for slot in check_proof.SLOTS:
             for qid in [q for _, _, qids, _ in check_proof.REPORT[slot] for q in qids]:
                 question = check_proof.QUESTIONS[slot][qid]

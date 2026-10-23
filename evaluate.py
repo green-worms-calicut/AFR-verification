@@ -18,7 +18,7 @@ Label columns:
     plate_number                           same, different or cannot_tell
     bill_number                            same, different or not_shown
     net_weight                             same, different or not_shown (needs a quantity)
-    first_weight                           tare, gross or not_shown (which weight was taken at Time In)
+    first_weight                           tare, gross or not_shown (whether the first weight is the lighter or heavier)
     photo_time                             04:09, or not_shown
     gross_time, tare_time, in_time, out_time   07:39, or not_shown
     photo_date                             15/10/2026, or not_shown

@@ -17,6 +17,7 @@ A trip runs one of two ways, worked out from which weighing came first on the fi
 - Does every slip show the vehicle number you typed?
 - Is the final slip's net weight the quantity you typed?
 - Is the gross heavier than the tare? If not, the labels look swapped.
+- Is a material entered on the final slip (Material, Product, Item, or "Loaded with …")? A blank field, only Nil or a dash, or only EMPTY or LOAD, is a problem; a slip with no material field goes to a person. Which material it is isn't checked.
 
 **Times**, from the final slip and the photos' GPS stamps
 - Tare first: were the weighings at least 60 minutes apart, every loading photo taken between them, and every unloading photo after the gross weighing?
@@ -73,7 +74,7 @@ Jev can't read a number out, so a position is read in steps. The degrees and fir
 
 Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`); code measures how far the plant is from the nearest point of that square, and more than `plant_radius` (500 m) is a problem. A trip passes only on a position picked surely to four decimals. When the pick is unsure, the two-decimal reading (a square about 1.1 km across) can still show a photo is away, read surely or by adding up Jev's probabilities over the likeliest readings (`chance_away`: 11.16 or 11.11 are both far from 11.44), but it can't show one is within 500 m, so that photo goes to a person. The plant's location is never sent to Jev, so the same answers serve any plant, and changing the plant or the distance needs no new request. Only the printed stamp is read: phone apps strip the GPS data from the file (4 of the day's 260 images kept it).
 
-**Each weigh bill:** 23 questions, or 25 for a Verra project trip
+**Each weigh bill:** 33 questions, or 35 for a Verra project trip
 
 | Question | Type | Answers |
 |-|-|-|
@@ -87,19 +88,25 @@ Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`)
 | `tare_hour` … `tare_month` | choice | Date and time printed with the tare weight, or `not_shown` |
 | `in_hour` … `in_month` | choice | Time In and Date In (the first weighment), or `not_shown` |
 | `out_hour` … `out_month` | choice | Time Out and Date Out (the second weighment), or `not_shown` |
-| `first_weight` | choice | Which weight was taken at Time In: `tare`, `gross`, `not_shown` |
+| `printed_hour` … `printed_month` | choice | The one date and time printed at the top of the slip, not beside a weight, or `not_shown` |
+| `first_weight` | choice | Is the first weight (at Time In, or First Wt) the smaller or the larger: `tare` (smaller), `gross` (larger), `not_shown` |
+| `material` | choice | Is a material entered: `blank`, `empty_or_load` (only EMPTY or LOAD), `no_field` (no such label or Loaded with line), `filled` |
 | `weighbridge_seal` | yes/no | Is an ink stamp of the weighbridge on it, apart from our company's (`our_company`)? Only for a Verra project trip. |
 | `weighbridge_name` | choice | Does that stamp's name match the slip's heading: `different`, `same`, `not_shown`. Only for a Verra project trip. |
 
 A time like `03:09` is two questions: which hour and which minute. Code puts the parts together and does all the comparing. Jev is unreliable at comparing dates and times itself.
 
-Bills come in two layouts. Some print a date and time with each weight (the G W weighbridge); others print only a Time In and Time Out. Both sets of questions are asked at once, and `check_proof.weighings` uses whichever the final slip has. With Time In and Time Out, `first_weight` says which weight was taken first. If both layouts can be read, the surer one is used. Only the day and month are read, so a trip that runs past midnight or across New Year still works. Some weighbridges (Lakshmi, Bhavani and others) print neither layout clearly, and their trips go to a person for now.
+Bills come in two layouts. Some print a date and time with each weight (the G W weighbridge); others print only a Time In and Time Out. Both sets of questions are asked at once, and `check_proof.weighings` uses whichever the final slip has. With Time In and Time Out, `first_weight` says which weight was taken first, by comparing the first weight with the second. That also reads slips that print First Wt and Second Wt with a date and time on each, such as Kuttiyadi's, which labels both times "Gross Wt. Date & Time". Some slips (Lakshmi's) print no time beside the weights, only one at the top of each slip: then the first slip (one weight) gives the first weighing's time and the final slip the second's, and `first_weight` says which was the tare. The surest layout that can be read is used. Only the day and month are read, so a trip that runs past midnight or across New Year still works.
 
 Jev can lean towards the first option of a choice, so `same` is never listed first in the number, net weight and stamp questions.
 
-Jev can't read a stamp's words out either, so it compares the weighbridge's stamp with the name printed in the slip's own heading. Our company's name (`check_proof.OUR_COMPANY`, set once in the code) goes into the bill's request as `our_company`, so our own stamp isn't taken for the weighbridge's. The stamp questions are only asked for a Verra project trip, so other trips cost the same as before and their saved answers stay valid. Whether the stamp is there and whose name it shows are asked apart: Jev is surer that a stamp is there than of its name, so an unsure name doesn't send the trip to a person, but a name surely another weighbridge's is a problem.
+Jev can't read a stamp's words out either, so it compares the weighbridge's stamp with the name printed in the slip's own heading. Our company's name (`check_proof.OUR_COMPANY`, set once in the code) goes into the bill's request as `our_company`, so our own stamp isn't taken for the weighbridge's. The stamp questions are only asked for a Verra project trip, so other trips cost the same as before and their saved answers stay valid. Whether the stamp is there and whose name it shows are asked apart, as one question for both was often unsure. The stamp passes only when it is surely there and its name surely matches the heading; an unsure name goes to a person (on 22 Oct, 2 of 3 genuine stamps had unsure names).
 
 If Jev finds an image isn't upright with at least 0.5 confidence (`ROTATE`), it is rotated and asked again. That cut-off is lower than the others because a wrong turn costs little: one more request, and unsure answers that go to a person anyway. Before sending, each image has its camera rotation flag applied and is scaled so its longest side is 1568 px, the largest Jev accepts.
+
+**Each weigh bill is cut to its slip first.** A Box question (`check_proof.SLIP`, on Jev 1.14) finds the slip in the photo as uploaded, code cuts it out of the full-resolution photo with a little room around it, and the cut-out is turned upright and read. A slip photographed as a strip across a tall phone photo otherwise ends up in tiny print once scaled to 1568 px. On 21 final slips from 19 Oct (23 Oct test), times read on the cut-out were right 21 times and sure 15, against 20 and 13 on the whole photo; a Maliyekkal slip filling 19% of its photo went from wrong to right and 97% sure. On sideways photos the box takes the whole slip too, even when its confidence is low (0.32 on a Lakshmi sheet), so the cut is used whatever the confidence.
+
+The minute of a bill time is asked as "the two digits right after the hour", not the seconds: slips often print seconds (07:02:14), and Jev's second guess for the minute was often the seconds (09:46:54 was once read as 09:54).
 
 ### How the verdict is decided
 
@@ -113,8 +120,10 @@ All of this is in code (`check_proof.trip_checks`, `decide`, `verdict`), not in 
 | Bills match | every slip `same` | any slip unclear | any slip `different` |
 | Net weight (final slip) | `same` | `not_shown`, or no quantity typed | `different` |
 | Gross heavier than tare (final slip) | `gross_heavier` | `not_shown` | `tare_heavier` |
-| Weighbridge stamp (final slip, Verra project only) | yes ≥ 0.8, and its name not surely `different` | unsure, or no final slip | yes ≤ 0.2, or its name surely `different` |
+| Material entered (final slip) | `filled` | `no_field`, or no final slip | `blank`, or only EMPTY or LOAD |
+| Weighbridge stamp (final slip, Verra project only) | yes ≥ 0.8, and its name surely `same` | the stamp or its name unsure, or no final slip | yes ≤ 0.2, or its name surely `different` |
 | Weighing order | tare first or gross first, clearly | a time unreadable or unsure, or both the same | – |
+| Time In with the tare (In/Out slips) | the lighter weight at Time In | unsure which is heavier | the heavier weight at Time In: In and Out entered swapped, or weighed loaded first |
 | Tare to gross (tare first) | at least 60 min apart | a time unsure | less |
 | Gross to tare (gross first) | at least 10 min apart | a time unsure | less |
 | Loading photos | every one between tare and gross (tare first) or before gross (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
@@ -245,7 +254,7 @@ The report shows accuracy per field, accuracy at each confidence level per group
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
+The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, the material entered, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
 
 ## Real trips
 
@@ -272,7 +281,7 @@ What Jev did on that day (`run_trips.py`, `jev-latest`, about $0.10 for the 42 t
 
 ## Cost
 
-Jev charges **$0.042 per million input tokens**; output is free. Images count as input tokens at the same rate: a photo or slip is about 10,000 tokens, so a trip of 6 images is about $0.003, and the whole real day about $0.15. With `--plant`, each unloading photo takes two more requests (finding and reading its Lat/Long line), about $0.001 more per photo. The page, the command line and `run_trips.py` show the exact count and cost.
+Jev charges **$0.042 per million input tokens**; output is free. Images count as input tokens at the same rate: a photo or slip is about 10,000 tokens, so a trip of 6 images is about $0.003, and the whole real day about $0.15. Each bill takes one more request to find its slip (about 4,300 tokens). With `--plant`, each unloading photo takes two more requests (finding and reading its Lat/Long line), about $0.001 more per photo. The page, the command line and `run_trips.py` show the exact count and cost.
 
 | Model | Alias | Notes |
 |-|-|-|
@@ -281,7 +290,7 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 
 ## Limits
 
-- **Box questions need `jev-preview`.** Finding the stamp's Lat/Long line always uses Jev 1.14, whichever model the rest of the check uses.
+- **Box questions need `jev-preview`.** Finding a bill's slip and the stamp's Lat/Long line always uses Jev 1.14, whichever model the rest of the check uses.
 - **Image input is experimental.** TypeSafe calls it "dreamer-ready": fine for prototypes, not yet production quality. Accuracy and the request format can change between releases. Each request needs the `TypeSafe-Danger-Zone-Images: true` header, which the code sends.
 - **Jev can't transcribe text.** It only picks from the options it's given. It can confirm the typed number, but it can't say what a different number is. Addresses, serial numbers, weights and the words on a stamp can't be read out.
 - **A stamp isn't proof either.** Rubber stamps can be copied. The check only shows a stamp with the right name is there.
@@ -289,7 +298,7 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 - **A GPS stamp isn't proof.** GPS camera apps can be set to any place and time. With the plant's location given, an unloading photo's printed position must be near it, but a faked stamp can show any position.
 - **Reused images** are found only among the trips under `trips/` (or the folder `run_trips.py` is given). A copy that was cropped or edited may not be found.
 - **Net weight in kilograms.** The quantity is compared with the final slip's net weight as a number of kilograms.
-- **Other weighbridge layouts.** Slips with only FIRST/SECOND weights and one print time (Lakshmi), or Date In/Out without gross and tare labels (Bhavani), aren't read yet; their trips go to a person.
+- **Other weighbridge layouts.** A Lakshmi-style trip (one print time per slip) needs both its first and final slip uploaded; with only the final slip, its times can't be read and it goes to a person. A layout not seen yet may not be read either.
 - **Image size limits.** PNG or JPEG only (real HEIC isn't), 280–1568 px on each side after scaling, at most 16 MiB per file.
 
 ## Files
