@@ -10,7 +10,7 @@ Photos (each loading and unloading photo): does it show a vehicle, is a GPS stam
 it a photo taken directly rather than a photo of a screen, and does one photo of each kind clearly
 show the typed vehicle number? Weigh bills: is there a weighbridge slip (handwritten notes are
 ignored), a final slip with both weights, the typed vehicle number on every slip, the typed
-quantity as the final slip's net weight, gross heavier than tare, and a material entered?
+quantity as the final slip's net weight, and gross heavier than tare?
 
 Times, from the final slip's tare and gross times and the photos' GPS stamps:
   - tare first: the weighings at least `min_gap_tare_first` apart, every loading photo between them,
@@ -23,15 +23,24 @@ Place: when the plant's location is given (`--plant`, never fixed in code), the 
 on each unloading photo's GPS stamp are read to two decimals, and at least one must place the photo
 within `plant_radius` of the plant; any clearly farther is flagged. Each run can change these limits (`Limits`).
 
-Stamp, for a Verra project trip (`--verra`): the final slip must carry the weighbridge's own ink stamp. Our
-company's name (`OUR_COMPANY`) is sent so that our company's stamp, often on the slip too, isn't taken for it.
+Verra, for a Verra project trip (`--verra`): the final slip must have a material entered and carry the
+weighbridge's own ink stamp. Our company's name (`OUR_COMPANY`) is sent so that our company's stamp, often on
+the slip too, isn't taken for it. These questions are only asked on a Verra project trip.
 
 Across trips: an
 image already used in another trip is flagged (`ImageIndex`), and so is a vehicle on two trips at once
 (`overlap_checks`).
 
-Nothing is rejected here. A check that finds a problem flags the trip, an unsure one asks a person
-to look, and the person accepts or rejects it.
+The checks fall into three parts (`PARTS`, `PART_OF`), each decided on its own:
+  - real: did the trip happen as claimed? The plates and bills match the typed vehicle number, the
+    weighings and photos are in order and far enough apart, the photos were taken directly, unloading
+    was at the plant, and no image or trip is a duplicate;
+  - docs: is the proof complete? Every kind of image added, a vehicle and a GPS stamp in every photo,
+    a final slip, its net weight the typed quantity, and gross heavier than tare;
+  - verra: what a Verra project trip also needs: the material and the weighbridge's stamp.
+
+Nothing is rejected here. A check that finds a problem flags its part, and the trip, an unsure one asks
+a person to look, and the person accepts or rejects each part.
 
 Jev can't read text out, it only picks from answers it is given, so the typed vehicle number and
 quantity go into the state and Jev judges whether the plate or bill shows them. Each part of a time
@@ -458,6 +467,7 @@ QUESTIONS = {
             },
         ),
         # Whether anything is entered, not what: Jev can't read the material out. `filled` isn't first (see `bill_number`).
+        # Only asked on a Verra project trip (`VERRA`).
         # Lakshmi slips have no label but print "Loaded with kyilandi plastic" (23 Oct 2026: Jev 0.66-0.86 sure
         # it was filled before "Loaded with" was named). EMPTY or LOAD alone names no material.
         "material": Choice(
@@ -473,7 +483,7 @@ QUESTIONS = {
             },
         ),
         # Whether the weighbridge's stamp is there, and whose name it shows, are asked apart: on 22 Oct 2026 one
-        # question for both was unsure (0.45 to 0.79) on 2 of 3 clearly stamped slips.
+        # question for both was unsure (0.45 to 0.79) on 2 of 3 clearly stamped slips. Only asked on a Verra project trip.
         "weighbridge_seal": Noul(
             instructions="Apart from any stamp of `our_company`, is an ink stamp of the weighbridge pressed on `bill`?",
             criteria=NoulCriteria(
@@ -497,9 +507,11 @@ QUESTIONS = {
 
 # The questions that read where a photo was taken, in order: latitude, then longitude.
 PLACE = ("lat_degrees", "lat_decimals", "long_degrees", "long_decimals")
-# The questions about the weighbridge's stamp (seal) on a bill, asked only for a Verra project trip, and our company's
-# name as on its own stamp, sent with them so that stamp isn't taken for the weighbridge's.
+# The questions about the weighbridge's stamp (seal) on a bill, and our company's name as on its own stamp, sent
+# with them so that stamp isn't taken for the weighbridge's.
 SEAL = ("weighbridge_seal", "weighbridge_name")
+# The bill questions asked only on a Verra project trip: the material, and the stamp.
+VERRA = ("material", *SEAL)
 OUR_COMPANY = "Green Worms Eco Solutions LLP, West Hill, Calicut"
 
 # Which readings to report for each slot, as (key, label, [question ids joined by the separator], separator).
@@ -581,6 +593,22 @@ FINAL_ONLY = ("net_weight", "gross_vs_tare", "material", *SEAL)
 TITLES = {"pass": "Accepted", "problem": "Flagged: problem found", "review": "Flagged: please check"}
 GROUPS = {"loading": "Loading photos", "unloading": "Unloading photos", "bill": "Weigh bills",
           "times": "Times", "trips": "Other trips"}
+# The three parts of a trip's check, each decided, and accepted or rejected, on its own: did the trip happen as
+# claimed, is its proof complete, and what a Verra project trip also needs.
+PARTS = {"real": "Trip is real", "docs": "Documentation", "verra": "Verra"}
+# Which part each of a trip's checks (by key) is in. A missing image can't be checked for being real, so its
+# plate or times ask a person in the real part too.
+PART_OF = {
+    "loading_plate": "real", "unloading_plate": "real", "bill_number": "real",
+    "weigh_order": "real", "weigh_gap": "real", "time_in_tare": "real",
+    "loading_timing": "real", "unloading_timing": "real", "unloading_day": "real",
+    "loading_direct": "real", "unloading_direct": "real", "unloading_plant": "real",
+    "reused": "real", "overlap": "real",
+    "loading_missing": "docs", "unloading_missing": "docs", "bill_missing": "docs",
+    "loading_vehicle": "docs", "unloading_vehicle": "docs", "loading_stamp": "docs", "unloading_stamp": "docs",
+    "bill_found": "docs", "net_weight": "docs", "gross_vs_tare": "docs",
+    "material": "verra", "weighbridge_seal": "verra",
+}
 
 
 def fit(img: PILImage.Image) -> PILImage.Image:
@@ -594,23 +622,23 @@ def fit(img: PILImage.Image) -> PILImage.Image:
     return img
 
 
-def questions_for(slot: str, quantity: str | None, place: bool = False, seal: bool = False) -> dict:
+def questions_for(slot: str, quantity: str | None, place: bool = False, verra: bool = False) -> dict:
     """The questions asked about one image: the net weight only when a quantity was typed, where
     the photo was taken only with `place` (an unloading photo, when the plant's location is given),
-    and the weighbridge's stamp only with `seal` (a bill of a Verra project trip).
+    and the material and the weighbridge's stamp only with `verra` (a bill of a Verra project trip).
     """
     return {q: v for q, v in QUESTIONS[slot].items()
-            if (quantity or q != "net_weight") and (place or q not in PLACE) and (seal or q not in SEAL)}
+            if (quantity or q != "net_weight") and (place or q not in PLACE) and (verra or q not in VERRA)}
 
 
 def ask(client: TypeSafeClient, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
-        quantity: str | None = None, place: bool = False, seal: bool = False):
+        quantity: str | None = None, place: bool = False, verra: bool = False):
     state = {slot: Image.from_pil(fit(img), format="jpeg"), "vehicle_number": vehicle_number}
     if slot == "bill" and quantity:
         state["quantity_kg"] = quantity
-    if seal:
+    if verra:
         state["our_company"] = OUR_COMPANY
-    return client.system_one(state=state, questions=questions_for(slot, quantity, place, seal), model=model)
+    return client.system_one(state=state, questions=questions_for(slot, quantity, place, verra), model=model)
 
 
 def top(answer, n: int = 3) -> list[tuple[str, float]]:
@@ -635,6 +663,7 @@ def readings_for(slot: str, answers: dict[str, dict]) -> list[dict]:
         value = None if missing else sep.join(p["choice"] for p in parts[:2])
         if value and len(parts) == 3:  # a bill time: hour as printed, minute, and AM or PM
             value = to_24h(value, parts[2]["choice"])
+            parts[0] = same_hour(parts[0], parts[2]["choice"])
         readings.append({
             "key": key,
             "label": label,
@@ -678,6 +707,28 @@ def to_24h(hhmm: str, ampm: str) -> str:
     return f"{h:02d}:{minute}"
 
 
+def same_hour(hour: dict, ampm: str) -> dict:
+    """The hour answer, as sure as all its options that make the same 24-hour time with `ampm`.
+
+    Asked for the hour as printed, Jev is often torn between that and the 24-hour hour: 02:45:57 PM read 02 at
+    0.54 and 14 at 0.46 (23 Oct 2026, trip 173284). With PM both are 14:00, so the hour is surely 14.
+    """
+    target = to_24h(f"{hour['choice']}:00", ampm)
+    alike = sum(p for option, p in hour.get("top", []) if option != hour["choice"] and option in HOURS
+                and to_24h(f"{option}:00", ampm) == target)
+    return {**hour, "confidence": min(1.0, hour["confidence"] + alike)} if alike else hour
+
+
+def lower_first(text: str) -> str:
+    """'No GPS stamp' -> 'no GPS stamp', leaving a word in capitals such as 'GPS' as it is."""
+    return text if text[1:2].isupper() else text[:1].lower() + text[1:]
+
+
+def unsure(detail: str, certainty: float) -> str:
+    """A check's detail when Jev isn't sure enough of its answer: 'Only 62% sure: plate shows a different number'."""
+    return f"Only {certainty:.0%} sure: {lower_first(detail)}"
+
+
 def noul_status(yes: float, pass_when_yes: bool = True, qid: str | None = None) -> str:
     """pass, fail or review for a yes/no answer, by the question's own thresholds or YES and NO."""
     high, low = NOUL_THRESHOLDS.get(qid, (YES, NO))
@@ -702,14 +753,14 @@ def checks_for(slot: str, answers: dict[str, dict], vehicle_number: str, quantit
         if qid in NOUL_CHECKS:
             label, yes, no, pass_when_yes = NOUL_CHECKS[qid]
             status = noul_status(a["yes"], pass_when_yes, qid)
-            detail = {"pass": yes, "fail": no, "review": f"Unsure: {(yes if pass_when_yes else no).lower()}?"}[status]
+            detail = {"pass": yes, "fail": no, "review": f"Not sure: {lower_first(yes if pass_when_yes else no)}?"}[status]
             checks.append({"key": qid, "label": label, "status": status, "detail": detail,
                            "certainty": a["yes"], "measure": "yes"})
         elif qid in CHOICE_CHECKS:
             label, outcomes = CHOICE_CHECKS[qid]
             status, detail = outcomes[a["choice"]]
             if a["confidence"] < CONFIDENT:
-                status, detail = "review", f"Unsure: {detail[0].lower()}{detail[1:]}"
+                status, detail = "review", unsure(detail, a["confidence"])
             typed = {"number": vehicle_number, "quantity": quantity}
             checks.append({"key": qid, "label": label.format(**typed), "status": status,
                            "detail": detail.format(**typed), "certainty": a["confidence"],
@@ -756,7 +807,8 @@ def show(*moments: dict) -> list[str]:
 
 
 def weighings(bill: dict, first_slip: dict | None = None) -> dict | None:
-    """When the gross and tare weights were taken: {"gross": moment, "tare": moment, "certainty", "source"}.
+    """When the gross and tare weights were taken: {"gross": moment, "tare": moment, "certainty", "source", "slips"},
+    `slips` naming the bills the times were read from.
 
     A bill prints a date and time with each weight, or only a Time In and Time Out (or a first and second
     weighing time), with `first_weight` saying whether the first weight is the tare (lighter) or the gross
@@ -769,14 +821,14 @@ def weighings(bill: dict, first_slip: dict | None = None) -> dict | None:
     gross, tare = moment(r["gross_time"], r["gross_date"]), moment(r["tare_time"], r["tare_date"])
     if gross and tare:
         found.append({"gross": gross, "tare": tare, "certainty": min(gross["certainty"], tare["certainty"]),
-                      "source": "the times printed with each weight"})
+                      "source": "the times printed with each weight", "slips": [bill["name"]]})
     first = bill["answers"]["first_weight"]
     time_in, time_out = moment(r["in_time"], r["in_date"]), moment(r["out_time"], r["out_date"])
     if time_in and time_out and first["choice"] != NOT_SHOWN:
         gross, tare = (time_in, time_out) if first["choice"] == "gross" else (time_out, time_in)
         found.append({"gross": gross, "tare": tare,
                       "certainty": min(time_in["certainty"], time_out["certainty"], first["confidence"]),
-                      "source": f"Time In and Time Out, {first['choice']} first"})
+                      "source": f"Time In and Time Out, {first['choice']} first", "slips": [bill["name"]]})
     if first_slip and first["choice"] != NOT_SHOWN:
         before = {x["key"]: x for x in first_slip["readings"]}
         earlier, later = moment(before["printed_time"], before["printed_date"]), moment(r["printed_time"], r["printed_date"])
@@ -784,7 +836,8 @@ def weighings(bill: dict, first_slip: dict | None = None) -> dict | None:
             gross, tare = (earlier, later) if first["choice"] == "gross" else (later, earlier)
             found.append({"gross": gross, "tare": tare,
                           "certainty": min(earlier["certainty"], later["certainty"], first["confidence"]),
-                          "source": f"the times printed at the top of the first and final slips, {first['choice']} first"})
+                          "source": f"the times printed at the top of the first and final slips, {first['choice']} first",
+                          "slips": [first_slip["name"], bill["name"]]})
     return max(found, key=lambda w: w["certainty"], default=None)
 
 
@@ -794,52 +847,79 @@ def first_slip(bills: list[dict]) -> dict | None:
     return max(slips, key=lambda b: b["answers"]["slip_kind"]["confidence"], default=None)
 
 
-def check(group: str, key: str, label: str, status: str, detail: str, certainty: float | None = None) -> dict:
-    return {"group": group, "key": key, "label": label, "status": status, "detail": detail,
-            "certainty": certainty, "measure": "confidence" if certainty is not None else None}
+def check(group: str, key: str, label: str, status: str, detail: str, certainty: float | None = None,
+          images: list[str] = (), cause: str | None = None) -> dict:
+    """One of a trip's checks. `group` is the kind of image or rule it is about, `part` the part it counts in.
 
-
-def timing_check(group: str, key: str, label: str, passed: bool, yes: str, no: str, certainty: float) -> dict:
-    """A check worked out in code from times Jev read: unsure readings go to a person."""
-    status = "review" if certainty < CONFIDENT else "pass" if passed else "fail"
-    return check(group, key, label, status, (yes if passed else no) + (" (unsure reading)" if status == "review" else ""),
-                 certainty)
+    `detail` is the reason in a sentence a person can act on. `images` are the names of the images to look at,
+    and `cause` is shared by checks flagged for the same reason, such as one unsure reading of the weighing
+    times, so the page can show them as one.
+    """
+    return {"group": group, "part": PART_OF[key], "key": key, "label": label, "status": status, "detail": detail,
+            "certainty": certainty, "measure": "confidence" if certainty is not None else None,
+            "images": list(images), "cause": cause}
 
 
 def names(results: list[dict]) -> str:
-    return ", ".join(r["name"] for r in results)
+    return and_list([r["name"] for r in results])
+
+
+def named(results: list[dict]) -> list[str]:
+    return [r["name"] for r in results]
+
+
+def plural(results: list, one: str, many: str) -> str:
+    return one if len(results) == 1 else many
+
+
+# What a failed or unsure photo check says, as (problem, unsure) sentences about {names}.
+EACH_PHOTO = {
+    "shows_vehicle": ("No vehicle in {names}.", "Not sure there's a vehicle in {names}. Look for it."),
+    "gps_stamp": ("No GPS stamp on {names}.", "Not sure there's a GPS stamp on {names}. Look for it."),
+    "screen_photo": ("Photographed off a screen, not taken directly: {names}.",
+                     "Not sure {names} {was} taken directly, not photographed off a screen."),
+}
 
 
 def each_photo(role: str, key: str, label: str, results: list[dict], qid: str) -> dict:
     """A yes/no question that every photo of a role must pass, such as "shows a vehicle"."""
-    _, yes, no, pass_when_yes = NOUL_CHECKS[qid]
+    pass_when_yes = NOUL_CHECKS[qid][3]
+    problem, doubt = EACH_PHOTO[qid]
     statuses = {r["name"]: noul_status(r["answers"][qid]["yes"], pass_when_yes, qid) for r in results}
     failed = [r for r in results if statuses[r["name"]] == "fail"]
     unsure = [r for r in results if statuses[r["name"]] == "review"]
     if failed:
-        return check(role, key, label, "fail", f"{no}: {names(failed)}")
+        return check(role, key, label, "fail", problem.format(names=names(failed)), images=named(failed))
     if unsure:
-        return check(role, key, label, "review", f"Unsure for {names(unsure)}")
+        return check(role, key, label, "review", doubt.format(names=names(unsure), was=plural(unsure, "was", "were")),
+                     images=named(unsure))
     return check(role, key, label, "pass", f"{len(results)} of {len(results)} photos")
 
 
 def plate_check(role: str, results: list[dict], vehicle_number: str) -> dict:
     """At least one photo of the role clearly shows the typed number; any photo clearly showing another is a problem."""
-    label = f"Plate matches {vehicle_number}"
+    label = f"{role.capitalize()} plate matches {vehicle_number}"
     sure = [r for r in results if r["answers"]["plate_number"]["confidence"] >= CONFIDENT]
     different = [r for r in sure if r["answers"]["plate_number"]["choice"] == "different"]
     same = [r for r in sure if r["answers"]["plate_number"]["choice"] == "same"]
     if different:
-        return check(role, f"{role}_plate", label, "fail", f"A different number in {names(different)}")
+        return check(role, f"{role}_plate", label, "fail",
+                     f"{names(different)} {plural(different, 'shows', 'show')} a different number plate from {vehicle_number}.",
+                     images=named(different))
     if same:
         return check(role, f"{role}_plate", label, "pass", f"Seen clearly in {len(same)} of {len(results)}",
                      max(r["answers"]["plate_number"]["confidence"] for r in same))
-    return check(role, f"{role}_plate", label, "review", "No photo shows the plate clearly enough to compare")
+    return check(role, f"{role}_plate", label, "review",
+                 f"No {role} photo shows the number plate clearly enough to compare with {vehicle_number}. "
+                 "Look for the plate in the photos.", images=named(results))
 
 
 def photo_checks(role: str, results: list[dict], vehicle_number: str) -> list[dict]:
     if not results:
-        return [check(role, f"{role}_missing", GROUPS[role], "review", "None added")]
+        cause = f"{role}_missing"
+        return [check(role, f"{role}_missing", GROUPS[role], "review", f"No {role} photos added.", cause=cause),
+                check(role, f"{role}_plate", f"{role.capitalize()} plate matches {vehicle_number}", "review",
+                      f"No {role} photos to compare with {vehicle_number}.", cause=cause)]
     return [
         each_photo(role, f"{role}_vehicle", "Vehicle in photo", results, "shows_vehicle"),
         each_photo(role, f"{role}_stamp", "GPS stamp", results, "gps_stamp"),
@@ -922,19 +1002,24 @@ def plant_check(results: list[dict], plant: tuple[float, float], limits: Limits)
     if away and (any(x[4] for x in away) or not near):
         r, detail, c, _, _ = next((x for x in away if x[4]), away[0])
         return check("unloading", "unloading_plant", label, "fail",
-                     f"{r['name']} is stamped {detail} (within {distance(radius)} allowed)", c)
+                     f"{r['name']} is stamped {detail}, but unloading must be within {distance(radius)} of it.", c,
+                     [r["name"]])
     if away:
         (r, detail, _, _, _), (n, there, c, _, _) = away[0], closest
         return check("unloading", "unloading_plant", label, "review",
-                     f"{r['name']} seems stamped {detail}, but {n['name']} is {there}", c)
+                     f"The photos disagree: {r['name']} seems stamped {detail}, but {n['name']} is {there}. "
+                     "Check both GPS stamps.", c, [r["name"], n["name"]])
     if near:
         r, detail, c, _, _ = closest
         return check("unloading", "unloading_plant", label, "pass",
                      f"{len(near)} of {len(results)} stamped within {distance(radius)}: {r['name']} {detail}", c)
     if unsure:
         return check("unloading", "unloading_plant", label, "review",
-                     f"Position not read surely enough to the metre on {names(unsure)}")
-    return check("unloading", "unloading_plant", label, "review", f"GPS stamp position can't be read on {names(unread)}")
+                     f"The position on the GPS stamp of {names(unsure)} couldn't be read surely enough to tell if "
+                     f"unloading was within {distance(radius)} of the plant. Check the Lat/Long line.", images=named(unsure))
+    return check("unloading", "unloading_plant", label, "review",
+                 f"No position could be read on the GPS stamp of {names(unread)}. Check the Lat/Long line places "
+                 f"unloading within {distance(radius)} of the plant.", images=named(unread))
 
 
 def final_slip(bills: list[dict]) -> dict | None:
@@ -944,13 +1029,26 @@ def final_slip(bills: list[dict]) -> dict | None:
     return max(finals, key=lambda b: b["answers"]["slip_kind"]["confidence"], default=None)
 
 
-def choice_check(group: str, key: str, qid: str, answer: dict, vehicle_number: str, quantity: str | None, prefix: str = "") -> dict:
+# What to look at when Jev isn't sure of a final-slip answer.
+LOOK_FOR = {
+    "net_weight": "Check the net weight on the slip is {quantity} kg.",
+    "gross_vs_tare": "Check which weight is labelled gross.",
+    "material": "Check the slip's material field.",
+    "weighbridge_name": "Compare the stamp's name with the slip's heading.",
+}
+
+
+def choice_check(group: str, key: str, qid: str, answer: dict, vehicle_number: str, quantity: str | None,
+                 bill: dict | None = None) -> dict:
+    """A check from one Choice answer about `bill`, named in the detail, with what to look at when unsure."""
     label, outcomes = CHOICE_CHECKS[qid]
     status, detail = outcomes[answer["choice"]]
     if answer["confidence"] < CONFIDENT:
-        status, detail = "review", f"Unsure: {detail[0].lower()}{detail[1:]}"
+        status, detail = "review", unsure(detail, answer["confidence"]) + ". " + LOOK_FOR.get(qid, "")
     typed = {"number": vehicle_number, "quantity": quantity}
-    return check(group, key, label.format(**typed), status, prefix + detail.format(**typed), answer["confidence"])
+    prefix = f"{bill['name']}: " if bill else ""
+    return check(group, key, label.format(**typed), status, prefix + detail.format(**typed).strip(), answer["confidence"],
+                 [bill["name"]] if bill and status != "pass" else [])
 
 
 def seal_checks(final: dict | None) -> list[dict]:
@@ -960,70 +1058,94 @@ def seal_checks(final: dict | None) -> list[dict]:
     weighbridge's is a problem, and an unsure one goes to a person.
     """
     if not final:
-        return [check("bill", "weighbridge_seal", "Weighbridge stamp", "review", "No final slip to look for it on")]
-    a, at, checks = final["answers"], f"{final['name']}: ", []
+        return [check("bill", "weighbridge_seal", "Weighbridge stamp", "review",
+                      "No final slip to look for the weighbridge's stamp on.", cause="no_final")]
+    a = final["answers"]
     theirs, name = a["weighbridge_seal"]["yes"], a["weighbridge_name"]
     status = noul_status(theirs, qid="weighbridge_seal")
     if status == "pass":
-        checks.append(choice_check("bill", "weighbridge_seal", "weighbridge_name", name, "", None, at))
+        return [choice_check("bill", "weighbridge_seal", "weighbridge_name", name, "", None, final)]
+    detail = {"fail": "no weighbridge stamp found. The final slip must carry the weighbridge's own stamp.",
+              "review": f"only {theirs:.0%} likely the weighbridge's own stamp is on it. Look for the stamp."}[status]
+    return [check("bill", "weighbridge_seal", "Weighbridge stamp", status, f"{final['name']}: {detail}", theirs,
+                  [final["name"]])]
+
+
+def verra_checks(final: dict | None) -> list[dict]:
+    """What a Verra project trip also needs of the final slip: a material entered, and the weighbridge's own stamp."""
+    if final:
+        material = choice_check("bill", "material", "material", final["answers"]["material"], "", None, final)
     else:
-        detail = {"fail": "No weighbridge stamp", "review": "Unsure: is the weighbridge's own stamp on it?"}[status]
-        checks.append(check("bill", "weighbridge_seal", "Weighbridge stamp", status, at + detail, theirs))
-    return checks
+        material = check("bill", "material", "Material entered", "review", "No final slip to look for the material on.",
+                         cause="no_final")
+    return [material, *seal_checks(final)]
 
 
 def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, verra: bool = False) -> list[dict]:
-    """A weighbridge slip, the final slip, the vehicle number on every slip, the final slip's net weight, labels and
-    material, and for a Verra project trip, its stamp.
+    """A weighbridge slip, the final slip, the vehicle number on every slip, the final slip's net weight and labels,
+    and for a Verra project trip, its material and stamp.
     """
     if not bills:
-        return [check("bill", "bill_missing", "Weigh bills", "review", "None added")]
+        return [check("bill", "bill_missing", "Weigh bills", "review", "No weigh bills added.", cause="bill_missing"),
+                check("bill", "bill_number", f"Bills match {vehicle_number}", "review",
+                      f"No weigh bills to compare with {vehicle_number}.", cause="bill_missing"),
+                *(verra_checks(None) if verra else [])]
     slips = [b for b in bills if b["answers"]["weigh_bill"]["yes"] >= 0.5]
     ignored = [b for b in bills if b not in slips]
-    note = f"; ignored as not a slip: {names(ignored)}" if ignored else ""
+    note = f" (ignored as not a slip: {names(ignored)})" if ignored else ""
     final = final_slip(bills)
     checks = []
     if not any(b["answers"]["weigh_bill"]["yes"] >= YES for b in slips):
-        checks.append(check("bill", "bill_found", "Weighbridge slip", "review", f"No image is clearly a weighbridge slip{note}"))
+        checks.append(check("bill", "bill_found", "Weighbridge slip", "review",
+                            f"No image is clearly a weighbridge slip{note}. Check the bills.", images=named(bills),
+                            cause=None if final else "no_final"))
     elif final and final["answers"]["slip_kind"]["confidence"] >= CONFIDENT:
         checks.append(check("bill", "bill_found", "Final slip", "pass", f"{final['name']}: both weights and the net{note}",
                             final["answers"]["slip_kind"]["confidence"]))
+    elif final:
+        c = final["answers"]["slip_kind"]["confidence"]
+        checks.append(check("bill", "bill_found", "Final slip", "review",
+                            f"Only {c:.0%} sure {final['name']} is the final slip, with both weights and the net weight{note}. "
+                            "Check it.", c, [final["name"]]))
     else:
         checks.append(check("bill", "bill_found", "Final slip", "review",
-                            f"No slip clearly shows both weights and the net{note}"))
+                            f"No slip clearly shows both weights and the net weight{note}, so the weighing times and net "
+                            "weight couldn't be read. Look for the final slip.", images=named(slips), cause="no_final"))
 
     sure = [b for b in slips if b["answers"]["bill_number"]["confidence"] >= CONFIDENT]
     different = [b for b in sure if b["answers"]["bill_number"]["choice"] == "different"]
     unclear = [b for b in slips if b not in sure or b["answers"]["bill_number"]["choice"] == NOT_SHOWN]
     label = f"Bills match {vehicle_number}"
     if different:
-        checks.append(check("bill", "bill_number", label, "fail", f"A different vehicle number on {names(different)}"))
-    elif unclear or not slips:
-        checks.append(check("bill", "bill_number", label, "review", f"Can't be compared on {names(unclear) or 'any slip'}"))
+        checks.append(check("bill", "bill_number", label, "fail",
+                            f"{names(different)} {plural(different, 'shows', 'show')} a different vehicle number from "
+                            f"{vehicle_number}.", images=named(different)))
+    elif not slips:
+        checks.append(check("bill", "bill_number", label, "review", f"No slip to compare with {vehicle_number}."))
+    elif unclear:
+        checks.append(check("bill", "bill_number", label, "review",
+                            f"The vehicle number on {names(unclear)} couldn't be compared with {vehicle_number}. "
+                            "Check the number on the slip.", images=named(unclear)))
     else:
         shown = f"All {len(slips)} slips show" if len(slips) > 1 else "The slip shows"
         checks.append(check("bill", "bill_number", label, "pass", f"{shown} {vehicle_number}",
                             min(b["answers"]["bill_number"]["confidence"] for b in slips)))
 
     if not quantity:
-        checks.append(check("bill", "net_weight", "Net weight", "review", "Quantity not typed"))
+        checks.append(check("bill", "net_weight", "Net weight", "review", "No quantity was typed, so the net weight wasn't checked."))
     elif not final:
-        checks.append(check("bill", "net_weight", f"Net weight is {quantity} kg", "review", "No final slip to read it from"))
+        checks.append(check("bill", "net_weight", f"Net weight is {quantity} kg", "review",
+                            "No final slip to read the net weight from.", cause="no_final"))
     else:
         checks.append(choice_check("bill", "net_weight", "net_weight", final["answers"]["net_weight"], vehicle_number, quantity,
-                                   f"{final['name']}: "))
+                                   final))
     # Only when Jev is sure either way: many slips don't label gross and tare (19 Oct 2026 run), and an
     # unsure answer there would send most trips to a person for nothing.
     if final and final["answers"]["gross_vs_tare"]["confidence"] >= CONFIDENT \
             and final["answers"]["gross_vs_tare"]["choice"] != NOT_SHOWN:
         checks.append(choice_check("bill", "gross_vs_tare", "gross_vs_tare", final["answers"]["gross_vs_tare"],
-                                   vehicle_number, quantity, f"{final['name']}: "))
-    if final:
-        checks.append(choice_check("bill", "material", "material", final["answers"]["material"], vehicle_number, quantity,
-                                   f"{final['name']}: "))
-    else:
-        checks.append(check("bill", "material", "Material entered", "review", "No final slip to read it from"))
-    return checks + (seal_checks(final) if verra else [])
+                                   vehicle_number, quantity, final))
+    return checks + (verra_checks(final) if verra else [])
 
 
 def photo_moments(results: list[dict]) -> list[tuple[dict, dict | None]]:
@@ -1047,39 +1169,66 @@ def photo_window(role: str, tare_first: bool) -> tuple[str | None, str | None]:
 
 
 def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_first: bool = True) -> dict | None:
-    """Every loading or unloading photo in its window of the weighings (`photo_window`), give or take the clock slack."""
+    """Every loading or unloading photo in its window of the weighings (`photo_window`), give or take the clock slack.
+
+    Unsure only because the weighing times are, it shares the weighing order's `cause`, "weigh_times".
+    """
     if not results:
         return None
     slack = limits.clock_slack
-    allowing = f", allowing {duration(slack)} clock difference" if slack else ""
+    allowing = f" ({duration(slack)} clock difference allowed)" if slack else ""
     after, before = photo_window(role, tare_first)
     shown = dict(zip(("tare", "gross"), show(w["tare"], w["gross"])))
-    label = (f"Between {after} and {before}" if after and before else f"After {after}" if after else f"Before {before}")
+    plain = {"tare": f"the tare (empty) weighing at {shown['tare']}", "gross": f"the gross (loaded) weighing at {shown['gross']}"}
+    word = "Loading" if role == "loading" else "Unloading"
+    label = f"{word} photo times"
     taken = photo_moments(results)
     unread = [r for r, m in taken if not m]
-    wrong, unsure, times = [], [], []
+    wrong, times = [], []
     for r, m in taken:
         if not m:
             continue
         early = bool(after) and minutes_between(w[after], m) < -slack
         late = bool(before) and minutes_between(m, w[before]) < -slack
-        certainty = min(m["certainty"], w["certainty"])
-        (unsure if certainty < CONFIDENT else wrong if early or late else times).append((r, m, early))
-    word = "Loading" if role == "loading" else "Unloading"
-    if wrong:
-        r, m, early = wrong[0]
-        p = show(m, w["tare"], w["gross"])[0]
-        where = f"before {after} {shown[after]}" if early else f"after {before} {shown[before]}"
-        return check(role, f"{role}_timing", label, "fail", f"{word} {p} ({r['name']}) is {where}{allowing}",
-                     min(m["certainty"], w["certainty"]))
+        (wrong if early or late else times).append((r, m, early))
+    weighed = w["certainty"] >= CONFIDENT
+    unsure = [(r, m) for r, m in taken if m and m["certainty"] < CONFIDENT]
+    sure_wrong = [x for x in wrong if weighed and x[1]["certainty"] >= CONFIDENT]
+    at = lambda m: show(m, w["tare"], w["gross"])[0]
+    window = (f"between {plain[after]} and {plain[before]}" if after and before
+              else f"after {plain[after]}" if after else f"before {plain[before]}")
+    if sure_wrong:
+        r, m, early = sure_wrong[0]
+        side = after if early else before
+        also = f" So {plural(sure_wrong[1:], 'was', 'were')} {names([x[0] for x in sure_wrong[1:]])}." if sure_wrong[1:] else ""
+        return check(role, f"{role}_timing", label, "fail",
+                     f"{r['name']} was taken at {at(m)}, {'before' if early else 'after'} {plain[side]}. {word} photos must "
+                     f"come {'after' if early else 'before'} it{allowing}.{also}",
+                     min(m["certainty"], w["certainty"]), [x[0]["name"] for x in sure_wrong])
     if unread:
-        return check(role, f"{role}_timing", label, "review", f"GPS stamp time can't be read on {names(unread)}")
+        return check(role, f"{role}_timing", label, "review",
+                     f"The time on the GPS stamp of {names(unread)} couldn't be read. Check {plural(unread, 'it was', 'they were')} "
+                     f"taken {window}.", images=named(unread))
     if unsure:
-        return check(role, f"{role}_timing", label, "review", f"Unsure reading of {names([r for r, *_ in unsure])}")
-    when = ", ".join(sorted({show(m, w["tare"], w["gross"])[0] for _, m, _ in times}))
-    window = (f"between {after} {shown[after]} and {before} {shown[before]}" if after and before
-              else f"after {after} {shown[after]}" if after else f"before {before} {shown[before]}")
-    return check(role, f"{role}_timing", label, "pass", f"{word} {when} is {window}",
+        photos = [r for r, _ in unsure]
+        read = and_list(sorted({at(m) for _, m in unsure}))
+        c = min(m["certainty"] for _, m in unsure)
+        return check(role, f"{role}_timing", label, "review",
+                     f"The time on the GPS stamp of {names(photos)} was read as {read}, but only {c:.0%} sure. "
+                     f"Check {plural(photos, 'it was', 'they were')} taken {window}.", c, named(photos))
+    short = (f"between {after} {shown[after]} and {before} {shown[before]}" if after and before
+             else f"after {after} {shown[after]}" if after else f"before {before} {shown[before]}")
+    if not weighed:
+        if wrong:
+            r, m, early = wrong[0]
+            side = after if early else before
+            text = f"{r['name']} at {at(m)} is {'before' if early else 'after'} {side} {shown[side]}"
+        else:
+            text = f"{word} {and_list(sorted({at(m) for _, m, _ in times}))} is {short}"
+        return check(role, f"{role}_timing", label, "review", f"{text}, if the weighing times are right",
+                     w["certainty"], cause="weigh_times")
+    when = ", ".join(sorted({at(m) for _, m, _ in times}))
+    return check(role, f"{role}_timing", label, "pass", f"{word} {when} is {short}",
                  min(min(m["certainty"] for _, m, _ in times), w["certainty"]))
 
 
@@ -1089,20 +1238,32 @@ def same_day(results: list[dict], w: dict) -> dict | None:
     if not results:
         return None
     gross = w["gross"]
-    label = "Same day as gross"
+    label = "Unloading on the weighing day"
     taken = photo_moments(results)
     unread = [r for r, m in taken if not m]
     other_day = [(r, m) for r, m in taken if m and m["date"] != gross["date"]]
     sure = [(r, m) for r, m in other_day if min(m["certainty"], w["certainty"]) >= CONFIDENT]
+    doubtful = [(r, m) for r, m in other_day if m["certainty"] < CONFIDENT]
     if sure:
         r, m = sure[0]
         return check("unloading", "unloading_day", label, "fail",
-                     f"Unloading on {m['date']} ({r['name']}), gross on {gross['date']}", min(m["certainty"], w["certainty"]))
-    if other_day:
+                     f"{r['name']} is dated {m['date']}, but the gross (loaded) weighing was on {gross['date']}. "
+                     "Unloading must be on the same day.", min(m["certainty"], w["certainty"]), [r["name"] for r, _ in sure])
+    if doubtful:
+        photos = [r for r, _ in doubtful]
+        c = min(m["certainty"] for _, m in doubtful)
         return check("unloading", "unloading_day", label, "review",
-                     f"Unsure reading: {names([r for r, _ in other_day])} dated {other_day[0][1]['date']}, gross on {gross['date']}")
+                     f"The date on the GPS stamp of {names(photos)} was read as {doubtful[0][1]['date']}, but only {c:.0%} sure; "
+                     f"the gross (loaded) weighing was on {gross['date']}. Check the stamp date.", c, named(photos))
+    if other_day:
+        r, m = other_day[0]
+        return check("unloading", "unloading_day", label, "review",
+                     f"{r['name']} dated {m['date']}, gross on {gross['date']}, if the weighing date is right",
+                     w["certainty"], cause="weigh_times")
     if unread:
-        return check("unloading", "unloading_day", label, "review", f"GPS stamp date can't be read on {names(unread)}")
+        return check("unloading", "unloading_day", label, "review",
+                     f"The date on the GPS stamp of {names(unread)} couldn't be read. Check unloading was on {gross['date']}, "
+                     "the day of the gross (loaded) weighing.", images=named(unread))
     return check("unloading", "unloading_day", label, "pass", f"All on {gross['date']}",
                  min(min(m["certainty"] for _, m in taken), w["certainty"]))
 
@@ -1118,7 +1279,7 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     `min_gap_gross_first` apart, loading photos fall before gross and unloading photos between them.
     Photos may be off by `clock_slack`, and unloading must be on the same day as the gross weighing.
     With `plant`, unloading must be stamped within `plant_radius` of it. With `verra` (a Verra project
-    trip), the final slip must carry the weighbridge's stamp.
+    trip), the final slip must have a material entered and carry the weighbridge's stamp.
     """
     checks = photo_checks("loading", images.get("loading", []), vehicle_number)
     checks += photo_checks("unloading", images.get("unloading", []), vehicle_number)
@@ -1130,42 +1291,62 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     final = final_slip(bills)
     w = weighings(final, first_slip(bills)) if final else None
     gap = minutes_between(w["tare"], w["gross"]) if w else None  # positive when the tare was taken first
-    if not bills:
-        return checks, None
+    not_checked = "so the weighing order and photo times weren't checked"
     if not w:
-        checks.append(check("times", "weigh_order", "Weighing order", "review",
-                            "Tare and gross times can't be read from the final slip"))
+        if final:
+            detail = (f"The tare (empty) and gross (loaded) times on {final['name']} couldn't be read, {not_checked}. "
+                      "Read the times on the slip.")
+        else:
+            detail = f"No final slip to read the weighing times from, {not_checked}." if bills else f"No weigh bills, {not_checked}."
+        checks.append(check("times", "weigh_order", "Weighing order", "review", detail, images=[final["name"]] if final else [],
+                            cause=None if final else "no_final" if bills else "bill_missing"))
         return checks, None
     g, t = show(w["gross"], w["tare"])
     if gap == 0:
-        checks.append(check("times", "weigh_order", "Weighing order", "review", f"Tare and gross both at {g}"))
+        checks.append(check("times", "weigh_order", "Weighing order", "review",
+                            f"{and_list(w['slips'])} {plural(w['slips'], 'shows', 'show')} the tare (empty) and gross (loaded) "
+                            f"weighings both at {g}. Check the times on the slip.", images=w["slips"]))
         return checks, w
     tare_first = gap > 0
-    order = f"Tare first ({t}), then gross ({g})" if tare_first else f"Gross first ({g}), then tare ({t})"
-    checks.append(timing_check("times", "weigh_order", "Weighing order", True, f"{order}, from {w['source']}", "",
-                               w["certainty"]))
+    # An unsure reading of the weighing times also makes the gap and the photo times unsure: one cause, one look.
+    cause = "weigh_times" if w["certainty"] < CONFIDENT else None
+    if cause:
+        order = check("times", "weigh_order", "Weighing order", "review",
+                      f"Check the weighing times on {and_list(w['slips'])}: read as tare (empty) {t} and gross (loaded) {g}, "
+                      f"from {w['source']}, but only {w['certainty']:.0%} sure.", w["certainty"], w["slips"], cause)
+    else:
+        first = f"Tare first ({t}), then gross ({g})" if tare_first else f"Gross first ({g}), then tare ({t})"
+        order = check("times", "weigh_order", "Weighing order", "pass", f"{first}, from {w['source']}", w["certainty"])
+    checks.append({**order, "order": "tare_first" if tare_first else "gross_first"})
     if w["source"].startswith("Time In"):
         # Time In should be the tare (19 Oct 2026: on every In/Out slip). The heavier weight at Time In means the
         # details were entered swapped, or the vehicle was weighed loaded first: either way a person looks.
         first = final["answers"]["first_weight"]
+        label = "Time In is the empty weighing"
         if first["choice"] == "gross":
-            status = "fail" if first["confidence"] >= CONFIDENT else "review"
-            checks.append(check("times", "time_in_tare", "Time In with the tare", status,
-                                f"{final['name']}: the heavier weight is at Time In ({g}): In and Out look swapped, "
-                                "or the vehicle was weighed loaded first", first["confidence"]))
+            swapped = (f"the heavier weight is at Time In ({g}). Either In and Out were entered swapped, "
+                       "or the vehicle was weighed loaded first")
+            if first["confidence"] >= CONFIDENT:
+                status, detail = "fail", f"{final['name']}: {swapped}."
+            else:
+                status, detail = "review", f"{final['name']}: {unsure(swapped, first['confidence'])}. Check which weight is at Time In."
+            checks.append(check("times", "time_in_tare", label, status, detail, first["confidence"], [final["name"]]))
         else:
-            checks.append(check("times", "time_in_tare", "Time In with the tare", "pass",
+            checks.append(check("times", "time_in_tare", label, "pass",
                                 f"{final['name']}: the lighter weight is at Time In ({t})", first["confidence"]))
-    if tare_first:
-        least = limits.min_gap_tare_first
-        checks.append(timing_check("times", "weigh_gap", "Tare to gross", gap >= least,
-                                   f"{duration(gap)} apart (at least {duration(least)})",
-                                   f"Only {duration(gap)} apart (at least {duration(least)} needed)", w["certainty"]))
+    apart, least = abs(gap), limits.min_gap_tare_first if tare_first else limits.min_gap_gross_first
+    between = "loading" if tare_first else "unloading"
+    if cause:
+        status = "review"
+        detail = f"{'Only ' if apart < least else ''}{duration(apart)} apart if those times are right (at least {duration(least)} needed)"
+    elif apart >= least:
+        status, detail = "pass", f"{duration(apart)} apart (at least {duration(least)})"
     else:
-        least = limits.min_gap_gross_first
-        checks.append(timing_check("times", "weigh_gap", "Gross to tare", -gap >= least,
-                                   f"{duration(-gap)} apart (at least {duration(least)})",
-                                   f"Only {duration(-gap)} apart (at least {duration(least)} needed)", w["certainty"]))
+        status = "fail"
+        detail = (f"The tare (empty) and gross (loaded) weighings are only {duration(apart)} apart, but at least "
+                  f"{duration(least)} is needed for {between} between them.")
+    checks.append(check("times", "weigh_gap", "Time between weighings", status, detail, w["certainty"],
+                        w["slips"] if status == "fail" else [], cause))
     for role in ("loading", "unloading"):
         if c := photo_timing(role, images.get(role, []), w, limits, tare_first):
             checks.append(c)
@@ -1201,16 +1382,25 @@ def decide(checks: list[dict]) -> dict:
     return {"status": status, "title": TITLES[status], "checks": checks, "flags": flags}
 
 
+def decide_parts(checks: list[dict]) -> dict:
+    """The trip's verdict from all its checks, so the worst of its parts, and each part's from its own (`PARTS`).
+
+    Only parts with checks are kept: a trip that isn't a Verra project has no Verra part.
+    """
+    parts = {p: decide([c for c in checks if c["part"] == p]) for p in PARTS if any(c["part"] == p for c in checks)}
+    return {**decide(checks), "parts": parts}
+
+
 def verdict(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
             limits: Limits = Limits(), extra: list[dict] = (), plant: tuple[float, float] | None = None,
             verra: bool = False) -> dict:
-    """One verdict for the trip, with its checks, flags and timeline. `extra` are checks across trips."""
+    """The trip's verdict and each part's, with its checks, flags and timeline. `extra` are checks across trips."""
     checks, w = trip_checks(images, vehicle_number, quantity, limits, plant, verra)
     checks += list(extra)
     # Between the two weighings, for finding a vehicle on two trips at once: only when their order is clear.
     clear = any(c["key"] == "weigh_order" and c["status"] == "pass" for c in checks)
     window = sorted([w["tare"]["at"], w["gross"]["at"]]) if w and clear else None
-    return {**decide(checks), "timeline": timeline(images, w, checks),
+    return {**decide_parts(checks), "timeline": timeline(images, w, checks),
             "window": [t.isoformat() for t in window] if window else None}
 
 
@@ -1334,9 +1524,12 @@ def reuse_check(images: dict[str, list[dict]], index: ImageIndex, trip: str | No
 
     label = "Images not used in other trips"
     if seen[True]:
-        return check("trips", "reused", label, "fail", describe(seen[True]))
+        return check("trips", "reused", label, "fail",
+                     describe(seen[True]) + ". The same image can't be proof for two trips.", images=list(seen[True]))
     if seen[False]:
-        return check("trips", "reused", label, "review", "Looks the same: " + describe(seen[False]))
+        return check("trips", "reused", label, "review",
+                     "Looks the same as an image in another trip: " + describe(seen[False]) + ". Compare them.",
+                     images=list(seen[False]))
     return check("trips", "reused", label, "pass", "None seen in another trip")
 
 
@@ -1355,30 +1548,31 @@ def overlap_checks(trips: dict[str, dict]) -> dict[str, dict]:
                 for x, y in ((a, b), (b, a)):
                     found.setdefault(x, []).append(y)
     return {trip: check("trips", "overlap", "One trip at a time", "fail",
-                        f"{trips[trip]['vehicle_number']} is also on trip {', '.join(others)} at the same time")
+                        f"{trips[trip]['vehicle_number']} is also on trip {and_list(others)} at the same time. "
+                        "A vehicle can't be on two trips at once.")
             for trip, others in found.items()}
 
 
 def add_checks(trip: dict, extra: list[dict]) -> None:
-    """Add checks across trips to a finished trip's verdict, and decide again."""
+    """Add checks across trips to a finished trip's verdict, and decide it and its parts again."""
     v = trip["verdict"]
-    trip["verdict"] = {**v, **decide(v["checks"] + extra)}
+    trip["verdict"] = {**v, **decide_parts(v["checks"] + extra)}
 
 
-def question_version(slot: str, place: bool = False, seal: bool = False) -> str:
+def question_version(slot: str, place: bool = False, verra: bool = False) -> str:
     """Changes whenever a question changes, so saved answers from older questions aren't reused.
 
-    The place and stamp questions only count with `place` and `seal`, so adding them kept the answers
-    saved before. With the stamp questions, our company's name counts too, as it is sent with them.
+    The place and Verra questions only count with `place` and `verra`, so adding them kept the answers
+    saved before. With the Verra questions, our company's name counts too, as it is sent with them.
     """
-    asked = {q: v for q, v in QUESTIONS[slot].items() if (place or q not in PLACE) and (seal or q not in SEAL)}
+    asked = {q: v for q, v in QUESTIONS[slot].items() if (place or q not in PLACE) and (verra or q not in VERRA)}
     if place:  # and how the line is found and picked from
         asked |= {"line": LINE, "pick": pick("{axis}", "{labels}", ["{start}", "{other}"])}
     if slot == "bill":  # and how the slip is found and cut out
         asked |= {"slip": SLIP}
     text = json.dumps({q: v.model_dump(mode="json") for q, v in asked.items()}, sort_keys=True) \
         + (BOX_MODEL if place or slot == "bill" else "") \
-        + (OUR_COMPANY if seal else "")
+        + (OUR_COMPANY if verra else "")
     return hashlib.md5(text.encode()).hexdigest()[:10]
 
 
@@ -1386,12 +1580,12 @@ TURNING = "turn3"  # how images are turned before the answers are kept; changing
 
 
 def answer_key(prints: dict, slot: str, vehicle_number: str, quantity: str | None, model: str, place: bool = False,
-               seal: bool = False) -> str:
+               verra: bool = False) -> str:
     """What an image's answers depend on, to save them and reuse them: the image, the questions, what was typed, the model.
 
     Not the plant's location: it isn't sent, so the same answers serve any plant.
     """
-    return "|".join([prints["md5"], slot, question_version(slot, place, seal), TURNING, vehicle_number, quantity or "", model])
+    return "|".join([prints["md5"], slot, question_version(slot, place, verra), TURNING, vehicle_number, quantity or "", model])
 
 
 def result_from(slot: str, raw: dict, vehicle_number: str, quantity: str | None) -> dict:
@@ -1488,12 +1682,12 @@ def read_line(client: TypeSafeClient, img: PILImage.Image, raw: dict, model: str
 
 def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
             quantity: str | None = None, cache: dict | None = None, key: str | None = None,
-            place: bool = False, seal: bool = False) -> tuple[dict, PILImage.Image]:
+            place: bool = False, verra: bool = False) -> tuple[dict, PILImage.Image]:
     """Check one upright-by-EXIF RGB image in its slot. Returns the result and the image as finally sent.
 
     `quantity` is the typed quantity in kilograms, which a bill's net weight must match. With `place`,
     a photo's GPS stamp position is read too, to four decimals where it can be (`read_line`). With
-    `seal`, a bill is asked about the weighbridge's stamp. A bill is first cut to its slip (`find_slip`),
+    `verra`, a bill is asked about the material and the weighbridge's stamp. A bill is first cut to its slip (`find_slip`),
     then turned upright. With `cache` and `key`, saved answers are used instead of asking Jev, and new
     answers are saved.
     """
@@ -1507,7 +1701,7 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
     if slot == "bill":
         slip, tokens = find_slip(client, img)
         img, requests = cut_slip(img, slip), 1
-    response = ask(client, slot, img, vehicle_number, model, quantity, place, seal)
+    response = ask(client, slot, img, vehicle_number, model, quantity, place, verra)
     tokens, requests, rotated = tokens + (response.usage.input_tokens or 0), requests + 1, 0
     turned = response.choices["orientation"]
     looks = [summary(turned)]  # each orientation answer, before each turn
@@ -1516,7 +1710,7 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
     while looked < 3 and (turn := turn_for(response.choices["orientation"], first=looked == 1)):
         img = img.rotate(turn, expand=True)
         rotated = (rotated + turn) % 360
-        response = ask(client, slot, img, vehicle_number, model, quantity, place, seal)
+        response = ask(client, slot, img, vehicle_number, model, quantity, place, verra)
         tokens += response.usage.input_tokens or 0
         requests += 1
         looked += 1
@@ -1541,7 +1735,7 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
     twice in the trip is asked about once. With `index`, images already used in other trips (not
     `trip` itself) are flagged. `cache` holds saved answers (see `analyze`). With `plant`, the
     plant's (latitude, longitude), unloading photos are read for where they were taken and checked
-    against it. With `verra` (a Verra project trip), bills are checked for the weighbridge's stamp.
+    against it. With `verra` (a Verra project trip), bills are checked for the material and the weighbridge's stamp.
     """
     jobs = []  # (role, upload, image, fingerprints)
     for role in ROLES:
@@ -1557,9 +1751,9 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
     def run(job):
         role, u, img, prints = job
         slot, place = SLOT_OF[role], prints["md5"] in placed
-        seal = verra and slot == "bill"
+        asked = verra and slot == "bill"  # the Verra questions are only for bills
         return analyze(client, slot, img, vehicle_number, model, quantity, cache,
-                       answer_key(prints, slot, vehicle_number, quantity, model, place, seal), place, seal)
+                       answer_key(prints, slot, vehicle_number, quantity, model, place, asked), place, asked)
 
     unique = [j for j in jobs if first_of[j[3]["md5"]] == j[1].name]
     with ThreadPoolExecutor(max(1, min(8, len(unique)))) as pool:
@@ -1598,10 +1792,13 @@ def print_trip(trip: dict, vehicle_number: str, limits: Limits, plant: tuple[flo
     print(f"  Limits: tare first, tare to gross at least {duration(limits.min_gap_tare_first)}; gross first, gross to tare "
           f"at least {duration(limits.min_gap_gross_first)}; clock slack {duration(limits.clock_slack)}{near}")
     if verra:
-        print("  Verra project: the final slip must carry the weighbridge's stamp")
+        print("  Verra project: the final slip must have a material entered and carry the weighbridge's stamp")
     print("  Timeline: " + " -> ".join(f"{e['what']} {e['time']}{' (!)' if e['bad'] else ''}" for e in v["timeline"]))
-    for c in v["flags"] + [c for c in v["checks"] if c["status"] == "pass" and (c["group"] == "times" or c["key"] in ("unloading_plant", *SEAL))]:
-        print(f"  {MARK[c['status']]} {GROUPS[c['group']]} · {c['label']}: {c['detail']}")
+    for part, p in v["parts"].items():
+        print(f"  {PARTS[part]}: {p['title']}")
+        shown = [c for c in p["checks"] if c["status"] == "pass" and (c["group"] == "times" or c["key"] in ("unloading_plant", *VERRA))]
+        for c in p["flags"] + shown:
+            print(f"    {MARK[c['status']]} {GROUPS[c['group']]} · {c['label']}: {c['detail']}")
     print(f"  {tokens} input tokens ≈ ${tokens * PRICE_PER_INPUT_TOKEN:.5f}")
 
 
@@ -1615,7 +1812,7 @@ def main() -> None:
     parser.add_argument("--quantity", help="the quantity in kilograms, such as 2570, which the final slip's net weight must match")
     parser.add_argument("--plant", help='the plant\'s latitude, longitude, such as "11.4404, 75.9420": unloading photos '
                                         "must be stamped near it. Without it, where they were taken isn't checked.")
-    parser.add_argument("--verra", action="store_true", help="a Verra project trip: the final slip must carry the weighbridge's stamp")
+    parser.add_argument("--verra", action="store_true", help="a Verra project trip: the final slip must have a material entered and carry the weighbridge's stamp")
     for f in fields(Limits):
         parser.add_argument(f"--{f.name.replace('_', '-')}", dest=f.name, metavar={"minutes": "MIN", "metres": "M"}[LIMIT_UNITS[f.name]],
                             help=f"{LIMIT_NAMES[f.name]}, in {LIMIT_UNITS[f.name]} (default {f.default})")

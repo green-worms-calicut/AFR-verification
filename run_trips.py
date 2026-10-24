@@ -6,7 +6,9 @@ inward log export. What was typed for the trip comes from trip.json in its folde
 Without one, the hand-read vehicle number and final-slip net weight from truth.jsonl (in the folder
 given or a parent) stand in for it, so the run checks Jev against the images themselves. The plant's
 location comes from --plant for every trip, unless a trip.json gives its own. "verra": true marks a Verra
-project trip, whose final slip must carry the weighbridge's stamp.
+project trip, whose final slip must have a material entered and carry the weighbridge's stamp.
+
+Each trip is reported by part (real, docs, verra: see check_proof.PARTS) and as a whole.
 
 Usage:
     .venv/bin/python run_trips.py trips/inward-2026-10-19              # asks Jev, saves answers in eval/
@@ -103,8 +105,7 @@ def compare(trip: dict, truth: dict, typed: dict) -> list[dict]:
     final = next((b for b in truth["bills"].values() if b["slip"] == "final"), {})
     add("tare time", "final slip", hhmm(final.get("tare_at")), events.get("Tare"))
     add("gross time", "final slip", hhmm(final.get("gross_at")), events.get("Gross"))
-    order = next((c["detail"] for c in trip["verdict"]["checks"] if c["key"] == "weigh_order"), "")
-    got_case = "tare_first" if order.startswith("Tare first") else "gross_first" if order.startswith("Gross first") else "unclear"
+    got_case = next((c.get("order", "unclear") for c in trip["verdict"]["checks"] if c["key"] == "weigh_order"), "unclear")
     add("weighing order", "trip", truth["case"], got_case)
     return items
 
@@ -191,14 +192,22 @@ def main() -> None:
     for trip, c in check_proof.overlap_checks(results).items():
         check_proof.add_checks(results[trip], [c])
 
-    print(f"\n{'trip':8} {'vehicle':11} {'verdict':9} first flags")
+    parts = " ".join(f"{p:9}" for p in check_proof.PARTS)
+    print(f"\n{'trip':8} {'vehicle':11} {'verdict':9} {parts} first flags")
     for name in sorted(results):
         r = results[name]
         flags = "; ".join(f"{'✕' if c['status'] == 'fail' else '?'} {c['label']}: {c['detail']}" for c in r["verdict"]["flags"][:3])
-        print(f"{name:8} {r['vehicle_number']:11} {SHORT[r['verdict']['status']]:9} {flags[:150]}")
+        by_part = " ".join(f"{SHORT[r['verdict']['parts'][p]['status']] if p in r['verdict']['parts'] else '-':9}"
+                           for p in check_proof.PARTS)
+        print(f"{name:8} {r['vehicle_number']:11} {SHORT[r['verdict']['status']]:9} {by_part} {flags[:150]}")
     for name, why in sorted(skipped.items()):
         print(f"{name:8} {'':11} {'skipped':9} {why}")
 
+    for part, title in check_proof.PARTS.items():
+        decided = [r["verdict"]["parts"][part]["status"] for r in results.values() if part in r["verdict"]["parts"]]
+        if decided:
+            print(f"{title}: {decided.count('pass')} accepted, {decided.count('problem')} with a problem, "
+                  f"{decided.count('review')} to check")
     counts = {s: sum(r["verdict"]["status"] == s for r in results.values()) for s in SHORT}
     tokens = sum(i["input_tokens"] for r in results.values() for rs in r["images"].values() for i in rs if not i.get("saved"))
     print(f"\n{counts['pass']} accepted, {counts['problem']} with a problem, {counts['review']} to check, {len(skipped)} skipped. "

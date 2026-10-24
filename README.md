@@ -17,7 +17,6 @@ A trip runs one of two ways, worked out from which weighing came first on the fi
 - Does every slip show the vehicle number you typed?
 - Is the final slip's net weight the quantity you typed?
 - Is the gross heavier than the tare? If not, the labels look swapped.
-- Is a material entered on the final slip (Material, Product, Item, or "Loaded with …")? A blank field, only Nil or a dash, or only EMPTY or LOAD, is a problem; a slip with no material field goes to a person. Which material it is isn't checked.
 
 **Times**, from the final slip and the photos' GPS stamps
 - Tare first: were the weighings at least 60 minutes apart, every loading photo taken between them, and every unloading photo after the gross weighing?
@@ -29,14 +28,24 @@ A photo's clock may be off the weighbridge's by up to 5 minutes (the clock slack
 **Place**, when you give the plant's location
 - Was the trip unloaded at the plant? At least one unloading photo's GPS stamp must place it within 500 m of the plant, and a photo stamped farther away is a problem. Positions are read to four decimals, so the distance is known to about 10 m. The plant's latitude and longitude are an input (`--plant "11.4404, 75.9420"`, a field on the page, or `"plant"` in `trip.json`), never written into the code, and the 500 m is a default you can change.
 
-**Stamp**, for a Verra project trip
-- Does the final slip carry the weighbridge's own ink stamp? No stamp is a problem, and so is a stamp clearly naming a different weighbridge from the slip's heading. Our company's own stamp, often on the slip too, doesn't count. Only Verra project trips are checked: tick **Verra project** on the page, give `--verra`, or put `"verra": true` in `trip.json`.
+**Verra**, for a Verra project trip
+- Is a material entered on the final slip (Material, Product, Item, or "Loaded with …")? A blank field, only Nil or a dash, or only EMPTY or LOAD, is a problem; a slip with no material field goes to a person. Which material it is isn't checked.
+- Does the final slip carry the weighbridge's own ink stamp? No stamp is a problem, and so is a stamp clearly naming a different weighbridge from the slip's heading. Our company's own stamp, often on the slip too, doesn't count.
+
+Only Verra project trips are checked for these, and Jev is only asked about them then: tick **Verra project** on the page, give `--verra`, or put `"verra": true` in `trip.json`.
 
 **Across trips**
 - Was any image already used in another trip? The same file, or a look-alike copy.
 - Is the vehicle on two trips at the same time? This is checked when a whole day is run with `run_trips.py`.
 
-Every answer comes with a probability or a confidence, so unclear images go to a person instead of being trusted. **Nothing is rejected automatically.** The trip gets one verdict: **Accepted**, **Flagged: problem found** (a check found something wrong) or **Flagged: please check** (something was unclear). A person accepts or rejects every flagged trip.
+These checks fall into three parts, each with its own verdict:
+- **Trip is real:** did the trip happen as claimed? The plates in the photos and the number on every slip match the vehicle number you typed; the weighing order, the gap between weighings and Time In with the tare; every photo's time; the photos taken directly; unloading at the plant; and no image or trip a duplicate.
+- **Documentation:** is the proof complete? Loading photos, unloading photos and bills all added; a vehicle and a GPS stamp in every photo; a final slip; its net weight the quantity you typed; and gross heavier than tare.
+- **Verra**, only for a Verra project trip: the material and the weighbridge's stamp.
+
+A missing kind of image is a gap in the documentation, but it also leaves nothing to show the trip is real, so the real part asks a person too (such as "Unloading plate matches: no unloading photos to compare").
+
+Every answer comes with a probability or a confidence, so unclear images go to a person instead of being trusted. **Nothing is rejected automatically.** Each part gets a verdict: **Accepted**, **Flagged: problem found** (a check found something wrong) or **Flagged: please check** (something was unclear). A person accepts or rejects each flagged part. The trip as a whole has the worst of its parts' verdicts.
 
 > **Status:** tested offline against a fake Jev API, and run on one real day (48 trips from one plant, 19 Oct 2026) against the real Jev API: see [Real trips](#real-trips). The confidence thresholds are still placeholders.
 
@@ -74,7 +83,7 @@ Jev can't read a number out, so a position is read in steps. The degrees and fir
 
 Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`); code measures how far the plant is from the nearest point of that square, and more than `plant_radius` (500 m) is a problem. A trip passes only on a position picked surely to four decimals. When the pick is unsure, the two-decimal reading (a square about 1.1 km across) can still show a photo is away, read surely or by adding up Jev's probabilities over the likeliest readings (`chance_away`: 11.16 or 11.11 are both far from 11.44), but it can't show one is within 500 m, so that photo goes to a person. The plant's location is never sent to Jev, so the same answers serve any plant, and changing the plant or the distance needs no new request. Only the printed stamp is read: phone apps strip the GPS data from the file (4 of the day's 260 images kept it).
 
-**Each weigh bill:** 33 questions, or 35 for a Verra project trip
+**Each weigh bill:** 32 questions, or 35 for a Verra project trip
 
 | Question | Type | Answers |
 |-|-|-|
@@ -90,7 +99,7 @@ Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`)
 | `out_hour` … `out_month` | choice | Time Out and Date Out (the second weighment), or `not_shown` |
 | `printed_hour` … `printed_month` | choice | The one date and time printed at the top of the slip, not beside a weight, or `not_shown` |
 | `first_weight` | choice | Is the first weight (at Time In, or First Wt) the smaller or the larger: `tare` (smaller), `gross` (larger), `not_shown` |
-| `material` | choice | Is a material entered: `blank`, `empty_or_load` (only EMPTY or LOAD), `no_field` (no such label or Loaded with line), `filled` |
+| `material` | choice | Is a material entered: `blank`, `empty_or_load` (only EMPTY or LOAD), `no_field` (no such label or Loaded with line), `filled`. Only for a Verra project trip. |
 | `weighbridge_seal` | yes/no | Is an ink stamp of the weighbridge on it, apart from our company's (`our_company`)? Only for a Verra project trip. |
 | `weighbridge_name` | choice | Does that stamp's name match the slip's heading: `different`, `same`, `not_shown`. Only for a Verra project trip. |
 
@@ -100,7 +109,7 @@ Bills come in two layouts. Some print a date and time with each weight (the G W 
 
 Jev can lean towards the first option of a choice, so `same` is never listed first in the number, net weight and stamp questions.
 
-Jev can't read a stamp's words out either, so it compares the weighbridge's stamp with the name printed in the slip's own heading. Our company's name (`check_proof.OUR_COMPANY`, set once in the code) goes into the bill's request as `our_company`, so our own stamp isn't taken for the weighbridge's. The stamp questions are only asked for a Verra project trip, so other trips cost the same as before and their saved answers stay valid. Whether the stamp is there and whose name it shows are asked apart, as one question for both was often unsure. The stamp passes only when it is surely there and its name surely matches the heading; an unsure name goes to a person (on 22 Oct, 2 of 3 genuine stamps had unsure names).
+Jev can't read a stamp's words out either, so it compares the weighbridge's stamp with the name printed in the slip's own heading. Our company's name (`check_proof.OUR_COMPANY`, set once in the code) goes into the bill's request as `our_company`, so our own stamp isn't taken for the weighbridge's. The stamp and material questions (`check_proof.VERRA`) are only asked for a Verra project trip, so other trips don't pay for them. Whether the stamp is there and whose name it shows are asked apart, as one question for both was often unsure. The stamp passes only when it is surely there and its name surely matches the heading; an unsure name goes to a person (on 22 Oct, 2 of 3 genuine stamps had unsure names).
 
 If Jev finds an image isn't upright with at least 0.5 confidence (`ROTATE`), it is rotated and asked again. That cut-off is lower than the others because a wrong turn costs little: one more request, and unsure answers that go to a person anyway. Before sending, each image has its camera rotation flag applied and is scaled so its longest side is 1568 px, the largest Jev accepts.
 
@@ -110,32 +119,36 @@ The minute of a bill time is asked as "the two digits right after the hour", not
 
 ### How the verdict is decided
 
-All of this is in code (`check_proof.trip_checks`, `decide`, `verdict`), not in the questions:
+All of this is in code (`check_proof.trip_checks`, `decide_parts`, `verdict`), not in the questions. Which part each check is in is `check_proof.PART_OF`:
 
-| Check | Pass | Needs a person | Problem |
-|-|-|-|-|
-| Vehicle, GPS stamp, taken directly | every photo of the kind: yes ≥ 0.8 (screen: no) | any photo unsure | any photo clearly fails |
-| Plate matches | at least one photo of the kind clearly `same` | none clear | any photo clearly `different` |
-| Weighbridge slip, final slip | a final slip, clearly | no slip, or no clear final slip | – |
-| Bills match | every slip `same` | any slip unclear | any slip `different` |
-| Net weight (final slip) | `same` | `not_shown`, or no quantity typed | `different` |
-| Gross heavier than tare (final slip) | `gross_heavier` | `not_shown` | `tare_heavier` |
-| Material entered (final slip) | `filled` | `no_field`, or no final slip | `blank`, or only EMPTY or LOAD |
-| Weighbridge stamp (final slip, Verra project only) | yes ≥ 0.8, and its name surely `same` | the stamp or its name unsure, or no final slip | yes ≤ 0.2, or its name surely `different` |
-| Weighing order | tare first or gross first, clearly | a time unreadable or unsure, or both the same | – |
-| Time In with the tare (In/Out slips) | the lighter weight at Time In | unsure which is heavier | the heavier weight at Time In: In and Out entered swapped, or weighed loaded first |
-| Tare to gross (tare first) | at least 60 min apart | a time unsure | less |
-| Gross to tare (gross first) | at least 10 min apart | a time unsure | less |
-| Loading photos | every one between tare and gross (tare first) or before gross (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
-| Unloading photos | every one after gross (tare first) or between gross and tare (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
-| Same day as gross | every unloading photo dated the gross weighing's day | a stamp date unreadable or unsure | any on another day |
-| At the plant (with `--plant`) | at least one unloading photo's stamp, picked surely to four decimals, places it within 500 m of the plant | no photo read surely to four decimals | any photo's stamp places it farther away: four decimals picked surely, or two read surely or at least 80% likely |
-| Images not used in other trips | none seen in another trip | a look-alike copy | the same file |
-| One trip at a time (`run_trips.py`) | – | – | the vehicle is on another trip at the same time |
+| Part | Check | Pass | Needs a person | Problem |
+|-|-|-|-|-|
+| Real | Taken directly | every photo of the kind: screen yes ≤ 0.6 | any photo unsure | any photo clearly of a screen |
+| Real | Loading / unloading plate matches | at least one photo of the kind clearly `same` | none clear, or no photos | any photo clearly `different` |
+| Real | Bills match | every slip `same` | any slip unclear, or no bills | any slip `different` |
+| Real | Weighing order | tare first or gross first, clearly | a time unreadable or unsure, both the same, or no bills | – |
+| Real | Time In is the empty weighing (In/Out slips) | the lighter weight at Time In | unsure which is heavier | the heavier weight at Time In: In and Out entered swapped, or weighed loaded first |
+| Real | Time between weighings (tare first) | at least 60 min apart | a time unsure | less |
+| Real | Time between weighings (gross first) | at least 10 min apart | a time unsure | less |
+| Real | Loading photo times | every one between tare and gross (tare first) or before gross (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
+| Real | Unloading photo times | every one after gross (tare first) or between gross and tare (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
+| Real | Unloading on the weighing day | every unloading photo dated the gross weighing's day | a stamp date unreadable or unsure | any on another day |
+| Real | At the plant (with `--plant`) | at least one unloading photo's stamp, picked surely to four decimals, places it within 500 m of the plant | no photo read surely to four decimals | any photo's stamp places it farther away: four decimals picked surely, or two read surely or at least 80% likely |
+| Real | Images not used in other trips | none seen in another trip | a look-alike copy | the same file |
+| Real | One trip at a time (`run_trips.py`) | – | – | the vehicle is on another trip at the same time |
+| Docs | Loading photos, unloading photos, weigh bills | added | none added | – |
+| Docs | Vehicle, GPS stamp | every photo of the kind: yes ≥ 0.8 | any photo unsure | any photo clearly fails |
+| Docs | Weighbridge slip, final slip | a final slip, clearly | no slip, or no clear final slip | – |
+| Docs | Net weight (final slip) | `same` | `not_shown`, or no quantity typed | `different` |
+| Docs | Gross heavier than tare (final slip) | `gross_heavier` | – | `tare_heavier` (an unsure or `not_shown` answer gives no check) |
+| Verra | Material entered (final slip) | `filled` | `no_field`, or no final slip | `blank`, or only EMPTY or LOAD |
+| Verra | Weighbridge stamp (final slip) | yes ≥ 0.8, and its name surely `same` | the stamp or its name unsure, or no final slip | yes ≤ 0.2, or its name surely `different` |
 
 Any choice answer, or time or date reading, below 80% confidence also goes to a person.
 
-The trip is **Flagged: problem found** if any check finds a problem, **Flagged: please check** if any check is unsure, and **Accepted** only when every check passes. Problems are listed first, and a timeline shows the weighings and photos in time order, with any out of place in red.
+Each part is **Flagged: problem found** if any of its checks finds a problem, **Flagged: please check** if any is unsure, and **Accepted** only when every one passes. The trip as a whole is decided the same way from all its checks, so it has its worst part's verdict. A timeline shows the weighings and photos in time order, with any out of place in red.
+
+Each flagged check gives its reason as a sentence a person can act on: what is wrong or unclear, in which image, and what to look at, such as "collection1.jpg was taken at 06:35, before the tare (empty) weighing at 06:53. Loading photos must come after it (5 min clock difference allowed)." An unsure answer says how sure Jev was ("Only 62% sure: …") and which value was unclear: the photo's stamp time, or the weighing times on the slip. Each check also names the images to look at (`images`), and checks flagged for the same reason share a `cause`: an unsure reading of the weighing times (`weigh_times`) also leaves the gap and every photo time unsure, and a missing kind of image (`loading_missing`, `bill_missing`) or final slip (`no_final`) leaves its other checks with nothing to read.
 
 The limits are `check_proof.Limits`: `min_gap_tare_first` (60), `min_gap_gross_first` (10) and `clock_slack` (5), in minutes, and `plant_radius` (500), in metres. Each run can change them, on the page, the command line, or a trip's `trip.json`.
 
@@ -199,14 +212,14 @@ trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773/
 Open the address it prints. It's `http://127.0.0.1:8765` unless that port is taken, in which case the app uses the next free one; choose a port with `--port`.
 
 On the page:
-1. Pick a trip from **Load a trip from trips/**, or type the vehicle number and quantity yourself. Tick **Verra project** for a Verra project trip, to check the weighbridge's stamp.
+1. Pick a trip from **Load a trip from trips/**, or type the vehicle number and quantity yourself. Tick **Verra project** for a Verra project trip, to check the material and the weighbridge's stamp.
 2. Change the timing limits if you need to: they start at 60 and 5 minutes. Type the plant's location (copied from Google Maps, such as `11.4404, 75.9420`) to check where unloading happened; the page remembers it.
 3. Add images to **Loading photos**, **Unloading photos** and **Weigh bills**: click **+ Add** or drop files on a box. **×** removes one.
 4. Click **Check**.
 
-The verdict lists problems first, then every check grouped by kind of image, with how sure Jev was, the timeline, and the limits it was checked with. Below it, each image shows what Jev read from it (stamp times, slip times), its tags (first or final slip, rotated, same image as another trip) and its own answers.
+The verdict shows the trip as a whole, then each part (**Trip is real**, **Documentation**, and **Verra** for a Verra project trip) with its own verdict. A flagged part lists **Why it's flagged**: each reason in a sentence, problems first, with reasons that share a cause shown as one (an unsure weighing time, with the gap and photo times it leaves unsure beneath it), and a **Look at** button for each image it names, which opens it full size. The checks that passed fold under **N checks passed**, grouped by kind of image, with how sure Jev was. Below the parts are the timeline and the limits it was checked with. Below it, each image shows what Jev read from it (stamp times, slip times), its tags (first or final slip, rotated, same image as another trip) and its own answers.
 
-When the trip is flagged, **View all images** opens a full-size viewer that steps through every image (‹ › or the arrow keys), with the trip's flags and that image's answers beside it. Rotate and zoom in, then click **Accept** or **Reject**. The decision is only kept on the page; it isn't saved anywhere.
+Each flagged part has its own **Accept** and **Reject**; **Undo** takes a decision back. The trip shows **Rejected after review** once any part is rejected, and **Accepted after review** once every part is accepted. **View all images** opens a full-size viewer that steps through every image (‹ › or the arrow keys), with the reasons that name that image and its own answers beside it, and Accept and Reject for each part still to decide. The decisions are only kept on the page; they aren't saved anywhere.
 
 Images are compared with every image under `trips/`, so one already used in another trip is flagged. A trip loaded from `trips/` isn't compared with itself.
 
@@ -219,11 +232,11 @@ Changing the number, the quantity, a limit or an image clears the result, so a v
 .venv/bin/python check_proof.py KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg --bill slip1.jpg slip2.jpg \
     --quantity 1630 --min-gap-tare-first 45 --min-gap-gross-first 15 --clock-slack 10 --others trips/   # this run's own limits, and flag reused images
 .venv/bin/python check_proof.py KL57AB8815 --trip … --plant "11.4404, 75.9420" --plant-radius 300   # unloaded at the plant?
-.venv/bin/python check_proof.py KL57AB8815 --trip … --verra   # a Verra project trip: weighbridge stamp checked
+.venv/bin/python check_proof.py KL57AB8815 --trip … --verra   # a Verra project trip: material and weighbridge stamp checked
 .venv/bin/python check_proof.py KL57AB8815 --trip … --model jev-preview   # try Jev 1.14
 ```
 
-Prints each image's answers and readings, then the verdict, timeline, limits and flags.
+Prints each image's answers and readings, then the verdict, timeline and limits, and each part's verdict and flags.
 
 ### Check a whole day: run_trips.py
 
@@ -234,7 +247,7 @@ Prints each image's answers and readings, then the verdict, timeline, limits and
 .venv/bin/python run_trips.py trips/inward-2026-10-19 --plant "11.4404, 75.9420"   # every trip without its own plant in trip.json
 ```
 
-It prints a line per trip (verdict and first flags), the totals, and, where `truth.jsonl` has hand-read values, how often Jev read each kind of value right, with every wrong reading. Saved answers are reused whenever the image, questions, typed values and model are the same, so after changing a rule or a threshold, `--cached` re-checks the whole day without asking Jev again.
+It prints a line per trip (its verdict, each part's, and its first flags), how many trips each part accepted, flagged or sent to a person, the totals, and, where `truth.jsonl` has hand-read values, how often Jev read each kind of value right, with every wrong reading. Saved answers are reused whenever the image, questions, typed values and model are the same, so after changing a rule or a threshold, `--cached` re-checks the whole day without asking Jev again.
 
 ### Measure accuracy per image: evaluate.py
 
@@ -254,13 +267,18 @@ The report shows accuracy per field, accuracy at each confidence level per group
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, the material entered, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
+The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, the material entered on a Verra project trip, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), which part each check is in and how each part is decided, reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
 
 ## Real trips
 
 `trips/inward-2026-10-19/` holds one plant's inward log for 19 Oct 2026: 48 trips, 42 with weigh bills. `truth.jsonl` there has values read by hand from every image of those 42 (plates, stamp times and positions, slip weights and times), to measure Jev against. They were read by Claude subagents (the unloading positions by Claude, checked against tesseract text recognition), not yet checked by a person.
 
-What the day showed, from the hand-read values:
+`trips/inward-2026-10-23/` holds the same plant's log for 23 Oct 2026: 59 trips, all with weigh bills, hand-read the same way into its own `truth.jsonl`. Its bills also record the weighbridge's name, whether its own stamp is on the slip (`weighbridge_seal`) and the name on that stamp (`seal_name`), for the Verra checks. Lakshmi slips print one time per slip, so it is only `printed_at`, as on 19 Oct. The day has cases worth testing against:
+- Reused images: 172897, 172899, 172900 and 172901 share their unloading photos and bill (one 310 kg run claimed four times, each with its own loading photos); 173253, 173254 and 173255 do the same with a 390 kg slip; 172929's unloading photos are 173186's loading photos, stamped before 173186's tare.
+- Tares from the day before (172907, 172940, 173097), a morning tare used again for a second trip (172913 and 173177, 173255 and 173262), one gross-first trip (172904) and a two-day trip from Wayanad (173258, whose slip prints one time with no date).
+- A final slip with material LOAD (173153), a "bill" that is a photo of the weighbridge's screen (172913), a loading photo with no stamp at all (173275), and stamps that name a place in Vietnam over Kerala coordinates (172930, 172945, 173284).
+
+What the 19 Oct day showed, from the hand-read values:
 - 38 trips were weighed tare first, 3 gross first, and 1 unclear (two weighings 9 seconds apart).
 - In every genuine tare-first trip the loading photos fall between tare and gross, and the unloading photos come after gross. In the gross-first trips 171522 and 171562, the loading photos come before gross and the unloading photos between gross and tare, which are 25 and 16 minutes apart. The third, 171493, has its gross and tare labels swapped on the final slip.
 - Images were reused across trips: 171531 and 171566 are the same files; 171496 uses 171562's loading photos and 171531's unloading photos and bill; 171654 and 171655 share a bill and unloading photos.
@@ -272,7 +290,7 @@ What Jev did on that day (`run_trips.py`, `jev-latest`, about $0.10 for the 42 t
 - **The 19 to check** are mostly slips whose layout isn't read yet (Lakshmi, Bhavani and others), and bills read below 0.8 confidence.
 - **Sideways slips:** most slips are photographed sideways. Jev is sure a slip is sideways but close to a coin flip on which way, so the likelier way is tried and the next look decides between upright and upside down (`turn_for`). Before this, 33 of 43 sideways slips were read sideways, and bill times were right only about 3 in 4.
 - **Wrong typed values:** ten real trips checked with the vehicle number's last two characters swapped were all flagged (9 as a problem, 1 to check), and with the quantity's digits swapped all 10 were flagged by the net weight. Jev twice said "same" to a wrong number on a single image, but the other images caught it, so a trip is safer than any single image.
-- **AM/PM:** asked to convert "03:06:08 PM" itself, Jev often answered 03; the bill hour is now read as printed with AM or PM asked separately. Photo stamps are read right with the conversion, so they're unchanged.
+- **AM/PM:** asked to convert "03:06:08 PM" itself, Jev often answered 03; the bill hour is now read as printed with AM or PM asked separately. Photo stamps are read right with the conversion, so they're unchanged. Jev still sometimes splits the printed hour and the 24-hour one (02:45 PM read 02 at 0.54 and 14 at 0.46, 23 Oct 2026), so code adds together hour options that make the same time with the AM or PM read (`same_hour`).
 - **Where unloading happened** (`--plant "11.4404, 75.9420"`, 22 Oct 2026, about $0.08 for the 88 unloading photos, three requests each): the hand-read stamps put 6 trips' unloading photos away from the plant, 2.9 to 41 km off (171493, 171513, 171518, 171595, 171673, 171699); every other unloading photo was within 51 m. The check flagged all 6 as a problem, five with the distance to the metre (such as "stamped at 11.4201, 75.9250, 2.9 km from the plant"), including 171513, which had been accepted. It passed 35 of the 36 trips at the plant and sent 1 to a person (neither photo picked surely); none was flagged as a problem. Jev picked 82 of 88 positions to four decimals and was sure of 77, all right.
 - **How the four decimals were found:** asked for the third and fourth digits as single Choices, Jev got the longitude's third digit right 47 times in 88 (often giving the second digit again), 67 when told the digits before it, and no better on the Lat/Long line cut out with a Box question. Picking the whole value from 100 candidates on the cut-out line was right 173 times in 176. When the two-decimal reading was torn (11.44 or 11.40, mostly), candidates for both starts are offered; before that, two photos at the plant were flagged from a misread 11.40.
 - **Dates:** every unloading photo must be dated the same day as the gross weighing (by the calendar date, so a trip weighed just before midnight and unloaded just after is flagged too). On 19 Oct every unloading photo was.

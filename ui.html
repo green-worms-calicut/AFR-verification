@@ -97,6 +97,13 @@ main { max-width: 76rem; margin: 0 auto; padding-block: 0 3rem; display: grid; g
 .verdict-head b { font: 700 1.6rem/1.1 var(--f-display); }
 .verdict.pass .verdict-head b { color: var(--ok); } .verdict.review .verdict-head b { color: var(--warn); } .verdict.fail .verdict-head b, .verdict.problem .verdict-head b { color: var(--no); }
 .verdict-head .mono { font-size: 1.05rem; font-weight: 600; letter-spacing: 0.06em; }
+.parts { display: flex; flex-direction: column; gap: 0.7rem; }
+.part { border-radius: 10px; padding: 0.9rem 1rem; display: flex; flex-direction: column; gap: 0.7rem; background: var(--sheet); border: 1px solid var(--rule); border-left: 5px solid var(--rule); }
+.part.pass { border-left-color: var(--ok); } .part.review { border-left-color: var(--warn); } .part.fail, .part.problem { border-left-color: var(--no); }
+.part-head { display: flex; flex-wrap: wrap; gap: 0.3rem 1rem; align-items: baseline; justify-content: space-between; }
+.part-head b { font: 700 1.15rem/1.2 var(--f-display); }
+.part-head span { font-weight: 600; }
+.part.pass .part-head span { color: var(--ok); } .part.review .part-head span { color: var(--warn); } .part.fail .part-head span, .part.problem .part-head span { color: var(--no); }
 .groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 0.9rem 1.2rem; }
 .group { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
 .check { display: grid; grid-template-columns: 1.4rem minmax(0, 1fr) auto; gap: 0.15rem 0.5rem; align-items: start; font-size: 0.93rem; }
@@ -106,6 +113,16 @@ main { max-width: 76rem; margin: 0 auto; padding-block: 0 3rem; display: grid; g
 .check .what span { font-weight: 600; }
 .check .what small { color: var(--muted); font-size: 0.85rem; }
 .check .pct { font: 400 0.75rem/1.6 var(--f-mono); color: var(--muted); white-space: nowrap; }
+.reasons { display: flex; flex-direction: column; gap: 0.75rem; }
+.reason { grid-template-columns: 1.4rem minmax(0, 1fr); }
+.reason .what p { font-size: 0.93rem; }
+.reason .also { margin: 0.25rem 0 0; padding-left: 1.1rem; color: var(--muted); font-size: 0.85rem; display: flex; flex-direction: column; gap: 0.15rem; }
+.reason .also b { color: var(--ink); font-weight: 600; }
+.looks { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-top: 0.4rem; font-size: 0.8rem; color: var(--muted); }
+.look { display: inline-flex; align-items: center; gap: 0.35rem; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 0.15rem 0.5rem 0.15rem 0.15rem; cursor: zoom-in; font: 400 0.75rem/1.2 var(--f-mono); }
+.look:hover { border-color: var(--slip); }
+.look img { width: 1.9rem; height: 1.9rem; object-fit: cover; border-radius: 4px; display: block; }
+.passed .groups { margin-top: 0.7rem; }
 
 .empty { border: 1px solid var(--rule); border-radius: 12px; background: var(--sheet); padding: 2rem 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
 .empty h2 { font-size: 1.25rem; }
@@ -224,7 +241,7 @@ td.mono { white-space: nowrap; }
       <label class="quantity"><span class="label">Quantity (kg)</span><input id="quantity" class="time-input" type="text" inputmode="decimal" placeholder="480" autocomplete="off"></label>
       <p id="quantity-hint" class="hint">The disposal quantity. The final slip's net weight must be the same.</p>
       <label class="switch"><input id="verra" type="checkbox">Verra project</label>
-      <p class="hint">Tick for a Verra project trip: the final slip must carry the weighbridge's own stamp.</p>
+      <p class="hint">Tick for a Verra project trip: the final slip must have a material entered and carry the weighbridge's own stamp.</p>
       <p id="typed-from" class="note" hidden></p>
     </section>
 
@@ -299,13 +316,16 @@ const ROLE = {
 const GROUPS = [["loading", "Loading photos"], ["unloading", "Unloading photos"], ["bill", "Weigh bills"], ["times", "Times"], ["trips", "Other trips"]];
 const LIMITS = ["min_gap_tare_first", "min_gap_gross_first", "clock_slack"];
 const FLAGGED = new Set(["problem", "review"]);
+// The three parts of a trip's check, as in check_proof.PARTS: each is decided, and accepted or rejected, on its own.
+const PARTS = [["real", "Trip is real"], ["docs", "Documentation"], ["verra", "Verra"]];
+const TITLES = { pass: "Accepted", problem: "Flagged: problem found", review: "Flagged: please check" };
 const ICON = { pass: "✓", fail: "✕", review: "?" };
 const ROTATE_LABEL = { 90: "Rotated 90° counter-clockwise", 180: "Rotated 180°", 270: "Rotated 90° clockwise" };
 const SLIP = { both_weights: "Final slip", one_weight: "First slip", not_shown: "Weights unreadable" };
 
-// decision: what a person chose after reviewing a flagged verdict, "pass" or "fail". Kept on this page only.
+// decisions: what a person chose for each flagged part after reviewing it, {part: "pass" or "fail"}. Kept on this page only.
 const state = { files: { loading: [], unloading: [], bill: [] }, tripId: null, typedFrom: null, status: "idle", result: null,
-                decision: null, error: null, totals: { requests: 0, tokens: 0, cost: 0 } };
+                decisions: {}, error: null, totals: { requests: 0, tokens: 0, cost: 0 } };
 const viewer = { list: [], at: 0, img: null, angle: 0, zoomed: false };
 let picking = null;
 
@@ -382,7 +402,7 @@ function readAsDataURL(file) {
 
 function changed() {
   // Any change to the inputs makes an earlier answer stale.
-  if (state.status !== "pending") { state.status = "idle"; state.result = null; state.decision = null; state.error = null; }
+  if (state.status !== "pending") { state.status = "idle"; state.result = null; state.decisions = {}; state.error = null; }
   render();
 }
 
@@ -403,7 +423,7 @@ async function addFiles(role, files) {
 
 async function check() {
   state.status = "pending";
-  state.decision = null;
+  state.decisions = {};
   state.error = null;
   render();
   try {
@@ -464,38 +484,118 @@ function timelineHTML(events) {
     <span class="what-ev"><strong>${esc(e.what)}</strong></span>${oneDay ? "" : `<span class="muted">${esc(e.date)}</span>`}</div>`).join("")}</div>`;
 }
 
+function groupsHTML(checks) {
+  return GROUPS.map(([key, title]) => {
+    const shown = checks.filter((c) => c.group === key);
+    return shown.length ? `<div class="group"><span class="label">${title}</span>${shown.map(checkHTML).join("")}</div>` : "";
+  }).join("");
+}
+
+// Where an image named in a check is, as "role:index" for the viewer: in the check's own kind of image first.
+function imageAt(name, group) {
+  const roles = ROLES.includes(group) ? [group, ...ROLES.filter((r) => r !== group)] : ROLES;
+  for (const role of roles) {
+    const i = state.result.images[role].findIndex((r) => r.name === name);
+    if (i >= 0) return [role, i];
+  }
+  return null;
+}
+
+function looksHTML(checks) {
+  const names = [...new Set(checks.flatMap((c) => c.images ?? []))];
+  const buttons = names.map((name) => {
+    const at = imageAt(name, checks[0].group);
+    if (!at) return "";
+    const r = state.result.images[at[0]][at[1]];
+    return `<button class="look" type="button" data-view="${at.join(":")}" aria-label="View ${esc(name)} full size">
+      <img src="${r.sent_image}" alt="">${esc(name)}</button>`;
+  }).join("");
+  return buttons ? `<div class="looks">Look at ${buttons}</div>` : "";
+}
+
+// One reason a part is flagged: a check, and any others flagged for the same cause (check_proof.check's `cause`),
+// such as an unsure reading of the weighing times that also leaves the gap and the photo times unsure.
+function reasonHTML([c, ...also], { look = true } = {}) {
+  const status = [c, ...also].some((x) => x.status === "fail") ? "fail" : "review";
+  const more = also.length ? `<ul class="also">${also.map((x) => `<li><b>${esc(x.label)}:</b> ${esc(x.detail)}</li>`).join("")}</ul>` : "";
+  return `<div class="check reason ${status}"><span class="icon" aria-label="${status === "fail" ? "problem" : "please check"}">${ICON[status]}</span>
+    <div class="what"><span>${esc(c.label)}</span><p>${esc(c.detail)}</p>${more}${look ? looksHTML([c, ...also]) : ""}</div></div>`;
+}
+
+// A part's flagged checks as reasons, those with the same cause together, problems first.
+function reasonsHTML(checks) {
+  const reasons = [];
+  for (const c of checks.filter((x) => x.status !== "pass")) {
+    const same = c.cause && reasons.find((r) => r[0].cause === c.cause);
+    if (same) same.push(c); else reasons.push([c]);
+  }
+  const fails = (r) => r.some((x) => x.status === "fail");
+  reasons.sort((a, b) => fails(b) - fails(a));
+  return reasons.length ? `<div class="reasons"><span class="label">Why it's flagged</span>${reasons.map((r) => reasonHTML(r)).join("")}</div>` : "";
+}
+
+// A part's status and title once a person has decided it, or Jev's.
+function partState(key, p) {
+  const decided = state.decisions[key];
+  if (!decided) return [p.status, p.title];
+  return [decided, decided === "pass" ? "Accepted after review" : "Rejected after review"];
+}
+
+// The whole trip: rejected if a person rejected any part, accepted once every part is, otherwise flagged by the parts left.
+function tripState(v) {
+  const statuses = Object.entries(v.parts).map(([key, p]) => partState(key, p)[0]);
+  const decided = Object.keys(state.decisions).length > 0;
+  if (statuses.includes("fail")) return ["fail", "Rejected after review"];
+  if (statuses.every((s) => s === "pass")) return ["pass", decided ? "Accepted after review" : v.title];
+  const status = statuses.includes("problem") ? "problem" : "review";
+  return [status, TITLES[status]];
+}
+
+function partHTML(key, title, p) {
+  const [status, said] = partState(key, p);
+  return `<section class="part ${status}" aria-label="${title}">
+    <div class="part-head"><b>${title}</b><span>${esc(said)}</span></div>
+    ${reasonsHTML(p.checks)}${passedHTML(p.checks)}
+    ${partReviewHTML(key, p)}</section>`;
+}
+
+function passedHTML(checks) {
+  const passed = checks.filter((c) => c.status === "pass");
+  if (!passed.length) return "";
+  return `<details class="passed"><summary>${passed.length} check${passed.length > 1 ? "s" : ""} passed</summary>
+    <div class="groups">${groupsHTML(passed)}</div></details>`;
+}
+
 function verdictHTML(r) {
   const v = r.verdict;
-  const problems = v.checks.filter((c) => c.status === "fail");
-  const groups = [["problems", "Problems"], ...GROUPS].map(([key, title]) => {
-    const checks = key === "problems" ? problems : v.checks.filter((c) => c.group === key && c.status !== "fail");
-    return checks.length ? `<div class="group"><span class="label">${title}</span>${checks.map(checkHTML).join("")}</div>` : "";
-  }).join("");
-  const status = state.decision || v.status;
-  const title = state.decision ? (state.decision === "pass" ? "Accepted after review" : "Rejected after review") : v.title;
+  const [status, title] = tripState(v);
+  const parts = PARTS.filter(([key]) => v.parts[key]).map(([key, name]) => partHTML(key, name, v.parts[key])).join("");
   const l = r.limits;
+  const view = Object.values(v.parts).some((p) => FLAGGED.has(p.status))
+    ? `<div class="decision"><p>Look at the images full size before deciding a part.</p>
+        <div class="actions"><button class="btn ghost" type="button" data-view="all">View all images</button></div></div>` : "";
   return `<section class="verdict ${status}">
     <div class="verdict-head"><b>${esc(title)}</b><span class="mono">${esc(r.vehicle_number)}${r.trip_id ? " · trip " + esc(r.trip_id.split("/").pop()) : ""}</span></div>
-    <div class="groups">${groups}</div>
+    <div class="parts">${parts}</div>
     ${timelineHTML(v.timeline)}
-    <p class="note">Limits: tare first, tare to gross at least ${l.min_gap_tare_first} min; gross first, gross to tare at least ${l.min_gap_gross_first} min; clock slack ${l.clock_slack} min. Quantity: ${r.quantity ? esc(r.quantity) + " kg" : "not typed"}. Plant: ${r.plant ? esc(r.plant.join(", ")) + ", unloading within " + l.plant_radius + " m" : "not given, so where unloading happened isn't checked"}. ${r.verra ? "Verra project: the weighbridge's stamp is checked." : "Not a Verra project, so the weighbridge's stamp isn't checked."}</p>
-    ${reviewHTML(r)}</section>`;
+    <p class="note">Limits: tare first, tare to gross at least ${l.min_gap_tare_first} min; gross first, gross to tare at least ${l.min_gap_gross_first} min; clock slack ${l.clock_slack} min. Quantity: ${r.quantity ? esc(r.quantity) + " kg" : "not typed"}. Plant: ${r.plant ? esc(r.plant.join(", ")) + ", unloading within " + l.plant_radius + " m" : "not given, so where unloading happened isn't checked"}. ${r.verra ? "Verra project: the material and the weighbridge's stamp are checked." : "Not a Verra project, so the material and the weighbridge's stamp aren't checked."}</p>
+    ${view}</section>`;
 }
 
-function decideButtons() {
-  return `<div class="actions"><button class="btn ok" type="button" data-decide="pass">Accept</button>
-    <button class="btn no" type="button" data-decide="fail">Reject</button></div>`;
+function decideButtons(key) {
+  return `<div class="actions"><button class="btn ok" type="button" data-decide="${key}:pass">Accept</button>
+    <button class="btn no" type="button" data-decide="${key}:fail">Reject</button></div>`;
 }
 
-function reviewHTML(r) {
-  // Nothing is rejected automatically: a person decides every flagged trip.
-  if (!FLAGGED.has(r.verdict.status)) return "";
-  const view = `<button class="btn ghost" type="button" data-view="all">View all images</button>`;
-  if (state.decision) {
-    return `<div class="decision"><p>A person ${state.decision === "pass" ? "accepted" : "rejected"} this trip. Jev's verdict was: ${esc(r.verdict.title)}.</p>
-      <div class="actions">${view}<button class="btn ghost" type="button" data-decide="">Undo</button></div></div>`;
+function partReviewHTML(key, p) {
+  // Nothing is rejected automatically: a person decides every flagged part.
+  if (!FLAGGED.has(p.status)) return "";
+  const decided = state.decisions[key];
+  if (decided) {
+    return `<div class="decision"><p>A person ${decided === "pass" ? "accepted" : "rejected"} this part. Jev's verdict was: ${esc(p.title)}.</p>
+      <div class="actions"><button class="btn ghost" type="button" data-decide="${key}:">Undo</button></div></div>`;
   }
-  return `<div class="decision"><p>Look at the images full size, then decide.</p><div class="actions">${view}</div>${decideButtons()}</div>`;
+  return `<div class="decision"><p>Decide this part.</p>${decideButtons(key)}</div>`;
 }
 
 function tagsHTML(r) {
@@ -529,9 +629,12 @@ function roleCardHTML(role, results) {
     <div class="foot"><span>${esc(results[0].model)}</span><span>${tokens.toLocaleString()} input tokens</span></div></div></article>`;
 }
 
-function decide(decision) {
-  state.decision = decision || null;
-  if ($("viewer").open) $("viewer").close();
+// `choice` is "part:pass", "part:fail", or "part:" to undo that part's decision.
+function decide(choice) {
+  const [key, decision] = choice.split(":");
+  if (decision) state.decisions[key] = decision;
+  else delete state.decisions[key];
+  if ($("viewer").open) drawViewer();
   render();
 }
 
@@ -576,18 +679,20 @@ function drawViewer() {
   $("v-prev").disabled = viewer.at === 0;
   $("v-next").disabled = viewer.at === viewer.list.length - 1;
 
-  const tripFlags = v.flags.filter((c) => c.group === role || c.group === "times" || c.group === "trips");
+  const tripFlags = v.flags.filter((c) => c.images?.length ? c.images.includes(result.name)
+    : c.group === role || c.group === "times" || c.group === "trips");
   const readings = result.readings.filter((rd) => !rd.missing).map((rd) => `<p>${esc(rd.label)}: <b class="mono">${esc(rd.value)}</b>
     <span class="muted">${pct(rd.min_confidence)} sure</span></p>`).join("") || `<p class="note">No times or dates read.</p>`;
   const own = result.checks.filter((c) => c.status !== "pass");
-  $("v-side").innerHTML = `${tagsHTML(result)}<span class="label">Trip flags to look at</span>
-    ${tripFlags.length ? tripFlags.map(checkHTML).join("") : `<p class="note">None for this kind of image.</p>`}
+  $("v-side").innerHTML = `${tagsHTML(result)}<span class="label">Why it's flagged</span>
+    ${tripFlags.length ? tripFlags.map((c) => reasonHTML([c], { look: false })).join("") : `<p class="note">None for this image.</p>`}
     <span class="label">This image</span>${own.length ? own.map(checkHTML).join("") : `<p class="note">Every answer on this image passed.</p>`}
     <span class="label">Read by Jev</span>${readings}
     <span class="label">Typed in</span><p>Vehicle <b class="mono">${esc(r.vehicle_number)}</b></p><p>Quantity <b class="mono">${esc(r.quantity ? r.quantity + " kg" : "not typed")}</b></p>
     <p>Plant <b class="mono">${esc(r.plant ? r.plant.join(", ") : "not given")}</b></p>
     <p>Verra project <b>${r.verra ? "yes" : "no"}</b></p>
-    ${FLAGGED.has(v.status) && !state.decision ? decideButtons() : ""}`;
+    ${PARTS.filter(([key]) => v.parts[key] && FLAGGED.has(v.parts[key].status) && !state.decisions[key])
+      .map(([key, name]) => `<span class="label">Decide: ${name}</span>${decideButtons(key)}`).join("")}`;
 }
 
 function render() {
@@ -633,18 +738,13 @@ function render() {
   } else {
     out.innerHTML = `<div class="empty">
       <h2>Type the vehicle number, add the trip's images, then check</h2>
-      <p class="muted">A trip runs tare → loading → gross → unloading. Jev and this page check:</p>
+      <p class="muted">A trip runs tare → loading → gross → unloading, or loading → gross → unloading → tare. Jev and this page check it in three parts:</p>
       <ul>
-        <li>every photo shows a vehicle, with a GPS stamp, taken directly (not a photo of a screen);</li>
-        <li>one loading and one unloading photo clearly show the number you typed;</li>
-        <li>there's a final weighbridge slip, every slip shows the number, and the net weight is the quantity you typed;</li>
-        <li>tare was weighed first, at least the set time before gross;</li>
-        <li>every loading photo is between the tare and gross weighings, and every unloading photo after gross;</li>
-        <li>with the plant's location, an unloading photo's GPS stamp is near the plant;</li>
-        <li>for a Verra project trip, the final slip carries the weighbridge's own stamp;</li>
-        <li>no image was already used in another trip under trips/.</li>
+        <li><b>Trip is real:</b> one loading and one unloading photo clearly show the number you typed, and so does every slip; the weighings are in order and far enough apart; every loading and unloading photo is in its place between them; the photos were taken directly, not of a screen; with the plant's location, an unloading photo is stamped near it; no image was already used in another trip under trips/, and the vehicle isn't on two trips at once.</li>
+        <li><b>Documentation:</b> loading photos, unloading photos and bills are all added; every photo shows a vehicle and has a GPS stamp; there's a final slip with both weights, its net weight is the quantity you typed, and gross is heavier than tare.</li>
+        <li><b>Verra</b>, for a Verra project trip: the final slip has a material entered and carries the weighbridge's own stamp.</li>
       </ul>
-      <p class="muted">Nothing is rejected automatically. A problem or an unsure answer flags the trip, and you accept or reject it.</p>
+      <p class="muted">Nothing is rejected automatically. A problem or an unsure answer flags its part, and you accept or reject each part.</p>
     </div>`;
   }
 }
