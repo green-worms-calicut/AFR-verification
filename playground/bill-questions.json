@@ -17,6 +17,14 @@
       "false": "Any other document or photo, including a handwritten note or tally, or a receipt or invoice that records no vehicle weight."
     }
   },
+  "screen_photo": {
+    "type": "noul",
+    "instructions": "Is `bill` a picture of a computer or phone screen showing the slip, rather than a photo of a printed paper slip?",
+    "criteria": {
+      "true": "A screen was photographed: screen pixels or wavy moiré lines, a screen's edge or frame, glare on glass, or a program's window bars or buttons show.",
+      "false": "A photo taken directly of a printed paper slip."
+    }
+  },
   "slip_kind": {
     "type": "choice",
     "instructions": "If `bill` is a weighbridge slip, which weights are filled in on it?",

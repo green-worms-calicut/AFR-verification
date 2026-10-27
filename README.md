@@ -13,6 +13,7 @@ A trip runs one of two ways, worked out from which weighing came first on the fi
 
 **Weigh bills**
 - Is there a weighbridge slip? Handwritten notes and tallies are ignored.
+- Is every bill a photo of the printed slip, not of a computer or phone screen showing it?
 - Is there a final slip, with both weights and the net? A first slip (only the tare) is used only for the vehicle number.
 - Does every slip show the vehicle number you typed?
 - Is the final slip's net weight the quantity you typed?
@@ -21,6 +22,7 @@ A trip runs one of two ways, worked out from which weighing came first on the fi
 **Times**, from the final slip and the photos' GPS stamps
 - Tare first: were the weighings at least 60 minutes apart, every loading photo taken between them, and every unloading photo after the gross weighing?
 - Gross first: were the weighings at least 10 minutes apart, every loading photo taken before the gross weighing, and every unloading photo between the gross and tare weighings?
+- Were both weighings on the same day? A tare from another day, more than 12 hours from the gross, is a stored one, not weighed on this trip; nearer, the trip ran across midnight.
 - Was every unloading photo taken on the same day as the gross weighing?
 
 A photo's clock may be off the weighbridge's by up to 5 minutes (the clock slack). The 60, 10 and 5 are defaults: you can change them for each run.
@@ -39,7 +41,7 @@ Only Verra project trips are checked for these, and Jev is only asked about them
 - Is the vehicle on two trips at the same time? This is checked when a whole day is run with `run_trips.py`.
 
 These checks fall into three parts, each with its own verdict:
-- **Trip is real:** did the trip happen as claimed? The plates in the photos and the number on every slip match the vehicle number you typed; the weighing order, the gap between weighings and Time In with the tare; every photo's time; the photos taken directly; unloading at the plant; and no image or trip a duplicate.
+- **Trip is real:** did the trip happen as claimed? The plates in the photos and the number on every slip match the vehicle number you typed; the weighing order, the gap between weighings, the tare weighed on this trip and Time In with the tare; every photo's time; the photos and bills taken directly; unloading at the plant; and no image or trip a duplicate.
 - **Documentation:** is the proof complete? Loading photos, unloading photos and bills all added; a vehicle and a GPS stamp in every photo; a final slip; its net weight the quantity you typed; and gross heavier than tare.
 - **Verra**, only for a Verra project trip: the material and the weighbridge's stamp.
 
@@ -89,6 +91,7 @@ Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`)
 |-|-|-|
 | `orientation` | choice | as above |
 | `weigh_bill` | yes/no | Is it a weighbridge slip? |
+| `screen_photo` | yes/no | Is it a picture of a computer or phone screen showing the slip, rather than a photo of a printed paper slip? |
 | `slip_kind` | choice | `one_weight` (a first slip), `both_weights` (a final slip), `not_shown` |
 | `bill_number` | choice | Is the vehicle number on the bill the typed number: `different`, `same`, `not_shown` |
 | `net_weight` | choice | Is the net weight the typed quantity in kg: `different`, `same`, `not_shown`. Only asked when a quantity is typed. |
@@ -124,12 +127,14 @@ All of this is in code (`check_proof.trip_checks`, `decide_parts`, `verdict`), n
 | Part | Check | Pass | Needs a person | Problem |
 |-|-|-|-|-|
 | Real | Taken directly | every photo of the kind: screen yes ≤ 0.6 | any photo unsure | any photo clearly of a screen |
+| Real | Bill taken directly | every bill: screen yes ≤ 0.6 | any bill unsure | any bill clearly of a screen |
 | Real | Loading / unloading plate matches | at least one photo of the kind clearly `same` | none clear, or no photos | any photo clearly `different` |
 | Real | Bills match | every slip `same` | any slip unclear, or no bills | any slip `different` |
 | Real | Weighing order | tare first or gross first, clearly | a time unreadable or unsure, both the same, or no bills | – |
 | Real | Time In is the empty weighing (In/Out slips) | the lighter weight at Time In | unsure which is heavier | the heavier weight at Time In: In and Out entered swapped, or weighed loaded first |
 | Real | Time between weighings (tare first) | at least 60 min apart | a time unsure | less |
 | Real | Time between weighings (gross first) | at least 10 min apart | a time unsure | less |
+| Real | Tare weighed on this trip | both weighings on one day, or on two days at most 12 h apart (across midnight) | a time unsure | on different days more than 12 h apart: a stored tare |
 | Real | Loading photo times | every one between tare and gross (tare first) or before gross (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
 | Real | Unloading photo times | every one after gross (tare first) or between gross and tare (gross first), give or take 5 min | a stamp time unreadable or unsure | any outside |
 | Real | Unloading on the weighing day | every unloading photo dated the gross weighing's day | a stamp date unreadable or unsure | any on another day |
@@ -150,7 +155,7 @@ Each part is **Flagged: problem found** if any of its checks finds a problem, **
 
 Each flagged check gives its reason as a sentence a person can act on: what is wrong or unclear, in which image, and what to look at, such as "collection1.jpg was taken at 06:35, before the tare (empty) weighing at 06:53. Loading photos must come after it (5 min clock difference allowed)." An unsure answer says how sure Jev was ("Only 62% sure: …") and which value was unclear: the photo's stamp time, or the weighing times on the slip. Each check also names the images to look at (`images`), and checks flagged for the same reason share a `cause`: an unsure reading of the weighing times (`weigh_times`) also leaves the gap and every photo time unsure, and a missing kind of image (`loading_missing`, `bill_missing`) or final slip (`no_final`) leaves its other checks with nothing to read.
 
-The limits are `check_proof.Limits`: `min_gap_tare_first` (60), `min_gap_gross_first` (10) and `clock_slack` (5), in minutes, and `plant_radius` (500), in metres. Each run can change them, on the page, the command line, or a trip's `trip.json`.
+The limits are `check_proof.Limits`: `min_gap_tare_first` (60), `min_gap_gross_first` (10), `clock_slack` (5) and `max_overnight_gap` (720), in minutes, and `plant_radius` (500), in metres. Each run can change them on the command line or in a trip's `trip.json`, and all but `max_overnight_gap` on the page.
 
 The 0.8 and 0.2 thresholds (`CONFIDENT`, `YES`, `NO` in `check_proof.py`), and the 0.5 rotation cut-off (`ROTATE`), are placeholders. Choose real ones with `run_trips.py` and `evaluate.py` (below).
 
@@ -267,7 +272,7 @@ The report shows accuracy per field, accuracy at each confidence level per group
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, the material entered on a Verra project trip, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), which part each check is in and how each part is decided, reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
+The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, the material entered on a Verra project trip, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, a tare from another day, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), which part each check is in and how each part is decided, reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
 
 ## Real trips
 

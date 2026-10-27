@@ -17,7 +17,8 @@ Times, from the final slip's tare and gross times and the photos' GPS stamps:
     and every unloading photo after gross;
   - gross first: the weighings at least `min_gap_gross_first` apart, every loading photo before gross,
     and every unloading photo between gross and tare.
-A photo's clock may be off the weighbridge's by up to `clock_slack`.
+A photo's clock may be off the weighbridge's by up to `clock_slack`. Weighings on different days may be
+at most `max_overnight_gap` apart (a trip across midnight); further, the tare is a stored one.
 
 Place: when the plant's location is given (`--plant`, never fixed in code), the latitude and longitude
 on each unloading photo's GPS stamp are read to two decimals, and at least one must place the photo
@@ -113,6 +114,9 @@ class Limits:
     min_gap_tare_first: int = 60  # loading happens between the weighings, so they are at least this far apart
     min_gap_gross_first: int = 10  # unloading happens between the weighings, so they are at least this far apart
     clock_slack: int = 5  # the camera's clock and the weighbridge's may disagree by this much
+    # Weighings on different days but no further apart than this are a trip across midnight; further, a stored
+    # tare (27 Oct 2026: 21 to 25 h on 172907, 172940, 173097).
+    max_overnight_gap: int = 720
     # How far from the plant an unloading photo's square (`plant_check`) may be. Plant photos on 19 Oct 2026
     # were stamped within 51 m of it; the nearest unloading elsewhere was 2.9 km away.
     plant_radius: int = 500
@@ -123,9 +127,11 @@ LIMIT_NAMES = {
     "min_gap_tare_first": "the least gap between the tare and gross weighings, when tare is first",
     "min_gap_gross_first": "the least gap between the gross and tare weighings, when gross is first",
     "clock_slack": "how far a photo's clock may be off the weighbridge's",
+    "max_overnight_gap": "the most gap between weighings on different days (a trip across midnight)",
     "plant_radius": "how far from the plant an unloading photo's stamp may place it",
 }
-LIMIT_UNITS = {"min_gap_tare_first": "minutes", "min_gap_gross_first": "minutes", "clock_slack": "minutes", "plant_radius": "metres"}
+LIMIT_UNITS = {"min_gap_tare_first": "minutes", "min_gap_gross_first": "minutes", "clock_slack": "minutes", "max_overnight_gap": "minutes",
+               "plant_radius": "metres"}
 
 # The API key lives in the login keyring (GNOME Keyring), stored with KEY_STORE_COMMAND.
 KEY_LOOKUP = ["secret-tool", "lookup", "service", "typesafe", "account", "api"]
@@ -403,6 +409,16 @@ QUESTIONS = {
                       "that records no vehicle weight.",
             ),
         ),
+        # A slip shown on the weighbridge's computer could be typed or changed and never printed (27 Oct 2026: 172913).
+        "screen_photo": Noul(
+            instructions="Is `bill` a picture of a computer or phone screen showing the slip, rather than a photo of a "
+                         "printed paper slip?",
+            criteria=NoulCriteria(
+                true="A screen was photographed: screen pixels or wavy moiré lines, a screen's edge or frame, glare "
+                     "on glass, or a program's window bars or buttons show.",
+                false="A photo taken directly of a printed paper slip.",
+            ),
+        ),
         "slip_kind": Choice(
             instructions="If `bill` is a weighbridge slip, which weights are filled in on it?",
             criteria={
@@ -600,9 +616,9 @@ PARTS = {"real": "Trip is real", "docs": "Documentation", "verra": "Verra"}
 # plate or times ask a person in the real part too.
 PART_OF = {
     "loading_plate": "real", "unloading_plate": "real", "bill_number": "real",
-    "weigh_order": "real", "weigh_gap": "real", "time_in_tare": "real",
+    "weigh_order": "real", "weigh_gap": "real", "weigh_day": "real", "time_in_tare": "real",
     "loading_timing": "real", "unloading_timing": "real", "unloading_day": "real",
-    "loading_direct": "real", "unloading_direct": "real", "unloading_plant": "real",
+    "loading_direct": "real", "unloading_direct": "real", "bill_direct": "real", "unloading_plant": "real",
     "reused": "real", "overlap": "real",
     "loading_missing": "docs", "unloading_missing": "docs", "bill_missing": "docs",
     "loading_vehicle": "docs", "unloading_vehicle": "docs", "loading_stamp": "docs", "unloading_stamp": "docs",
@@ -1130,6 +1146,7 @@ def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, ve
         shown = f"All {len(slips)} slips show" if len(slips) > 1 else "The slip shows"
         checks.append(check("bill", "bill_number", label, "pass", f"{shown} {vehicle_number}",
                             min(b["answers"]["bill_number"]["confidence"] for b in slips)))
+    checks.append(each_photo("bill", "bill_direct", "Bill taken directly", bills, "screen_photo"))
 
     if not quantity:
         checks.append(check("bill", "net_weight", "Net weight", "review", "No quantity was typed, so the net weight wasn't checked."))
@@ -1264,6 +1281,10 @@ def same_day(results: list[dict], w: dict) -> dict | None:
         return check("unloading", "unloading_day", label, "review",
                      f"The date on the GPS stamp of {names(unread)} couldn't be read. Check unloading was on {gross['date']}, "
                      "the day of the gross (loaded) weighing.", images=named(unread))
+    if w["certainty"] < CONFIDENT:
+        # The gross date is as unsure as the weighing times: one cause with them, not a pass (27 Oct 2026).
+        return check("unloading", "unloading_day", label, "review", f"All on {gross['date']}, if the weighing times are right",
+                     w["certainty"], cause="weigh_times")
     return check("unloading", "unloading_day", label, "pass", f"All on {gross['date']}",
                  min(min(m["certainty"] for _, m in taken), w["certainty"]))
 
@@ -1347,6 +1368,24 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
                   f"{duration(least)} is needed for {between} between them.")
     checks.append(check("times", "weigh_gap", "Time between weighings", status, detail, w["certainty"],
                         w["slips"] if status == "fail" else [], cause))
+    # A tare from another day, more than `max_overnight_gap` before or after the gross, is a stored one, not
+    # weighed on this trip (27 Oct 2026: 172907, 172940, 173097). Nearer, the trip ran across midnight.
+    days, overnight = (w["tare"]["date"], w["gross"]["date"]), apart <= limits.max_overnight_gap
+    if cause:
+        status = "review"
+        detail = (f"Both on {days[1]}" if days[0] == days[1] else f"Tare on {days[0]}, gross on {days[1]}") + \
+            ", if the weighing times are right"
+    elif days[0] == days[1]:
+        status, detail = "pass", f"Both on {days[1]}"
+    elif overnight:
+        status, detail = "pass", f"Across midnight, {duration(apart)} apart (at most {duration(limits.max_overnight_gap)})"
+    else:
+        status = "fail"
+        detail = (f"The tare (empty) weighing on {and_list(w['slips'])} is dated {days[0]}, but the gross (loaded) weighing "
+                  f"{days[1]}, {duration(apart)} apart. The tare may be a stored one, not weighed on this trip: check the vehicle was weighed "
+                  "empty for this trip.")
+    checks.append(check("times", "weigh_day", "Tare weighed on this trip", status, detail, w["certainty"],
+                        w["slips"] if status == "fail" else [], cause))
     for role in ("loading", "unloading"):
         if c := photo_timing(role, images.get(role, []), w, limits, tare_first):
             checks.append(c)
@@ -1360,8 +1399,8 @@ def timeline(images: dict[str, list[dict]], w: dict | None, checks: list[dict]) 
     failed = {c["key"] for c in checks if c["status"] == "fail"}
     events = []
     if w:
-        events += [{"at": w["tare"], "what": "Tare", "bad": "weigh_order" in failed or "weigh_gap" in failed},
-                   {"at": w["gross"], "what": "Gross", "bad": "weigh_order" in failed or "weigh_gap" in failed}]
+        events += [{"at": w["tare"], "what": "Tare", "bad": bool({"weigh_order", "weigh_gap", "weigh_day"} & failed)},
+                   {"at": w["gross"], "what": "Gross", "bad": bool({"weigh_order", "weigh_gap", "weigh_day"} & failed)}]
     for role, word in (("loading", "Loading photos"), ("unloading", "Unloading photos")):
         times = [m for _, m in photo_moments(images.get(role, [])) if m]
         if times:

@@ -114,7 +114,7 @@ PHOTO = {
 # A good trip: tare 02:00, loading photos 02:40, gross 03:30, unloading photos 04:09.
 LOADING = {**PHOTO, **stamp("02:40")}
 UNLOADING = PHOTO
-BILL_CHECKS = {"orientation": ("upright", 0.95), "weigh_bill": 0.96, "bill_number": ("same", 0.9)}
+BILL_CHECKS = {"orientation": ("upright", 0.95), "weigh_bill": 0.96, "screen_photo": 0.03, "bill_number": ("same", 0.9)}
 STAMPED = {"weighbridge_seal": 0.9, "weighbridge_name": ("same", 0.9)}  # the weighbridge's stamp clearly on the slip
 FINAL = {**BILL_CHECKS, **STAMPED, "slip_kind": ("both_weights", 0.92), "net_weight": ("same", 0.9), "material": ("filled", 0.9),
          "gross_vs_tare": ("gross_heavier", 0.9), **at("tare", "02:00"), **at("gross", "03:30"),
@@ -314,7 +314,7 @@ class TypedValueTests(unittest.TestCase):
             check_proof.parse_switch("maybe", "verra")
 
     def test_parse_limits_keeps_defaults_for_blanks(self):
-        self.assertEqual(check_proof.parse_limits({}), Limits(60, 10, 5, 500))
+        self.assertEqual(check_proof.parse_limits({}), Limits(60, 10, 5, 720, 500))
         self.assertEqual(check_proof.parse_limits({"plant_radius": "250"}).plant_radius, 250)
         self.assertEqual(check_proof.parse_limits({"min_gap_tare_first": " 90 ", "clock_slack": "0"}), Limits(90, clock_slack=0))
         for bad in ("five", "-5", "1.5", "99999"):
@@ -459,6 +459,7 @@ class TripTests(unittest.TestCase):
         c = by_key(v["checks"])
         self.assertEqual(c["weigh_order"]["detail"], "Tare first (02:00), then gross (03:30), from the times printed with each weight")
         self.assertEqual(c["weigh_gap"]["detail"], "1 h 30 min apart (at least 1 h)")
+        self.assertEqual(c["weigh_day"]["detail"], "Both on 15/10")
         self.assertEqual(c["loading_timing"]["detail"], "Loading 02:40 is between tare 02:00 and gross 03:30")
         self.assertEqual(c["unloading_timing"]["detail"], "Unloading 04:09 is after gross 03:30")
         self.assertEqual(c["bill_found"]["detail"], "weighbill2.jpg: both weights and the net")
@@ -573,6 +574,21 @@ class TripTests(unittest.TestCase):
         unsure = {**UNLOADING, **stamp("04:09", "16/10", confidence=0.6)}
         self.assertEqual(by_key(run_trip(unloading=(unsure,))[0]["verdict"]["checks"])["unloading_day"]["status"], "review")
 
+    def test_a_tare_from_another_day_is_a_problem(self):
+        # A stored tare from the day before, not weighed on this trip (27 Oct 2026: 172907, 172940, 173097).
+        v = run_trip(bill=(FIRST, {**FINAL, **at("tare", "11:31", "14/10")}))[0]["verdict"]
+        self.assertEqual((v["status"], [c["key"] for c in v["flags"]]), ("problem", ["weigh_day"]))
+        c = by_key(v["checks"])["weigh_day"]
+        self.assertEqual((c["part"], c["images"]), ("real", ["weighbill2.jpg"]))
+        self.assertEqual(c["detail"], "The tare (empty) weighing on weighbill2.jpg is dated 14/10, but the gross (loaded) "
+                                      "weighing 15/10, 15 h 59 min apart. The tare may be a stored one, not weighed on this trip: check the "
+                                      "vehicle was weighed empty for this trip.")
+        self.assertTrue(next(e for e in v["timeline"] if e["what"] == "Tare")["bad"])
+        unsure = {**FINAL, **at("tare", "11:31", "14/10", confidence=0.6)}
+        c = by_key(run_trip(bill=(FIRST, unsure))[0]["verdict"]["checks"])["weigh_day"]
+        self.assertEqual((c["status"], c["cause"], c["detail"]),
+                         ("review", "weigh_times", "Tare on 14/10, gross on 15/10, if the weighing times are right"))
+
     def test_an_unreadable_or_unsure_stamp_asks_a_person(self):
         v = run_trip(loading=(LOADING, {**LOADING, "stamp_minute": ("not_shown", 0.9)}))[0]["verdict"]
         self.assertEqual(v["status"], "review")
@@ -591,13 +607,16 @@ class TripTests(unittest.TestCase):
         v = run_trip(bill=(FIRST, {**FINAL, **at("tare", "02:00", confidence=0.6)}))[0]["verdict"]
         flags = v["parts"]["real"]["flags"]
         self.assertEqual([(c["key"], c["cause"]) for c in flags],
-                         [(k, "weigh_times") for k in ("weigh_order", "weigh_gap", "loading_timing", "unloading_timing")])
+                         [(k, "weigh_times") for k in ("weigh_order", "weigh_gap", "weigh_day", "loading_timing",
+                                                       "unloading_timing", "unloading_day")])
         self.assertEqual(flags[0]["detail"], "Check the weighing times on weighbill2.jpg: read as tare (empty) 02:00 and gross "
                                              "(loaded) 03:30, from the times printed with each weight, but only 60% sure.")
         self.assertEqual(flags[0]["images"], ["weighbill2.jpg"])
         self.assertEqual(flags[0]["order"], "tare_first")
         self.assertEqual(flags[1]["detail"], "1 h 30 min apart if those times are right (at least 1 h needed)")
-        self.assertEqual(flags[2]["detail"], "Loading 02:40 is between tare 02:00 and gross 03:30, if the weighing times are right")
+        self.assertEqual(flags[2]["detail"], "Both on 15/10, if the weighing times are right")
+        self.assertEqual(flags[3]["detail"], "Loading 02:40 is between tare 02:00 and gross 03:30, if the weighing times are right")
+        self.assertEqual(flags[5]["detail"], "All on 15/10, if the weighing times are right")
 
     def test_without_a_plant_where_unloading_happened_is_not_asked(self):
         trip, jev = run_trip()
@@ -773,6 +792,17 @@ class TripTests(unittest.TestCase):
         c = by_key(run_trip(loading=(NOT_A_VEHICLE,))[0]["verdict"]["checks"])
         self.assertEqual(c["loading_vehicle"]["status"], "fail")
 
+    def test_a_bill_photographed_off_a_screen_is_a_problem(self):
+        # 172913 (23 Oct 2026): the slip shown on the weighbridge's computer, never printed.
+        v = run_trip(bill=(FIRST, {**FINAL, "screen_photo": 0.95}))[0]["verdict"]
+        c = by_key(v["checks"])["bill_direct"]
+        self.assertEqual((v["status"], c["part"], c["status"], c["images"]), ("problem", "real", "fail", ["weighbill2.jpg"]))
+        self.assertEqual(c["detail"], "Photographed off a screen, not taken directly: weighbill2.jpg.")
+        c = by_key(run_trip(bill=(FIRST, {**FINAL, "screen_photo": 0.7}))[0]["verdict"]["checks"])["bill_direct"]
+        self.assertEqual(c["status"], "review")
+        c = by_key(run_trip()[0]["verdict"]["checks"])["bill_direct"]
+        self.assertEqual((c["status"], c["detail"]), ("pass", "2 of 2 photos"))
+
     def test_every_slip_must_show_the_vehicle_number(self):
         v = run_trip(bill=({**FIRST, "bill_number": ("different", 0.9)}, FINAL))[0]["verdict"]
         self.assertEqual(by_key(v["checks"])["bill_number"]["detail"], f"weighbill1.jpg shows a different vehicle number from {NUMBER}.")
@@ -815,6 +845,7 @@ class TripTests(unittest.TestCase):
         self.assertEqual(v["status"], "pass")
         self.assertEqual(by_key(v["checks"])["loading_timing"]["detail"],
                          "Loading 00:10 on 15/10 is between tare 23:30 on 14/10 and gross 01:00 on 15/10")
+        self.assertEqual(by_key(v["checks"])["weigh_day"]["detail"], "Across midnight, 1 h 30 min apart (at most 12 h)")
 
     def test_am_and_pm_on_a_bill_become_a_24_hour_time(self):
         # As on the G W slips: tare 12:27:48 PM, gross 03:06:08 PM.
@@ -904,7 +935,7 @@ class PartTests(unittest.TestCase):
         self.assertEqual(v["status"], "pass", v["flags"])
         self.assertEqual({p: [c["key"] for c in v["parts"][p]["checks"]] for p in v["parts"]}, {
             "real": ["loading_direct", "loading_plate", "unloading_direct", "unloading_plate", "unloading_plant", "bill_number",
-                     "weigh_order", "time_in_tare", "weigh_gap", "loading_timing", "unloading_timing", "unloading_day", "reused"],
+                     "bill_direct", "weigh_order", "time_in_tare", "weigh_gap", "weigh_day", "loading_timing", "unloading_timing", "unloading_day", "reused"],
             "docs": ["loading_vehicle", "loading_stamp", "unloading_vehicle", "unloading_stamp", "bill_found", "net_weight",
                      "gross_vs_tare"],
             "verra": ["material", "weighbridge_seal"],
@@ -1251,7 +1282,8 @@ class AppTests(unittest.TestCase):
             self.assertIn(b"Proof Check Bench", response.read())
         status, body = self.get("/api/status")
         self.assertTrue(body["key_set"])
-        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "min_gap_gross_first": 10, "clock_slack": 5, "plant_radius": 500})
+        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "min_gap_gross_first": 10, "clock_slack": 5, "max_overnight_gap": 720,
+                                          "plant_radius": 500})
 
     def test_lists_and_loads_trip_folders(self):
         status, trips = self.get("/api/trips")
@@ -1271,7 +1303,8 @@ class AppTests(unittest.TestCase):
                                              "bill": [self.image(COLOURS[7])]}})
         self.assertEqual(status, 200, body)
         self.assertEqual((body["vehicle_number"], body["quantity"]), (NUMBER, QUANTITY))
-        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "min_gap_gross_first": 10, "clock_slack": 10, "plant_radius": 500})
+        self.assertEqual(body["limits"], {"min_gap_tare_first": 60, "min_gap_gross_first": 10, "clock_slack": 10, "max_overnight_gap": 720,
+                                          "plant_radius": 500})
         self.assertIsNone(body["plant"])
         self.assertNotIn("unloading_plant", by_key(body["verdict"]["checks"]))
         self.assertEqual(body["verdict"]["title"], "Accepted", body["verdict"]["flags"])
