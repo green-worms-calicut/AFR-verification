@@ -6,7 +6,7 @@ job last queued for it, so the sweep can tell when one went missing.
 """
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -88,3 +88,24 @@ async def waiting(pool: AsyncConnectionPool, before: datetime) -> dict[str, list
             "AND sent_at IS NULL AND gave_up_at IS NULL", (before,))
         unsent = await cur.fetchall()
     return {"verify": unchecked, "send_result": unsent}
+
+
+async def note_disposal(pool: AsyncConnectionPool, request_id: str, vehicle: str | None, quantity: str | None,
+                        day: date) -> None:
+    """Keep what a request's disposal is compared with others by (migrations/003)."""
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE verification_request SET vehicle_number = %s, quantity = %s, trip_day = %s "
+                           "WHERE request_id = %s", (vehicle, quantity, day, request_id))
+
+
+async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str, day: date) -> list[tuple[int, str | None, dict]]:
+    """The other disposals of `vehicle` with a trip within a day of `day`, each as last checked:
+    (disposal id, quantity, check_proof's result). A disposal's earlier requests are its own edits, never others."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.quantity, r.analysis
+               FROM verification_request q JOIN verification_result r USING (request_id)
+               WHERE q.vehicle_number = %s AND q.trip_day BETWEEN %s::date - 1 AND %s::date + 1
+                 AND q.disposal_id <> %s AND r.analysis IS NOT NULL
+               ORDER BY q.disposal_id, q.received_at DESC""", (vehicle, day, day, disposal_id))
+        return await cur.fetchall()

@@ -624,7 +624,9 @@ PART_OF = {
     "loading_vehicle": "docs", "unloading_vehicle": "docs", "loading_stamp": "docs", "unloading_stamp": "docs",
     "bill_found": "docs", "net_weight": "docs", "gross_vs_tare": "docs",
     "material": "verra", "weighbridge_seal": "verra",
-    "image_unavailable": "docs",  # the verifier: an image gw_sales listed that isn't in S3 or isn't an image
+    # The verifier: an image gw_sales listed that isn't in S3 or isn't an image; one file as both a collection and an
+    # unloading photo; a photo stamped within minutes of one in another disposal of the same vehicle.
+    "image_unavailable": "docs", "same_file": "real", "same_moment": "real",
 }
 
 
@@ -1437,8 +1439,9 @@ def verdict(images: dict[str, list[dict]], vehicle_number: str, quantity: str | 
     """The trip's verdict and each part's, with its checks, flags and timeline. `extra` are checks across trips."""
     checks, w = trip_checks(images, vehicle_number, quantity, limits, plant, verra)
     checks += list(extra)
-    # Between the two weighings, for finding a vehicle on two trips at once: only when their order is clear.
-    clear = any(c["key"] == "weigh_order" and c["status"] == "pass" for c in checks)
+    # Between the two weighings, for finding a vehicle on two trips at once: only when their order and day are clear.
+    # A stored tare (`weigh_day` failed) would stretch it across a day and overlap the vehicle's other trips.
+    clear = all(any(c["key"] == key and c["status"] == "pass" for c in checks) for key in ("weigh_order", "weigh_day"))
     window = sorted([w["tare"]["at"], w["gross"]["at"]]) if w and clear else None
     return {**decide_parts(checks), "timeline": timeline(images, w, checks),
             "window": [t.isoformat() for t in window] if window else None}

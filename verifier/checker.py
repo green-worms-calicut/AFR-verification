@@ -14,7 +14,7 @@ from typesafe_sdk import TypeSafeClient
 
 import check_proof
 from check_proof import Upload
-from verifier import photos, standard
+from verifier import compare, photos, standard
 
 log = logging.getLogger("verifier")
 
@@ -43,6 +43,8 @@ class Disposal:
     verra: bool
     day: date  # the trip's date in IST, which picks the standard
     evidence: dict[str, list[str]]  # s3Keys by kind of image
+    vehicle_key: str | None  # the vehicle number cleaned up, to find its other disposals; None if it isn't one
+    quantity_key: str | None  # the quantity as entered, to compare images only with disposals of the same one
 
 
 @dataclass
@@ -60,7 +62,9 @@ def disposal(request: dict, verra_project: str | None = None) -> Disposal:
     reference = request.get("reference") or {}
     typed = str((claims.get("vehicle") or {}).get("vehicleNumber") or "")
     quantity = None
-    if claims.get("quantity") is not None and (claims.get("unit") or "kg").lower() in ("kg", "kgs"):
+    unit = (claims.get("unit") or "kg").lower()
+    quantity_key = None if claims.get("quantity") is None else f"{claims['quantity']} {unit}"
+    if claims.get("quantity") is not None and unit in ("kg", "kgs"):
         try:
             quantity = check_proof.parse_quantity(str(claims["quantity"]))
         except ValueError:  # 0 or not a number: nothing to match the slip's net weight against
@@ -80,8 +84,10 @@ def disposal(request: dict, verra_project: str | None = None) -> Disposal:
             evidence[kind].append(item["s3Key"])
     day = (standard.ist_day(claims.get("arrivalTime")) or standard.ist_day((request.get("subject") or {}).get("createdAt"))
            or datetime.now(standard.IST).date())
-    return Disposal(check_proof.normalize_vehicle_number(typed) or typed.strip() or "(not entered)", quantity, plant,
-                    bool(verra_project) and verra_project in projects, day, evidence)
+    vehicle = check_proof.normalize_vehicle_number(typed)
+    return Disposal(vehicle or typed.strip() or "(not entered)", quantity, plant,
+                    bool(verra_project) and verra_project in projects, day, evidence, vehicle,
+                    f"{quantity} kg" if quantity else quantity_key)
 
 
 def unavailable_check(kind: str, found: list[tuple[str, str]], none_left: bool) -> dict:
@@ -122,6 +128,8 @@ def flag(group: list[dict]) -> dict:
             "kind": KIND[status], "message": message[:MAX_MESSAGE],
             "evidence": list(dict.fromkeys(i for c in [lead, *also] for i in c["images"])),
             "checks": [c["key"] for c in [lead, *also]]}
+    if others := compare.related(x["id"] for c in group for x in c.get("related", [])):
+        made["related"] = others
     sure = [c["certainty"] for c in group if c["certainty"] is not None]
     if sure:
         made["confidence"] = round(min(sure), 3)
@@ -143,8 +151,9 @@ def extractions(trip: dict, unavailable: list[str]) -> dict:
 
 
 def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeClient,
-          verra_project: str | None = None) -> Checked:
-    """Check one request's disposal. Jev or S3 failing raises, so the job retries."""
+          verra_project: str | None = None, others: list[compare.Other] = ()) -> Checked:
+    """Check one request's disposal, and compare it with `others`: the same vehicle's other disposals within a day
+    of its date (`store.others`). Jev or S3 failing raises, so the job retries."""
     d = disposal(request, verra_project)
     std = standard.for_day(d.day)
     uploads, unavailable = {kind: [] for kind in WORDS}, []  # (kind, s3Key, why)
@@ -165,6 +174,7 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
     # First, so each leads the flag of the checks its missing images leave unsure.
     checks = [unavailable_check(kind, found, kind in gone) for kind, found in by_kind.items()]
     checks += [c for c in trip["verdict"]["checks"] if c["key"] not in {MISSING_KEY[k] for k in gone}]
+    checks += compare.checks(d.vehicle_key, d.quantity_key, trip, list(others))
     trip["verdict"] = {**trip["verdict"], **check_proof.decide_parts(checks)}
     for kind, key, why in unavailable:
         log.warning("%s: %s %s %s", request["requestId"], WORDS[kind], key, why)

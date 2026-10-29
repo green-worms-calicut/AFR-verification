@@ -29,8 +29,9 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 
 import check_proof  # noqa: E402
 from check_proof import Upload  # noqa: E402
-from test_offline import FINAL, NUMBER, QUANTITY, FakeJev, make_trip, sent  # noqa: E402
-from verifier import checker, jobs, schema, signing, standard, store, web  # noqa: E402
+from test_offline import (COLOURS, FINAL, FIRST, LOADING, NUMBER, QUANTITY, UNLOADING, FakeJev, at, coloured,  # noqa: E402
+                          make_trip, sent)
+from verifier import checker, compare, jobs, schema, signing, standard, store, web  # noqa: E402
 from verifier.config import Settings  # noqa: E402
 
 DB = os.environ.get("VERIFIER_TEST_DATABASE_URL", "postgresql://verifier@127.0.0.1:5433/verifier_test")
@@ -56,21 +57,40 @@ def files(uploads: dict[str, list[Upload]]) -> dict[str, bytes]:
 
 
 def disposal(uploads: dict[str, list[Upload]] = NOT_STORED, request_id: str | None = None, reason: str = "created",
-             data_version: str = "sha256:aaa", logs: list[dict] = (), facility: dict | None = None, **claims) -> dict:
+             data_version: str = "sha256:aaa", logs: list[dict] = (), facility: dict | None = None,
+             disposal_id: int = DISPOSAL, **claims) -> dict:
     """A request as gw_sales sends it, cut down to what the service reads, listing `uploads` as evidence."""
     owner = {"loading": {"type": "collection_log", "id": 45001}}
     return {
         "requestId": request_id or str(uuid.uuid4()), "reason": reason, "schemaVersion": 1,
-        "subject": {"type": "disposal_log", "id": DISPOSAL, "createdVia": "DISPOSAL_ENTRY",
+        "subject": {"type": "disposal_log", "id": disposal_id, "createdVia": "DISPOSAL_ENTRY",
                     "createdAt": "2026-10-15T04:20:00.000Z", "dataVersion": data_version, "status": "approval_pending"},
-        "callbackUrl": f"{GW}/api/procurement/disposal-logs/{DISPOSAL}/verification-results",
+        "callbackUrl": f"{GW}/api/procurement/disposal-logs/{disposal_id}/verification-results",
         "claims": {"arrivalTime": "2026-10-15T03:00:00.000Z", "quantity": float(QUANTITY), "unit": "kg",
                    "vehicle": {"id": 12, "vehicleNumber": "kl 05 af 9341"}, **claims},
-        "evidence": [{"owner": owner.get(kind, {"type": "disposal_log", "id": DISPOSAL}), "category": STORED[kind][0],
+        "evidence": [{"owner": owner.get(kind, {"type": "disposal_log", "id": disposal_id}), "category": STORED[kind][0],
                       "s3Key": key_of(kind, u), "mimeType": "image/jpeg", "uploadedAt": "2026-10-15T04:19:41.000Z"}
                      for kind, items in uploads.items() for u in items],
         "reference": {"facility": facility or {"id": 3, "location": None}, "collectionLogs": list(logs)},
     }
+
+
+def other_trip(prefix: str = "b-", colours: int = 6, loading=LOADING, unloading=UNLOADING, bill=(FIRST, FINAL),
+               quality: int = 90) -> tuple[dict[str, list[Upload]], FakeJev]:
+    """Another trip of the same vehicle, its images named with `prefix`: in colours from COLOURS[colours] on
+    (different images; 0 and another `quality` makes look-alikes of make_trip's), answered by its own fake Jev."""
+    uploads, by_colour, n = {}, {}, colours
+    for kind, items, name in (("loading", (loading, loading), "collection"), ("unloading", (unloading, unloading), "unloading"),
+                              ("bill", bill, "weighbill")):
+        uploads[kind] = []
+        for i, picks in enumerate(items):
+            by_colour[COLOURS[n]] = [picks]
+            uploads[kind].append(Upload(f"{prefix}{name}{i + 1}.jpg", coloured(COLOURS[n], quality)))
+            n += 1
+    return uploads, FakeJev(by_colour=by_colour)
+
+
+LATER = (FIRST, {**FINAL, **at("tare", "05:00"), **at("gross", "06:30")})  # weighed after make_trip's 02:00-03:30
 
 
 def signed(request: dict, secret: str = SETTINGS.webhook_secret, now: float | None = None) -> tuple[bytes, dict]:
@@ -245,6 +265,100 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(jev.requests, [])
         self.assertEqual(checked.outcome, "flagged")
         self.assertTrue(all(f["kind"] == "please check" for f in checked.flags))
+
+
+class CompareTests(unittest.TestCase):
+    """A disposal compared with its vehicle's other disposals."""
+
+    def checked(self, uploads, jev, others=(), disposal_id=DISPOSAL, **claims):
+        with jev.client() as client:
+            return checker.check(disposal(uploads, disposal_id=disposal_id, **claims), files(uploads).get, client,
+                                 others=list(others))
+
+    def first(self):
+        """Disposal 1000, already checked: make_trip's images, weighed 02:00-03:30."""
+        uploads, jev = make_trip()
+        return compare.Other(1000, f"{QUANTITY} kg", self.checked(uploads, jev, disposal_id=1000).analysis)
+
+    def flag(self, checked, code):
+        return next((f for f in checked.flags if f["code"] == code), None)
+
+    def test_same_images_again_are_a_problem_naming_the_other_disposal(self):
+        uploads, jev = other_trip(colours=0, bill=LATER)  # make_trip's files, renamed
+        checked = self.checked(uploads, jev, [self.first()])
+        flag = self.flag(checked, "reused")
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
+        self.assertIn("is the same file as collection-logs/2026/10/15/collection1.jpg in disposal 1000", flag["message"])
+        self.assertIn("collection-logs/2026/10/15/b-collection1.jpg", flag["evidence"])
+        self.assertIsNone(self.flag(checked, "same_moment"), "copies are reused's, not also the same moment")
+
+    def test_look_alike_asks_a_person(self):
+        uploads, jev = other_trip(colours=0, quality=60, bill=LATER)
+        flag = self.flag(self.checked(uploads, jev, [self.first()]), "reused")
+        self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
+        self.assertIn("looks the same as", flag["message"])
+
+    def test_images_of_another_quantity_are_not_compared(self):
+        uploads, jev = other_trip(colours=0, bill=LATER)
+        checked = self.checked(uploads, jev, [self.first()], quantity=999)
+        self.assertIsNone(self.flag(checked, "reused"))
+
+    def test_photos_at_the_same_moment_ask_a_person(self):
+        uploads, jev = other_trip(bill=LATER)  # other images, stamped as make_trip's
+        checked = self.checked(uploads, jev, [self.first()])
+        flag = self.flag(checked, "same_moment")
+        self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
+        self.assertIn("b-collection1.jpg was stamped 02:40 on 15/10", flag["message"])
+        self.assertIsNone(self.flag(checked, "overlap"), "weighed later: no overlap")
+        self.assertIsNone(self.flag(checked, "reused"))
+
+    def test_more_than_five_minutes_apart_is_not_the_same_moment(self):
+        later = {**LOADING, "stamp_minute": ("46", 0.95)}  # 02:46 against 02:40
+        uploads, jev = other_trip(loading=later, unloading={**UNLOADING, "stamp_hour": ("05", 0.95)}, bill=LATER)
+        self.assertIsNone(self.flag(self.checked(uploads, jev, [self.first()]), "same_moment"))
+
+    def test_overlapping_weighings_are_a_problem_whatever_the_quantity(self):
+        uploads, jev = other_trip()  # weighed 02:00-03:30, as disposal 1000
+        checked = self.checked(uploads, jev, [self.first()], quantity=999)
+        flag = self.flag(checked, "overlap")
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
+        self.assertIn("KL05AF9341 is weighed 02:00-03:30 on 15/10 for this disposal, overlapping disposal 1000", flag["message"])
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
+
+    def test_several_trips_a_day_are_not_an_overlap(self):
+        uploads, jev = other_trip(bill=LATER)  # weighed 05:00-06:30, after disposal 1000's 02:00-03:30
+        checked = self.checked(uploads, jev, [self.first()], quantity=999)
+        self.assertEqual(next(c for c in checked.analysis["verdict"]["checks"] if c["key"] == "overlap")["status"], "pass")
+
+    def test_a_stored_tare_is_no_window(self):
+        # Tare from the day before (a stored one): the trip's weighings would span a day and overlap disposal 1000.
+        stored = (FIRST, {**FINAL, **at("tare", "05:00", "14/10"), **at("gross", "06:30")})
+        uploads, jev = other_trip(bill=stored)
+        checked = self.checked(uploads, jev, [self.first()], quantity=999)
+        self.assertEqual(self.flag(checked, "weigh_day")["kind"], "problem found")
+        self.assertIsNone(checked.analysis["verdict"]["window"])
+        self.assertIsNone(self.flag(checked, "overlap"))
+
+    def test_alone_every_comparison_passes(self):
+        uploads, jev = make_trip()
+        checks = {c["key"]: c["status"] for c in self.checked(uploads, jev).analysis["verdict"]["checks"]}
+        self.assertEqual({k: checks[k] for k in ("same_file", "reused", "same_moment", "overlap")},
+                         dict.fromkeys(("same_file", "reused", "same_moment", "overlap"), "pass"))
+
+    def test_one_file_as_collection_and_unloading_photo_is_a_problem(self):
+        uploads, jev = make_trip(same=(("loading", 0, "unloading", 0),))
+        flag = self.flag(self.checked(uploads, jev), "same_file")
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
+        self.assertIn("collection-logs/2026/10/15/collection1.jpg and disposal/2026/10/15/unloading1.jpg", flag["message"])
+
+    def test_without_a_vehicle_number_only_the_disposal_itself_is_checked(self):
+        uploads, jev = other_trip(colours=0, bill=LATER)
+        checked = self.checked(uploads, jev, [self.first()], vehicle={"vehicleNumber": ""})
+        keys = {c["key"] for c in checked.analysis["verdict"]["checks"]}
+        self.assertIn("same_file", keys)
+        self.assertFalse(keys & {"reused", "same_moment", "overlap"})
 
 
 class FlagTests(unittest.TestCase):
@@ -606,6 +720,42 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def sweep(self):
         await jobs.sweep(timestamp=int(time.time()))
+
+    # Comparing disposals
+
+    async def test_a_second_disposal_with_the_same_photos_names_the_first(self):
+        uploads = self.store_trip()
+        await self.post(disposal(uploads, disposal_id=1000))
+        await self.work()
+        again = disposal(uploads, disposal_id=1001)
+        await self.post(again)
+        [(lock,)] = await self.sql("SELECT lock FROM procrastinate_jobs WHERE task_name = 'verify' AND status = 'todo'")
+        self.assertEqual(lock, f"vehicle:{NUMBER}", "one vehicle's checks run one at a time")
+        await self.work()
+        flags = {f["code"]: f for f in self.gw.stored[again["requestId"]]["flags"]}
+        self.assertEqual(flags["reused"]["related"], [{"type": "disposal_log", "id": 1000}])
+        self.assertEqual(flags["overlap"]["related"], [{"type": "disposal_log", "id": 1000}])
+        self.assertEqual(await self.sql("SELECT vehicle_number, quantity, trip_day FROM verification_request "
+                                        "WHERE request_id = %s", again["requestId"]),
+                         [(NUMBER, f"{QUANTITY} kg", date(2026, 10, 15))])
+
+    async def test_an_edit_is_not_compared_with_its_own_earlier_request(self):
+        uploads = self.store_trip()
+        await self.post(disposal(uploads))
+        await self.work()
+        edit = disposal(uploads, reason="edited", data_version="sha256:bbb")
+        await self.post(edit)
+        await self.work()
+        self.assertEqual(self.gw.stored[edit["requestId"]]["outcome"], "passed")
+
+    async def test_only_disposals_within_a_day_are_compared(self):
+        uploads = self.store_trip()
+        await self.post(disposal(uploads, disposal_id=1000, arrivalTime="2026-10-13T03:00:00.000Z"))  # two days before
+        await self.work()
+        again = disposal(uploads, disposal_id=1001)
+        await self.post(again)
+        await self.work()
+        self.assertEqual(self.gw.stored[again["requestId"]]["outcome"], "passed")
 
     async def test_health(self):
         response = await self.client.get("/health")

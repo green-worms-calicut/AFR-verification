@@ -19,7 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from typesafe_sdk import TypeSafeClient
 
 import check_proof
-from verifier import VERSION, checker, signing, store
+from verifier import VERSION, checker, compare, signing, store
 from verifier.config import Settings
 from verifier.photos import Photos
 
@@ -114,16 +114,39 @@ def make_result(request: dict, outcome: str, flags: list[dict] = (), error: dict
 
 
 async def queue(task: procrastinate.tasks.Task, request_id: str) -> None:
-    """Queue `task` for a request, unless it is already waiting to run, and note the job on the request's row."""
+    """Queue `task` for a request, unless it is already waiting to run, and note the job on the request's row.
+
+    Checks of one vehicle's disposals run one at a time (a Procrastinate lock), so two duplicates arriving
+    together still see each other.
+    """
     lock = f"{task.name}:{request_id}"
+    options = {"queueing_lock": lock}
+    if task is verify and (vehicle := vehicle_of(await store.request(service().pool, request_id))):
+        options["lock"] = f"vehicle:{vehicle}"
     try:
-        job_id = await task.configure(queueing_lock=lock).defer_async(request_id=request_id)
+        job_id = await task.configure(**options).defer_async(request_id=request_id)
     except exceptions.AlreadyEnqueued:
         waiting = list(await app.job_manager.list_jobs_async(queueing_lock=lock, status="todo"))
         if not waiting:  # it started meanwhile; the sweep catches it if it is lost
             return
         job_id = waiting[0].id
     await store.note_job(service().pool, task.name, request_id, job_id)
+
+
+def vehicle_of(request: dict | None) -> str | None:
+    vehicle = ((request or {}).get("claims") or {}).get("vehicle") or {}
+    return check_proof.normalize_vehicle_number(str(vehicle.get("vehicleNumber") or ""))
+
+
+async def others_of(request_id: str, request: dict, verra_project: str | None) -> list[compare.Other]:
+    """Note what the disposal is compared by, and fetch its vehicle's other disposals within a day."""
+    svc = service()
+    d = checker.disposal(request, verra_project)
+    await store.note_disposal(svc.pool, request_id, d.vehicle_key, d.quantity_key, d.day)
+    if not d.vehicle_key:
+        return []
+    rows = await store.others(svc.pool, request["subject"]["id"], d.vehicle_key, d.day)
+    return [compare.Other(*row) for row in rows]
 
 
 async def lost(job_id: int | None) -> bool:
@@ -145,7 +168,9 @@ async def verify(context, request_id: str) -> None:
         request = await store.request(svc.pool, request_id)
         analysis = cost = None
         try:
-            checked = await asyncio.to_thread(checker.check, request, svc.photos.fetch, svc.jev, svc.settings.verra_project)
+            others = await others_of(request_id, request, svc.settings.verra_project)
+            checked = await asyncio.to_thread(checker.check, request, svc.photos.fetch, svc.jev,
+                                              svc.settings.verra_project, others)
             result = make_result(request, checked.outcome, checked.flags, standard=checked.standard,
                                  extractions=checked.extractions)
             analysis, cost = checked.analysis, checked.cost_usd
