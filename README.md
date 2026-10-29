@@ -169,7 +169,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-The verifier service for gw_sales (`verifier/`, being built) also needs `requirements-verifier.txt`: FastAPI, Procrastinate on Postgres, boto3 for S3, and moto for its offline tests.
+The verifier service for gw_sales (`verifier/`, see Usage) also needs `requirements-verifier.txt`: FastAPI, Procrastinate on Postgres, boto3 for S3, and moto for its offline tests.
 
 ```bash
 .venv/bin/pip install -r requirements-verifier.txt
@@ -272,6 +272,30 @@ It prints a line per trip (its verdict, each part's, and its first flags), how m
 
 The report shows accuracy per field, accuracy at each confidence level per group, what each candidate threshold would accept and how many of those would be wrong, and every mistake, most confident first.
 
+### Verifier service (gw_sales)
+
+`verifier/` runs the check as the service gw_sales calls for every new or edited disposal, as the Disposal Verification Contract sets out. It answers each signed request with 202, queues it, and later posts a signed result to the request's `callbackUrl`. Requests and results are kept in Postgres. A result is saved before it is sent, and sending is retried for up to 24 hours while gw_sales is down. A job runs every minute to pick up stalled or lost jobs. So far (build step 1) it only checks that each kind of image was added. The Jev checks come with the photos from S3.
+
+A dev Postgres for it runs in Docker, on port 5433:
+
+```bash
+docker run -d --name jev-verifier-db --restart unless-stopped -p 127.0.0.1:5433:5432 \
+  -v jev-verifier-pg:/var/lib/postgresql -e POSTGRES_USER=verifier -e POSTGRES_DB=verifier \
+  -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18
+```
+
+Settings come from the environment: `VERIFIER_DATABASE_URL` (`postgresql://verifier@127.0.0.1:5433/verifier` for the dev one), `VERIFIER_WEBHOOK_SECRET` (gw_sales signs its requests with it), `VERIFIER_CALLBACK_SECRET` (we sign our results with it), `VERIFIER_API_KEY` (sent as `X-API-Key` with our results) and `GW_SALES_URL` (results are only posted under it).
+
+```bash
+.venv/bin/python -m verifier migrate      # apply the queue's and our migrations not applied yet
+.venv/bin/python -m verifier worker       # run the jobs
+.venv/bin/python -m verifier web --port 8080   # POST /v1/verifications, GET /health
+```
+
+Table changes go in a new numbered file in `verifier/migrations/` (`002_what_it_does.sql`), never by editing one already applied. `migrate` applies each new file once, in order, and records it in `verifier_migration`; one that fails is rolled back whole and not recorded. On a new database it installs Procrastinate's tables too. After upgrading Procrastinate, stop the workers and run `migrate`: its new migrations are applied the same way.
+
+Log lines start with the requestId; one that needs a person starts with `ALERT`: a result gw_sales refused (401, 403, 413, 422), gave up on after 24 hours, a disposal that couldn't be checked, or the database unreachable.
+
 ### Tests
 
 ```bash
@@ -279,6 +303,8 @@ The report shows accuracy per field, accuracy at each confidence level per group
 ```
 
 The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, the material entered on a Verra project trip, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, a tare from another day, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), which part each check is in and how each part is decided, reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
+
+`tests/test_verifier.py` covers the verifier service against a fake gw_sales: signatures, gw_sales' end-to-end cases (a signed result for a new disposal, an edit checked again, a repeated request checked once, wrong secrets refused), each answer gw_sales can give, retries for 24 hours, a checking error sent as `outcome: error`, and lost jobs picked up. It needs the dev Postgres on port 5433 and makes a `verifier_test` database there. Without that Postgres, those tests are skipped.
 
 ## Real trips
 
@@ -344,6 +370,8 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 | `eval/` | Saved Jev answers and run reports. Not in git. |
 | `mockups/` | The design mockup of the trip page, with real photos. Not in git. |
 | `tests/test_offline.py` | Offline tests against a fake Jev API. |
+| `verifier/` | The verifier service for gw_sales: `web.py` receives requests, `jobs.py` queues, checks and posts results, `store.py` keeps requests and the outbox, `schema.py` and `migrations/` make the tables, `checker.py` makes the flags, `signing.py` signs both ways. |
+| `tests/test_verifier.py` | Offline tests of the verifier service against a fake gw_sales. |
 | `playground/` | The questions and a state for each slot, as JSON, to paste into the [TypeSafe playground](https://console.typesafe.ai/playground). Generated from `check_proof.QUESTIONS`. |
 | `samples/photo.png`, `samples/bill.png` | A low-resolution truck photo with a GPS stamp, and a weighment slip (photographed sideways), used by `evaluate.py`'s example labels. |
 | `read_time.py`, `make_test_clock.py`, `samples/analog-*.jpg`, `samples/digital-*.jpg` | An earlier experiment: reading the time on a clock. |

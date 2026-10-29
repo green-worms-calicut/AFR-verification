@@ -4,3 +4,5 @@ gw_sales sends a signed request (POST /v1/verifications); the service answers 20
 disposal's weigh bills, collection photos and unloading photos with check_proof, and posts its
 flags back to the request's callbackUrl, as the Disposal Verification Contract (schema 1) sets out.
 """
+
+VERSION = "0.1.0"  # sent with every result as verifier.version
