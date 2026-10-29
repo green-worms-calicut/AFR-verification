@@ -19,7 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from typesafe_sdk import TypeSafeClient
 
 import proof_check
-from verifier import VERSION, compare_disposals, database, disposal_check, signatures
+from verifier import VERSION, compare_disposals, database, disposal_check, signatures, standards
 from verifier.settings import Settings
 from verifier.s3_photos import Photos
 
@@ -221,6 +221,19 @@ async def send_result(context, request_id: str) -> None:
         log.warning("%s: gw_sales doesn't know the request or disposal (404): %s", request_id, answer)
     else:
         log.error("ALERT %s: gw_sales refused the result (%s): %s", request_id, status, answer)
+
+
+@app.periodic(cron="35 18 * * *", periodic_id="daily_report")  # 00:05 IST
+@app.task(name="daily_report", queue="sweep", queueing_lock="daily_report")
+async def daily_report(timestamp: int) -> None:
+    """Log the IST day just ended: requests, outcomes, flags by code, Jev's cost, results not delivered. An alert
+    when results are waiting to be delivered or were given up."""
+    day = datetime.fromtimestamp(timestamp, standards.IST).date() - timedelta(days=1)
+    report = await database.day_report(service().pool, day)
+    log.info("daily report %s", json.dumps(report))
+    if report["resultsWaiting"] or report["resultsGivenUp"]:
+        log.error("ALERT daily report %s: %d results waiting to be delivered, %d given up", day,
+                  report["resultsWaiting"], report["resultsGivenUp"])
 
 
 @app.periodic(cron="* * * * *", periodic_id="sweep")

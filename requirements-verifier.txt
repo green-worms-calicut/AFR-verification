@@ -7,5 +7,3 @@ psycopg[binary]==3.3.6
 psycopg-pool==3.3.3
 boto3==1.43.121
 httpx==0.28.1
-# Offline tests only: a fake S3
-moto==5.2.5

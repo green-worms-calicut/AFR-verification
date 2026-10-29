@@ -1,4 +1,5 @@
-"""The HTTP side: gw_sales posts disposals to check to POST /v1/verifications; GET /health is for monitoring.
+"""The HTTP side: gw_sales posts disposals to check to POST /v1/verifications; GET /health (the process is up) and
+GET /ready (the database can be reached) are for monitoring.
 
 A request is answered as soon as it is saved and queued (202, also for a requestId seen before); the
 checking and the result come later from the jobs.
@@ -83,6 +84,13 @@ async def receive(request: Request) -> JSONResponse:
 
 @app.get("/health")
 async def health() -> JSONResponse:
+    """The process is up (for the container's health check: restarting it can't fix the database)."""
+    return JSONResponse({"ok": True})
+
+
+@app.get("/ready")
+async def ready() -> JSONResponse:
+    """The database can be reached, so requests can be taken."""
     try:
         async with tasks.service().pool.connection() as conn:
             await conn.execute("SELECT 1")

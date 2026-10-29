@@ -1,0 +1,58 @@
+# The verifier on one server: Postgres, the migrations, the web receiver and the worker, restarted if they stop.
+# Settings and secrets come from an env file beside this one (dev.env, from dev.env.example; root-only, never in git).
+#   cd deploy && sudo docker compose --env-file dev.env up -d --build
+# An HTTPS proxy (Caddy or nginx) at the verifier's URL forwards to 127.0.0.1:8080.
+name: jev-verifier
+
+x-verifier: &verifier
+  build: ..
+  image: jev-verifier
+  env_file: ${VERIFIER_ENV_FILE:-dev.env}
+  environment:
+    VERIFIER_DATABASE_URL: postgresql://verifier:${POSTGRES_PASSWORD}@db:5432/verifier
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:18.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: verifier
+      POSTGRES_DB: verifier
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the env file}
+    volumes:
+      - db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "verifier"]
+      interval: 5s
+      retries: 20
+
+  migrate:
+    <<: *verifier
+    command: ["python", "-m", "verifier", "migrate"]
+    restart: "no"
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    <<: *verifier
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *verifier
+    command: ["python", "-m", "verifier", "worker"]
+    healthcheck:
+      disable: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  db:

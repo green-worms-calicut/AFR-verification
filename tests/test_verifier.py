@@ -9,13 +9,14 @@ Run:
 """
 
 import json
+import logging
 import os
 import sys
 import tempfile
 import time
 import unittest
 import uuid
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -31,7 +32,7 @@ import proof_check  # noqa: E402
 from proof_check import Upload  # noqa: E402
 from test_proof_check import (AT_PLANT, COLOURS, FINAL, FIRST, LOADING, NUMBER, PLANT, PULATH, QUANTITY,  # noqa: E402
                               UNLOADING, FakeJev, at, coloured, make_trip, sent, stamp)
-from verifier import api, compare_disposals, database, disposal_check, migrate, signatures, standards, tasks  # noqa: E402
+from verifier import api, compare_disposals, database, disposal_check, logs, migrate, signatures, standards, tasks  # noqa: E402
 from verifier.settings import Settings  # noqa: E402
 
 DB = os.environ.get("VERIFIER_TEST_DATABASE_URL", "postgresql://verifier@127.0.0.1:5433/verifier_test")
@@ -539,6 +540,24 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(severity("material", "review"), "info")
 
 
+class LogTests(unittest.TestCase):
+    def record(self, message: str, level=logging.INFO) -> logging.LogRecord:
+        return logging.LogRecord("verifier", level, __file__, 1, message, (), None)
+
+    def test_json_lines_carry_the_request_and_alerts(self):
+        rid = "0b6f9a52-3c1e-4d7a-9e43-6a1f2d8c7b10"
+        line = json.loads(logs.JsonLines().format(self.record(f"{rid}: passed with 0 flag(s)")))
+        self.assertEqual((line["requestId"], line["level"], line["logger"]), (rid, "INFO", "verifier"))
+        self.assertNotIn("alert", line)
+        alert = json.loads(logs.JsonLines().format(self.record(f"ALERT {rid}: gw_sales refused the result", logging.ERROR)))
+        self.assertEqual((alert["alert"], alert["requestId"]), (True, rid))
+        self.assertTrue(alert["time"].endswith("Z"))
+
+    def test_plain_lines_without_a_request(self):
+        line = json.loads(logs.JsonLines().format(self.record("refused a request (None): bad or expired signature")))
+        self.assertNotIn("requestId", line)
+
+
 class BackoffTests(unittest.TestCase):
     def test_send_retries_for_about_24_hours(self):
         job = mock.Mock()
@@ -911,9 +930,29 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.work()
         self.assertEqual(self.gw.stored[again["requestId"]]["outcome"], "passed")
 
-    async def test_health(self):
+    async def test_health_and_ready(self):
         response = await self.client.get("/health")
         self.assertEqual((response.status_code, response.json()), (200, {"ok": True}))
+        response = await self.client.get("/ready")
+        self.assertEqual((response.status_code, response.json()), (200, {"ok": True}))
+
+    async def test_day_report(self):
+        self.gw.statuses = [503]  # the second result waits to be delivered
+        for request in (disposal(self.store_trip()), disposal(disposal_id=1001)):
+            await self.post(request)
+        with self.assertLogs("verifier", "WARNING"):
+            await self.work()
+        today = datetime.now(standards.IST).date()
+        report = await database.day_report(self.svc.pool, today)
+        self.assertEqual(report["received"], {"created": 2})
+        self.assertEqual(sum(report["outcomes"].values()), 2)
+        self.assertEqual(report["resultsWaiting"], 1)
+        self.assertGreater(report["jevCostUsd"], 0)
+        self.assertIn("reused", report["flags"], "disposal 1001 lists the same S3 files as the first disposal")
+        with self.assertLogs("verifier", "INFO") as logged:
+            await tasks.daily_report(timestamp=int(time.time()) + 24 * 3600)  # just after midnight tomorrow: today's
+        self.assertTrue(any("daily report" in line and '"resultsWaiting": 1' in line for line in logged.output))
+        self.assertTrue(any(line.startswith("ERROR") and "ALERT daily report" in line for line in logged.output))
 
 
 if __name__ == "__main__":

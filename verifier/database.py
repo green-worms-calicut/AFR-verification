@@ -109,3 +109,25 @@ async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str, day:
                  AND q.disposal_id <> %s AND r.analysis IS NOT NULL
                ORDER BY q.disposal_id, q.received_at DESC""", (vehicle, day, day, disposal_id))
         return await cur.fetchall()
+
+
+async def day_report(pool: AsyncConnectionPool, day: date) -> dict:
+    """What happened on one IST day: requests received, results made by outcome and flags by code, what Jev cost, and
+    results not delivered yet (at any time), for the daily summary and `python -m verifier report`."""
+    on_day = "(%s AT TIME ZONE 'Asia/Kolkata')::date = %%s"
+    async with pool.connection() as conn:
+        cur = await conn.execute(f"SELECT reason, count(*) FROM verification_request WHERE {on_day % 'received_at'} "
+                                 "GROUP BY reason", (day,))
+        received = dict(await cur.fetchall())
+        cur = await conn.execute(f"SELECT body->>'outcome', count(*), coalesce(sum(cost_usd), 0) FROM verification_result "
+                                 f"WHERE {on_day % 'made_at'} GROUP BY 1", (day,))
+        outcomes = {o: (n, float(c)) for o, n, c in await cur.fetchall()}
+        cur = await conn.execute(f"SELECT f->>'code', count(*) FROM verification_result, jsonb_array_elements(body->'flags') f "
+                                 f"WHERE {on_day % 'made_at'} GROUP BY 1 ORDER BY 2 DESC", (day,))
+        flags = dict(await cur.fetchall())
+        cur = await conn.execute("SELECT count(*) FILTER (WHERE sent_at IS NULL AND gave_up_at IS NULL), "
+                                 f"count(*) FILTER (WHERE {on_day % 'gave_up_at'}) FROM verification_result", (day,))
+        waiting, gave_up = await cur.fetchone()
+    return {"day": day.isoformat(), "received": received, "outcomes": {o: n for o, (n, _) in outcomes.items()},
+            "flags": flags, "jevCostUsd": round(sum(c for _, c in outcomes.values()), 4),
+            "resultsWaiting": waiting, "resultsGivenUp": gave_up}

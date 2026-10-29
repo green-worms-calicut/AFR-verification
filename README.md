@@ -169,10 +169,10 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-The verifier service for gw_sales (`verifier/`, see Usage) also needs `requirements-verifier.txt`: FastAPI, Procrastinate on Postgres, boto3 for S3, and moto for its offline tests.
+The verifier service for gw_sales (`verifier/`, see Usage) also needs `requirements-verifier.txt`: FastAPI, Procrastinate on Postgres and boto3 for S3. Its server image installs only that. `requirements-dev.txt` adds moto, a fake S3, for the offline tests. Install it on a laptop:
 
 ```bash
-.venv/bin/pip install -r requirements-verifier.txt
+.venv/bin/pip install -r requirements-dev.txt
 ```
 
 ### API key
@@ -318,6 +318,21 @@ Table changes go in a new numbered file in `verifier/migrations/` (`002_what_it_
 
 Log lines start with the requestId; one that needs a person starts with `ALERT`: a result gw_sales refused (401, 403, 413, 422), gave up on after 24 hours, a disposal that couldn't be checked, or the database unreachable.
 
+### Running the verifier on a server
+
+The verifier runs on one Linux server with Docker, from `deploy/docker-compose.yml`. That starts Postgres, runs the migrations, then starts the web receiver and the worker, and restarts any that stop. The image (`Dockerfile`) holds only `proof_check/`, `verifier/` and their requirements. `.dockerignore` keeps `trips/`, `eval/`, `mockups/` and any `.env` out.
+
+1. Copy `deploy/dev.env.example` to `deploy/dev.env` on the server, fill it in, and make it root-only (`chmod 600`). It holds the secrets, so it is never committed (`deploy/*.env` is ignored) and never pasted anywhere.
+2. `cd deploy && sudo docker compose --env-file dev.env up -d --build`
+3. Put an HTTPS proxy (Caddy or nginx) at the verifier's URL, forwarding to `127.0.0.1:8080`. Give gw_sales that URL.
+
+The photos are read from S3 with a read-only access key for `disposal/*` and `collection-logs/*`, because the server isn't on AWS.
+
+Monitoring:
+- **Logs:** one JSON object per line, with `requestId` when the line is about a request, and `"alert": true` on a line a person must act on (`sudo docker compose logs -f web worker`). In a terminal the lines are plain text.
+- **Health:** `GET /health` says the process is up, which the container's health check uses. `GET /ready` says the database can be reached.
+- **Daily summary:** every day at 00:05 IST the worker logs the day before: requests by reason, outcomes, flags by code, Jev's cost, and results still waiting or given up. It logs an alert when any result is waiting or given up. `python -m verifier report [--day 2026-10-29]` prints the same summary.
+
 ### Tests
 
 ```bash
@@ -413,6 +428,8 @@ trips/ eval/ mockups/   real trips, saved answers and reports, design mockups: n
 | `verifier/standards.py` | The limits by trip date and the pinned Jev versions. |
 | `verifier/signatures.py` | Signs and checks requests and results (HMAC-SHA256). |
 | `verifier/settings.py` | The service's settings, from the environment. |
+| `verifier/logs.py` | Log lines: JSON on a server, with the request and alerts in their own fields. |
+| `Dockerfile`, `.dockerignore`, `deploy/` | The verifier's image, and how it runs on a server (`docker-compose.yml`, `dev.env.example`). |
 | `tools/check_trip_folders.py` | Checks every trip folder under a folder, flags a vehicle on two trips at once, and compares Jev with hand-read values. |
 | `tools/measure_accuracy.py` | Measures accuracy on labeled single images and shows what each confidence threshold would do. |
 | `tools/test_page/server.py`, `page.html` | The local test page. The server uses only Python's standard library. |
