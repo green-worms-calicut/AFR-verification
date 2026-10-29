@@ -2,11 +2,13 @@
 
 A trip folder holds collection*/loading* photos, unloading* photos and weighbill* images, as in the
 inward log export. What was typed for the trip comes from trip.json in its folder:
-    {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10, "plant": "11.4404, 75.9420", "verra": true}
+    {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10, "plant": "11.4404, 75.9420", "verra": true,
+     "weighbridge": "G W Electronic Weigh Bridge"}
 Without one, the hand-read vehicle number and final-slip net weight from truth.jsonl (in the folder
 given or a parent) stand in for it, so the run checks Jev against the images themselves. The plant's
 location comes from --plant for every trip, unless a trip.json gives its own. "verra": true marks a Verra
-project trip, whose final slip must have a material entered and carry the weighbridge's stamp.
+project trip, whose final slip must have a material entered and carry the weighbridge's stamp. "weighbridge" is the
+weighbridge entered, whose name the final slip must show.
 
 Each trip is reported by part (real, docs, verra: see proof_check.PARTS) and as a whole.
 
@@ -169,7 +171,8 @@ def main() -> None:
             trip_plant = proof_check.parse_plant(typed["plant"]) if typed.get("plant") else plant
             verra = proof_check.parse_switch(typed.get("verra"), "verra")
             trip, _ = proof_check.analyze_trip(client, proof_check.read_trip_folder(folder), number, args.model,
-                                               quantity, limits, index, trip_id, saved, trip_plant, verra)
+                                               quantity, limits, index, trip_id, saved, trip_plant, verra,
+                                               weighbridge=typed.get("weighbridge") or None)
         except Exception as error:
             skipped[folder.name] = f"{type(error).__name__}: {error}"
             return

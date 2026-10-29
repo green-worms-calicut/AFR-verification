@@ -240,11 +240,12 @@ def make_trip(loading=(LOADING, LOADING), unloading=(UNLOADING, UNLOADING), bill
     return uploads, FakeJev(by_colour=by_colour)
 
 
-def run_trip(quantity=QUANTITY, limits=Limits(), index=None, trip_id=None, cache=None, plant=None, verra=False, **kw):
+def run_trip(quantity=QUANTITY, limits=Limits(), index=None, trip_id=None, cache=None, plant=None, verra=False,
+             weighbridge=None, **kw):
     uploads, jev = make_trip(**kw)
     with jev.client() as client:
         trip, _ = proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", quantity, limits, index, trip_id, cache, plant,
-                                           verra)
+                                           verra, weighbridge=weighbridge)
     return trip, jev
 
 
@@ -925,6 +926,52 @@ class TripTests(unittest.TestCase):
         v = run_trip(loading=({**LOADING, "shows_vehicle": 0.6, "plate_number": ("different", 0.9)},))[0]["verdict"]
         self.assertEqual([c["status"] for c in v["flags"]], ["fail", "review"])
         self.assertEqual([c["key"] for c in v["flags"]], ["loading_plate", "loading_vehicle"])
+
+
+class WeighbridgeTests(unittest.TestCase):
+    """The final slip is from the weighbridge entered (the verifier sends gw_sales' claims.weighbridge.name)."""
+
+    NAME = "S N Automatic Weigh Bridge"
+
+    def test_asked_only_when_a_weighbridge_is_entered(self):
+        _, jev = run_trip()
+        self.assertFalse(any(b"weighbridge_entered" in sent(r) for r in jev.requests))
+        _, jev = run_trip(weighbridge=self.NAME)
+        bills = [sent(r) for r in jev.requests if b"weigh_bill" in sent(r)]
+        self.assertTrue(bills and all(b"weighbridge_entered" in b and self.NAME.encode() in b for b in bills))
+        photos = [sent(r) for r in jev.requests if b"shows_vehicle" in sent(r)]
+        self.assertFalse(any(b"weighbridge_entered" in b for b in photos), "only bills are asked")
+
+    def test_saved_answers_keep_their_keys_without_a_weighbridge(self):
+        prints = {"md5": "abc"}
+        self.assertEqual(proof_check.question_version("bill"), proof_check.question_version("bill", weighbridge=False))
+        self.assertNotEqual(proof_check.question_version("bill"), proof_check.question_version("bill", weighbridge=True))
+        plain = proof_check.answer_key(prints, "bill", NUMBER, QUANTITY, "jev-latest")
+        self.assertEqual(len(plain.split("|")), 7, "as before the question was added")
+        named = proof_check.answer_key(prints, "bill", NUMBER, QUANTITY, "jev-latest", weighbridge=self.NAME)
+        self.assertTrue(named.endswith("|" + self.NAME))
+        self.assertNotEqual(plain.split("|")[2], named.split("|")[2])
+
+    def outcome(self, answer):
+        trip, _ = run_trip(weighbridge=self.NAME, bill=(FIRST, {**FINAL, "weighbridge_entered": answer}))
+        return by_key(trip["verdict"]["checks"])["weighbridge_matches"]
+
+    def test_same_passes_different_is_a_problem_unsure_asks(self):
+        same = self.outcome(("same", 0.9))
+        self.assertEqual((same["status"], same["part"], same["detail"]), ("pass", "docs", f"weighbill2.jpg is from {self.NAME}"))
+        different = self.outcome(("different", 0.9))
+        self.assertEqual(different["status"], "fail")
+        self.assertIn(f"from another weighbridge than {self.NAME}, the one entered", different["detail"])
+        unsure = self.outcome(("same", 0.6))
+        self.assertEqual(unsure["status"], "review")
+        self.assertEqual(unsure["detail"], f"Only 60% sure: weighbill2.jpg is from {self.NAME}. Compare the slip's heading "
+                                           f"with {self.NAME}.")
+        self.assertEqual(self.outcome(("not_shown", 0.9))["status"], "review")
+
+    def test_no_bills_asks_a_person_with_the_missing_bills(self):
+        trip, _ = run_trip(weighbridge=self.NAME, bill=())
+        c = by_key(trip["verdict"]["checks"])["weighbridge_matches"]
+        self.assertEqual((c["status"], c["cause"]), ("review", "bill_missing"))
 
 
 class PartTests(unittest.TestCase):

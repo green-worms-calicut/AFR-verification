@@ -21,10 +21,12 @@ class Standard:
     version: str
     since: date  # applies to trips on this day (IST) and after, until the next one
     limits: Limits
+    collection_radius: int = 500  # metres: how far from its collection point a collection photo's stamp may place it
 
     def describe(self) -> dict:
         return {"name": "Jev proof check", "version": self.version, "since": self.since.isoformat(),
-                "limits": asdict(self.limits), "models": {"questions": MODEL, "box": BOX_MODEL}}
+                "limits": {**asdict(self.limits), "collection_radius": self.collection_radius},
+                "models": {"questions": MODEL, "box": BOX_MODEL}}
 
 
 STANDARDS = [Standard("1", date(2026, 10, 1), Limits())]  # oldest first

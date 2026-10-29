@@ -45,6 +45,7 @@ class Disposal:
     day: date  # the trip's date in IST, which picks the standard
     evidence: dict[str, list[str]]  # s3Keys by kind of image
     vehicle_key: str | None  # the vehicle number cleaned up, to find its other disposals; None if it isn't one
+    weighbridge: str | None  # the weighbridge's name entered, which the final slip must be from
     quantity_key: str | None  # the quantity as entered, kept with the request (comparisons don't filter by it)
 
 
@@ -86,8 +87,9 @@ def disposal(request: dict, verra_project: str | None = None) -> Disposal:
     day = (standards.ist_day(claims.get("arrivalTime")) or standards.ist_day((request.get("subject") or {}).get("createdAt"))
            or datetime.now(standards.IST).date())
     vehicle = proof_check.normalize_vehicle_number(typed)
+    weighbridge = str((claims.get("weighbridge") or {}).get("name") or "").strip() or None
     return Disposal(vehicle or typed.strip() or "(not entered)", quantity, plant,
-                    bool(verra_project) and verra_project in projects, day, evidence, vehicle,
+                    bool(verra_project) and verra_project in projects, day, evidence, vehicle, weighbridge,
                     f"{quantity} kg" if quantity else quantity_key)
 
 
@@ -168,7 +170,8 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
             else:
                 uploads[kind].append(Upload(key, data))
     trip, _ = proof_check.analyze_trip(client, uploads, d.vehicle_number, standards.MODEL, d.quantity, std.limits,
-                                       plant=d.plant, verra=d.verra, box_model=standards.BOX_MODEL)
+                                       plant=d.plant, verra=d.verra, box_model=standards.BOX_MODEL,
+                                       weighbridge=d.weighbridge, place_also=entry_checks.photos_to_place(request))
     # A kind whose every image is unavailable wasn't left out: its missing check would say none were added.
     gone = {kind for kind, _, _ in unavailable if not uploads[kind]}
     by_kind = {}
@@ -177,7 +180,7 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
     # First, so each leads the flag of the checks its missing images leave unsure.
     checks = [unavailable_check(kind, found, kind in gone) for kind, found in by_kind.items()]
     checks += [c for c in trip["verdict"]["checks"] if c["key"] not in {MISSING_KEY[k] for k in gone}]
-    checks += entry_checks.checks(request, trip["images"])
+    checks += entry_checks.checks(request, trip["images"], std.collection_radius)
     checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack)
     trip["verdict"] = {**trip["verdict"], **proof_check.decide_parts(checks)}
     for kind, key, why in unavailable:

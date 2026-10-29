@@ -1,6 +1,6 @@
 """Checks of what was entered in gw_sales against the photos: every collection log has a photo, every collection
-photo was taken on its pickup day, no unloading photo long after the end time, and the collections before the
-disposal's arrival. Also what was collected by hand scale against the net weight entered: recorded, not flagged.
+photo was taken on its pickup day and near its collection point, no unloading photo long after the end time, and
+the collections before the disposal's arrival. Also what was collected by hand scale against the net weight entered: recorded, not flagged.
 
 gw_sales sends times in UTC and the photos' GPS stamps show the phone's time, IST, so every time entered is turned
 into IST first (`standards.ist_time`). A stamp is read as a day and month without a year, so dates are compared by
@@ -140,10 +140,42 @@ def after_collections(request: dict) -> dict | None:
                  "is collected before it is disposed of: check the times entered.")
 
 
-def checks(request: dict, images: dict[str, list[dict]]) -> list[dict]:
-    """Every check of what was entered, for one disposal's request and its checked images."""
+def point_of(entry: dict) -> tuple[float, float] | None:
+    """A collection log's collection point, as (latitude, longitude), if gw_sales knows it."""
+    where = (entry.get("collectionPoint") or {}).get("location") or {}
+    return (where["lat"], where["lng"]) if where.get("lat") is not None and where.get("lng") is not None else None
+
+
+def photos_to_place(request: dict) -> set[str]:
+    """The collection photos whose GPS position Jev should read: those of logs whose collection point is known."""
+    known = {e["id"] for e in logs(request) if point_of(e)}
+    return {key for key, log_id in owners(request).items() if log_id in known}
+
+
+def collection_points(request: dict, images: dict[str, list[dict]], radius: float) -> list[dict]:
+    """For each log whose collection point is known, at least one of its photos stamped within `radius` of it; any
+    clearly farther is a problem (`proof_check.near_check`, as unloading at the plant). Aimed at the log."""
+    owner_of, made = owners(request), []
+    for e in logs(request):
+        point = point_of(e)
+        photos = [r for r in images.get("loading", []) if point and owner_of.get(r["name"]) == e["id"]]
+        if not photos:  # no point known, or no photo of it to check (has_photos asks for one)
+            continue
+        name = (e.get("collectionPoint") or {}).get("name")
+        c = proof_check.near_check("collection", "collection_point", "At the collection point", photos, point, radius,
+                                   f"the collection point of {log_name(e)}" if not name else
+                                   f"{name}, the collection point of collection log {e['id']}", "collection")
+        c["target"] = {"type": "collection_log", "id": e["id"]}
+        made.append(c)
+    return made
+
+
+def checks(request: dict, images: dict[str, list[dict]], radius: float = 500) -> list[dict]:
+    """Every check of what was entered, for one disposal's request and its checked images; `radius` is how far from
+    its collection point a collection photo may be."""
     return [*has_photos(request),
-            *(c for c in (photo_date(request, images), too_late(request, images), after_collections(request)) if c)]
+            *(c for c in (photo_date(request, images), too_late(request, images), after_collections(request)) if c),
+            *collection_points(request, images, radius)]
 
 
 def collected_vs_weighed(request: dict) -> dict | None:

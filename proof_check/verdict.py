@@ -47,9 +47,9 @@ def decide_parts(checks: list[dict]) -> dict:
 
 def verdict(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
             limits: Limits = Limits(), extra: list[dict] = (), plant: tuple[float, float] | None = None,
-            verra: bool = False) -> dict:
+            verra: bool = False, weighbridge: str | None = None) -> dict:
     """The trip's verdict and each part's, with its checks, flags and timeline. `extra` are checks across trips."""
-    checks, w = trip_checks(images, vehicle_number, quantity, limits, plant, verra)
+    checks, w = trip_checks(images, vehicle_number, quantity, limits, plant, verra, weighbridge)
     checks += list(extra)
     # When the trip was out, by its photos, for finding a vehicle on two trips at once (`overlap_checks`).
     window = busy_time(images)

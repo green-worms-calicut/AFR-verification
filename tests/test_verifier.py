@@ -29,8 +29,8 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 
 import proof_check  # noqa: E402
 from proof_check import Upload  # noqa: E402
-from test_proof_check import (COLOURS, FINAL, FIRST, LOADING, NUMBER, QUANTITY, UNLOADING, FakeJev, at, coloured,  # noqa: E402
-                              make_trip, sent, stamp)
+from test_proof_check import (AT_PLANT, COLOURS, FINAL, FIRST, LOADING, NUMBER, PLANT, PULATH, QUANTITY,  # noqa: E402
+                              UNLOADING, FakeJev, at, coloured, make_trip, sent, stamp)
 from verifier import api, compare_disposals, database, disposal_check, migrate, signatures, standards, tasks  # noqa: E402
 from verifier.settings import Settings  # noqa: E402
 
@@ -355,6 +355,45 @@ class EntryCheckTests(unittest.TestCase):
         self.assertEqual(checked.extractions["collectedVsWeighed"],
                          {"logs": 1, "collectedKg": 2000, "collectedBags": 12, "netEnteredKg": float(QUANTITY), "differenceKg": 570.0})
         self.assertEqual(checked.flags, [])
+
+    def test_the_slip_must_be_from_the_weighbridge_entered(self):
+        uploads, self.jev = make_trip(bill=(FIRST, {**FINAL, "weighbridge_entered": ("different", 0.9)}))
+        checked = self.checked(disposal(uploads, weighbridge={"id": 5, "name": "ABC Weighbridge"}), uploads)
+        self.assertTrue(any(b"ABC Weighbridge" in sent(r) for r in self.jev.requests), "the name entered is sent")
+        [flag] = [f for f in checked.flags if f["code"] == "weighbridge_matches"]
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "recheck"))
+        self.assertIn("from another weighbridge than ABC Weighbridge, the one entered", flag["message"])
+
+    def test_no_weighbridge_entered_asks_nothing_about_it(self):
+        checked = self.checked()
+        self.assertFalse(any(b"weighbridge_entered" in sent(r) for r in self.jev.requests))
+        self.assertIsNone(self.check_of(checked, "weighbridge_matches"))
+
+    def point(self, near: bool):
+        """A trip whose collection photos are stamped at PLANT (here the collection point) or 38 km away."""
+        where = AT_PLANT if near else PULATH
+        uploads, self.jev = make_trip(loading=({**LOADING, **where}, {**LOADING, **where}))
+        at_point = log(collectionPoint={"name": "Main Kitchen", "location": {"lat": PLANT[0], "lng": PLANT[1]}})
+        return self.checked(disposal(uploads, logs=[at_point]), uploads)
+
+    def test_a_collection_photo_at_its_collection_point_passes(self):
+        checked = self.point(near=True)
+        c = self.check_of(checked, "collection_point")
+        self.assertEqual((c["status"], c["part"]), ("pass", "real"))
+        lines = [r for r in self.jev.requests if b'"line":{"type":"box"' in sent(r)]
+        self.assertEqual(len(lines), 2, "each collection photo's position line is found")
+
+    def test_collection_photos_far_from_the_collection_point_are_a_problem(self):
+        [flag] = [f for f in self.point(near=False).flags if f["code"] == "collection_point"]
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
+        self.assertEqual(flag["target"], {"type": "collection_log", "id": 45001})
+        self.assertIn("from Main Kitchen, the collection point of collection log 45001, but collection must be within "
+                      "500 m of it", flag["message"])
+
+    def test_without_a_known_collection_point_no_position_is_read(self):
+        checked = self.checked(logs=[log()])
+        self.assertIsNone(self.check_of(checked, "collection_point"))
+        self.assertFalse(any(b'"line":{"type":"box"' in sent(r) for r in self.jev.requests))
 
     def test_without_logs_or_times_nothing_new_is_checked(self):
         keys = {c["key"] for c in self.checked().analysis["verdict"]["checks"]}

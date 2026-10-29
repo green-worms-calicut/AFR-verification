@@ -5,6 +5,7 @@ checking a whole trip in parallel (`analyze_trip`).
 
 import os
 import subprocess
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image as PILImage
@@ -53,13 +54,16 @@ def api_key() -> str | None:
 
 
 def ask(client: TypeSafeClient, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
-        quantity: str | None = None, place: bool = False, verra: bool = False):
+        quantity: str | None = None, place: bool = False, verra: bool = False, weighbridge: str | None = None):
     state = {slot: Image.from_pil(fit(img), format="jpeg"), "vehicle_number": vehicle_number}
     if slot == "bill" and quantity:
         state["quantity_kg"] = quantity
     if verra:
         state["our_company"] = OUR_COMPANY
-    return client.system_one(state=state, questions=questions_for(slot, quantity, place, verra), model=model)
+    if weighbridge:
+        state["weighbridge"] = weighbridge
+    return client.system_one(state=state, questions=questions_for(slot, quantity, place, verra, bool(weighbridge)),
+                             model=model)
 
 
 def top(answer, n: int = 3) -> list[tuple[str, float]]:
@@ -76,12 +80,15 @@ TURNING = "turn3"  # how images are turned before the answers are kept; changing
 
 
 def answer_key(prints: dict, slot: str, vehicle_number: str, quantity: str | None, model: str, place: bool = False,
-               verra: bool = False) -> str:
+               verra: bool = False, weighbridge: str | None = None) -> str:
     """What an image's answers depend on, to save them and reuse them: the image, the questions, what was typed, the model.
 
-    Not the plant's location: it isn't sent, so the same answers serve any plant.
+    Not the plant's location: it isn't sent, so the same answers serve any plant. The weighbridge entered is only
+    added when there is one, so keys saved before it was asked about stay the same.
     """
-    return "|".join([prints["md5"], slot, question_version(slot, place, verra), TURNING, vehicle_number, quantity or "", model])
+    parts = [prints["md5"], slot, question_version(slot, place, verra, bool(weighbridge)), TURNING, vehicle_number,
+             quantity or "", model]
+    return "|".join(parts + ([weighbridge] if weighbridge else []))
 
 
 def result_from(slot: str, raw: dict, vehicle_number: str, quantity: str | None) -> dict:
@@ -146,7 +153,8 @@ def read_line(client: TypeSafeClient, img: PILImage.Image, raw: dict, model: str
 
 def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
             quantity: str | None = None, cache: dict | None = None, key: str | None = None,
-            place: bool = False, verra: bool = False, box_model: str = BOX_MODEL) -> tuple[dict, PILImage.Image]:
+            place: bool = False, verra: bool = False, box_model: str = BOX_MODEL,
+            weighbridge: str | None = None) -> tuple[dict, PILImage.Image]:
     """Check one upright-by-EXIF RGB image in its slot. Returns the result and the image as finally sent.
 
     `quantity` is the typed quantity in kilograms, which a bill's net weight must match. With `place`,
@@ -165,7 +173,7 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
     if slot == "bill":
         slip, tokens = find_slip(client, img, box_model)
         img, requests = cut_slip(img, slip), 1
-    response = ask(client, slot, img, vehicle_number, model, quantity, place, verra)
+    response = ask(client, slot, img, vehicle_number, model, quantity, place, verra, weighbridge)
     tokens, requests, rotated = tokens + (response.usage.input_tokens or 0), requests + 1, 0
     turned = response.choices["orientation"]
     looks = [summary(turned)]  # each orientation answer, before each turn
@@ -174,7 +182,7 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
     while looked < 3 and (turn := turn_for(response.choices["orientation"], first=looked == 1)):
         img = img.rotate(turn, expand=True)
         rotated = (rotated + turn) % 360
-        response = ask(client, slot, img, vehicle_number, model, quantity, place, verra)
+        response = ask(client, slot, img, vehicle_number, model, quantity, place, verra, weighbridge)
         tokens += response.usage.input_tokens or 0
         requests += 1
         looked += 1
@@ -193,7 +201,8 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
                  quantity: str | None = None, limits: Limits = Limits(), index: ImageIndex | None = None,
                  trip: str | None = None, cache: dict | None = None,
                  plant: tuple[float, float] | None = None, verra: bool = False,
-                 box_model: str = BOX_MODEL) -> tuple[dict, dict]:
+                 box_model: str = BOX_MODEL, weighbridge: str | None = None,
+                 place_also: Iterable[str] = ()) -> tuple[dict, dict]:
     """Check every image of a trip in parallel and decide.
 
     Returns ({"images": {role: [result]}, "verdict": ...}, {role: [image as sent]}). An image uploaded
@@ -201,7 +210,9 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
     `trip` itself) are flagged. `cache` holds saved answers (see `analyze`). With `plant`, the
     plant's (latitude, longitude), unloading photos are read for where they were taken and checked
     against it. With `verra` (a Verra project trip), bills are checked for the material and the weighbridge's stamp.
-    `box_model` answers the Box questions (finding the slip and the stamp's position line).
+    `box_model` answers the Box questions (finding the slip and the stamp's position line). With `weighbridge`, the
+    weighbridge entered, bills are asked whether they are from it. `place_also` names other images to read where
+    they were taken (the verifier: collection photos whose collection point is known).
     """
     jobs = []  # (role, upload, image, fingerprints)
     for role in ROLES:
@@ -211,15 +222,19 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
     first_of = {}
     for _, u, _, prints in jobs:
         first_of.setdefault(prints["md5"], u.name)
-    # Asked where it was taken: an unloading photo, also when the same file is a loading photo too.
+    # Asked where it was taken: an unloading photo, also when the same file is a loading photo too, and any image
+    # named in `place_also`.
     placed = {prints["md5"] for role, _, _, prints in jobs if role == "unloading"} if plant else set()
+    placed |= {prints["md5"] for _, u, _, prints in jobs if u.name in set(place_also)}
 
     def run(job):
         role, u, img, prints = job
         slot, place = SLOT_OF[role], prints["md5"] in placed
         asked = verra and slot == "bill"  # the Verra questions are only for bills
+        bridge = weighbridge if slot == "bill" else None
         return analyze(client, slot, img, vehicle_number, model, quantity, cache,
-                       answer_key(prints, slot, vehicle_number, quantity, model, place, asked), place, asked, box_model)
+                       answer_key(prints, slot, vehicle_number, quantity, model, place, asked, bridge), place, asked,
+                       box_model, bridge)
 
     unique = [j for j in jobs if first_of[j[3]["md5"]] == j[1].name]
     with ThreadPoolExecutor(max(1, min(8, len(unique)))) as pool:
@@ -233,4 +248,5 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
                              "cost_usd": 0 if repeat else result["cost_usd"], "same_as": first_of[prints["md5"]] if repeat else None})
         sent[role].append(img)
     extra = [reuse_check(images, index, trip)] if index is not None else []
-    return {"images": images, "verdict": verdict(images, vehicle_number, quantity, limits, extra, plant, verra)}, sent
+    return {"images": images, "verdict": verdict(images, vehicle_number, quantity, limits, extra, plant, verra,
+                                                 weighbridge)}, sent

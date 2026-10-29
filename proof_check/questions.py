@@ -314,6 +314,16 @@ QUESTIONS = {
                 NOT_SHOWN: "There is no weighbridge stamp, or the name in it can't be made out.",
             },
         ),
+        "weighbridge_entered": Choice(
+            instructions="Is `bill` a slip from the weighbridge named in `weighbridge`? A slip prints its weighbridge's "
+                         "name in its heading, sometimes also in an ink stamp. The same weighbridge's name is often "
+                         "written differently: shortened, with or without spaces or 'Electronic', with or without its place.",
+            criteria={
+                "different": "The slip's heading names another weighbridge, not the one in `weighbridge`.",
+                "same": "The slip's heading names the weighbridge in `weighbridge`, even if written differently.",
+                NOT_SHOWN: "No weighbridge name is printed on the bill, or it can't be read well enough to compare.",
+            },
+        ),
     },
 }
 
@@ -325,6 +335,8 @@ SEAL = ("weighbridge_seal", "weighbridge_name")
 # The bill questions asked only on a Verra project trip: the material, and the stamp.
 VERRA = ("material", *SEAL)
 OUR_COMPANY = "Green Worms Eco Solutions LLP, West Hill, Calicut"
+# The bill question asked only when the weighbridge was entered (the verifier: gw_sales' claims.weighbridge.name).
+WEIGHBRIDGE = ("weighbridge_entered",)
 
 # Which readings to report for each slot, as (key, label, [question ids joined by the separator], separator).
 REPORT = {
@@ -347,22 +359,26 @@ REPORT = {
 }
 
 
-def questions_for(slot: str, quantity: str | None, place: bool = False, verra: bool = False) -> dict:
+def questions_for(slot: str, quantity: str | None, place: bool = False, verra: bool = False,
+                  weighbridge: bool = False) -> dict:
     """The questions asked about one image: the net weight only when a quantity was typed, where
     the photo was taken only with `place` (an unloading photo, when the plant's location is given),
-    and the material and the weighbridge's stamp only with `verra` (a bill of a Verra project trip).
+    the material and the weighbridge's stamp only with `verra` (a bill of a Verra project trip), and whether the
+    bill is from the weighbridge entered only with `weighbridge`.
     """
     return {q: v for q, v in QUESTIONS[slot].items()
-            if (quantity or q != "net_weight") and (place or q not in PLACE) and (verra or q not in VERRA)}
+            if (quantity or q != "net_weight") and (place or q not in PLACE) and (verra or q not in VERRA)
+            and (weighbridge or q not in WEIGHBRIDGE)}
 
 
-def question_version(slot: str, place: bool = False, verra: bool = False) -> str:
+def question_version(slot: str, place: bool = False, verra: bool = False, weighbridge: bool = False) -> str:
     """Changes whenever a question changes, so saved answers from older questions aren't reused.
 
-    The place and Verra questions only count with `place` and `verra`, so adding them kept the answers
-    saved before. With the Verra questions, our company's name counts too, as it is sent with them.
+    The place, Verra and weighbridge questions only count with `place`, `verra` and `weighbridge`, so adding
+    them kept the answers saved before. With the Verra questions, our company's name counts too, as it is sent with them.
     """
-    asked = {q: v for q, v in QUESTIONS[slot].items() if (place or q not in PLACE) and (verra or q not in VERRA)}
+    asked = {q: v for q, v in QUESTIONS[slot].items()
+             if (place or q not in PLACE) and (verra or q not in VERRA) and (weighbridge or q not in WEIGHBRIDGE)}
     if place:  # and how the line is found and picked from
         asked |= {"line": LINE, "pick": pick("{axis}", "{labels}", ["{start}", "{other}"])}
     if slot == "bill":  # and how the slip is found and cut out

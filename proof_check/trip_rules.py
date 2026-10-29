@@ -125,7 +125,7 @@ PART_OF = {
     # The verifier, from what was entered in gw_sales: every collection log has a photo, every collection photo was
     # taken on its pickup day, no unloading photo long after the end time, and the collections before the arrival.
     "collection_has_photos": "docs", "collection_photo_date": "real", "unloading_too_late": "real",
-    "disposal_after_collections": "docs",
+    "disposal_after_collections": "docs", "weighbridge_matches": "docs", "collection_point": "real",
 }
 
 
@@ -446,7 +446,16 @@ def chance_away(answers: dict[str, dict], plant: tuple[float, float], radius: fl
 
 
 def plant_check(results: list[dict], plant: tuple[float, float], limits: Limits) -> dict:
-    """At least one unloading photo stamped within `plant_radius` of the plant; any stamped farther is a problem.
+    """At least one unloading photo stamped within `plant_radius` of the plant; any stamped farther is a problem
+    (`near_check`)."""
+    return near_check("unloading", "unloading_plant", "At the plant", results, plant, limits.plant_radius,
+                      "the plant", "unloading")
+
+
+def near_check(group: str, key: str, label: str, results: list[dict], point: tuple[float, float], radius: float,
+               point_name: str, doing: str) -> dict:
+    """At least one of the photos in `results` stamped within `radius` of `point`; any stamped farther is a problem.
+    `point_name` names the point in the details ("the plant") and `doing` what happens there ("unloading").
 
     Within the radius takes a position picked surely to four decimals (a square about 11 m across), so the
     distance is known to the metre. Away can also be shown by the two-decimal reading: when even the
@@ -455,7 +464,6 @@ def plant_check(results: list[dict], plant: tuple[float, float], limits: Limits)
     at the plant were read 11.40 or 11.14 for 11.44, 84% sure. Like the plate, one photo is enough to
     pass, and anything less sure asks a person.
     """
-    radius, label = limits.plant_radius, "At the plant"
     near, away, unsure, unread = [], [], [], []  # near and away: (result, detail, certainty, metres, to four decimals)
     for r in results:
         p = next((x for x in r["readings"] if x["key"] == "position"), None)
@@ -463,41 +471,41 @@ def plant_check(results: list[dict], plant: tuple[float, float], limits: Limits)
             unread.append(r)
             continue
         if not p["missing"] and p["value"] != p["coarse"]["value"] and p["min_confidence"] >= CONFIDENT:
-            m = from_square(p["value"], plant)
-            (near if m <= radius else away).append((r, f"at {p['value']}, {distance(m)} from the plant", p["min_confidence"], m, True))
+            m = from_square(p["value"], point)
+            (near if m <= radius else away).append((r, f"at {p['value']}, {distance(m)} from {point_name}", p["min_confidence"], m, True))
             continue
         c = p["coarse"]
         if not c["missing"] and c["min_confidence"] >= CONFIDENT:
-            if (m := from_square(c["value"], plant)) > radius:
-                away.append((r, f"at {c['value']}, at least {distance(m)} from the plant", c["min_confidence"], m, False))
+            if (m := from_square(c["value"], point)) > radius:
+                away.append((r, f"at {c['value']}, at least {distance(m)} from {point_name}", c["min_confidence"], m, False))
                 continue
-        elif (no := chance_away(r["answers"], plant, radius)) >= YES:
+        elif (no := chance_away(r["answers"], point, radius)) >= YES:
             read = f"read as {c['value']}" if c["value"] else "partly read"
-            away.append((r, f"away from the plant ({no:.0%} likely, {read})", no, None, False))
+            away.append((r, f"away from {point_name} ({no:.0%} likely, {read})", no, None, False))
             continue
         (unread if c["missing"] else unsure).append(r)
     closest = min(near, key=lambda x: x[3], default=None)
     if away and (any(x[4] for x in away) or not near):
         r, detail, c, _, _ = next((x for x in away if x[4]), away[0])
-        return check("unloading", "unloading_plant", label, "fail",
-                     f"{r['name']} is stamped {detail}, but unloading must be within {distance(radius)} of it.", c,
+        return check(group, key, label, "fail",
+                     f"{r['name']} is stamped {detail}, but {doing} must be within {distance(radius)} of it.", c,
                      [r["name"]])
     if away:
         (r, detail, _, _, _), (n, there, c, _, _) = away[0], closest
-        return check("unloading", "unloading_plant", label, "review",
+        return check(group, key, label, "review",
                      f"The photos disagree: {r['name']} seems stamped {detail}, but {n['name']} is {there}. "
                      "Check both GPS stamps.", c, [r["name"], n["name"]])
     if near:
         r, detail, c, _, _ = closest
-        return check("unloading", "unloading_plant", label, "pass",
+        return check(group, key, label, "pass",
                      f"{len(near)} of {len(results)} stamped within {distance(radius)}: {r['name']} {detail}", c)
     if unsure:
-        return check("unloading", "unloading_plant", label, "review",
+        return check(group, key, label, "review",
                      f"The position on the GPS stamp of {names(unsure)} couldn't be read surely enough to tell if "
-                     f"unloading was within {distance(radius)} of the plant. Check the Lat/Long line.", images=named(unsure))
-    return check("unloading", "unloading_plant", label, "review",
+                     f"{doing} was within {distance(radius)} of {point_name}. Check the Lat/Long line.", images=named(unsure))
+    return check(group, key, label, "review",
                  f"No position could be read on the GPS stamp of {names(unread)}. Check the Lat/Long line places "
-                 f"unloading within {distance(radius)} of the plant.", images=named(unread))
+                 f"{doing} within {distance(radius)} of {point_name}.", images=named(unread))
 
 
 def final_slip(bills: list[dict]) -> dict | None:
@@ -559,15 +567,17 @@ def verra_checks(final: dict | None) -> list[dict]:
     return [material, *seal_checks(final)]
 
 
-def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, verra: bool = False) -> list[dict]:
+def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, verra: bool = False,
+                weighbridge: str | None = None) -> list[dict]:
     """A weighbridge slip, the final slip, the vehicle number on every slip, the final slip's net weight and labels,
-    and for a Verra project trip, its material and stamp.
+    for a Verra project trip, its material and stamp, and with `weighbridge`, that it is from that weighbridge.
     """
     if not bills:
         return [check("bill", "bill_missing", "Weigh bills", "review", "No weigh bills added.", cause="bill_missing"),
                 check("bill", "bill_number", f"Bills match {vehicle_number}", "review",
                       f"No weigh bills to compare with {vehicle_number}.", cause="bill_missing"),
-                *(verra_checks(None) if verra else [])]
+                *(verra_checks(None) if verra else []),
+                *([weighbridge_check(None, weighbridge, cause="bill_missing")] if weighbridge else [])]
     slips = [b for b in bills if b["answers"]["weigh_bill"]["yes"] >= 0.5]
     ignored = [b for b in bills if b not in slips]
     note = f" (ignored as not a slip: {names(ignored)})" if ignored else ""
@@ -624,7 +634,32 @@ def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, ve
             and final["answers"]["gross_vs_tare"]["choice"] != NOT_SHOWN:
         checks.append(choice_check("bill", "gross_vs_tare", "gross_vs_tare", final["answers"]["gross_vs_tare"],
                                    vehicle_number, quantity, final))
+    if weighbridge:
+        checks.append(weighbridge_check(final, weighbridge))
     return checks + (verra_checks(final) if verra else [])
+
+
+def weighbridge_check(final: dict | None, weighbridge: str, cause: str = "no_final") -> dict:
+    """The final slip is from the weighbridge entered: a different one is a problem, unsure asks a person."""
+    label = f"Slip from {weighbridge}"
+    if not final:
+        what = "No weigh bills" if cause == "bill_missing" else "No final slip"
+        return check("bill", "weighbridge_matches", label, "review",
+                     f"{what} to compare with the weighbridge entered, {weighbridge}.", cause=cause)
+    answer = final["answers"].get("weighbridge_entered")
+    if answer is None:  # answers saved before the question was asked
+        return check("bill", "weighbridge_matches", label, "review",
+                     f"{final['name']} wasn't asked about the weighbridge. Check it is from {weighbridge}.", images=[final["name"]])
+    detail = {"same": f"{final['name']} is from {weighbridge}",
+              "different": f"{final['name']} is from another weighbridge than {weighbridge}, the one entered. Check the "
+                           "weighbridge entered, or the slip.",
+              NOT_SHOWN: f"No weighbridge name could be read on {final['name']}. Check it is from {weighbridge}."}[answer["choice"]]
+    status = {"same": "pass", "different": "fail", NOT_SHOWN: "review"}[answer["choice"]]
+    if answer["confidence"] < CONFIDENT:
+        status, detail = "review", unsure(detail, answer["confidence"]).split(". Check")[0] + \
+            f". Compare the slip's heading with {weighbridge}."
+    return check("bill", "weighbridge_matches", label, status, detail, answer["confidence"],
+                 [final["name"]] if status != "pass" else [])
 
 
 def photo_moments(results: list[dict]) -> list[tuple[dict, dict | None]]:
@@ -773,7 +808,7 @@ def same_day(results: list[dict], w: dict) -> dict | None:
 
 def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
                 limits: Limits = Limits(), plant: tuple[float, float] | None = None,
-                verra: bool = False) -> tuple[list[dict], dict | None]:
+                verra: bool = False, weighbridge: str | None = None) -> tuple[list[dict], dict | None]:
     """Every check for a trip, and the weighings they used (None if the times couldn't be read).
 
     Tare first, the trip runs tare -> loading -> gross -> unloading: the weighings must be at least
@@ -782,14 +817,15 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     `min_gap_gross_first` apart, loading photos fall before gross and unloading photos between them.
     Photos may be off by `clock_slack`, and unloading must be on the same day as the gross weighing.
     With `plant`, unloading must be stamped within `plant_radius` of it. With `verra` (a Verra project
-    trip), the final slip must have a material entered and carry the weighbridge's stamp.
+    trip), the final slip must have a material entered and carry the weighbridge's stamp. With `weighbridge`
+    (the one entered), the final slip must be from it.
     """
     checks = photo_checks("loading", images.get("loading", []), vehicle_number)
     checks += photo_checks("unloading", images.get("unloading", []), vehicle_number)
     if plant and images.get("unloading"):
         checks.append(plant_check(images["unloading"], plant, limits))
     bills = images.get("bill", [])
-    checks += bill_checks(bills, vehicle_number, quantity, verra)
+    checks += bill_checks(bills, vehicle_number, quantity, verra, weighbridge)
 
     final = final_slip(bills)
     w = weighings(final, first_slip(bills)) if final else None

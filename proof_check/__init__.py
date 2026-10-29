@@ -75,7 +75,7 @@ from proof_check.questions import (
     NOT_SHOWN, SLOTS, options, orientation, HOURS, MINUTES, DAYS, MONTHS, TO_24H, STAMP, NO_STAMP_TIME,
     NO_STAMP_DATE, GROSS, TARE, TIME_IN, TIME_OUT, PRINTED, NOT_CAMERA, NO_BILL_TIME, NO_BILL_DATE, SAME_NUMBER,
     bill_time, coordinate, BOX_MODEL, LINE, PICKS, pick, starts_of, ROTATION, QUESTIONS, PLACE, SEAL, VERRA,
-    OUR_COMPANY, REPORT, questions_for, question_version, SLIP
+    OUR_COMPANY, WEIGHBRIDGE, REPORT, questions_for, question_version, SLIP
 )
 from proof_check.images import (
     MIN_SIDE, MAX_SIDE, ROLES, SLOT_OF, ROLE_TITLES, IMAGE_TYPES, fit, Upload, role_of, read_trip_folder, load_bytes,
@@ -85,8 +85,9 @@ from proof_check.trip_rules import (
     CONFIDENT, YES, NO, NOUL_THRESHOLDS, Limits, LIMIT_NAMES, LIMIT_UNITS, NOUL_CHECKS, CHOICE_CHECKS, FINAL_ONLY,
     GROUPS, PARTS, PART_OF, readings_for, position, to_24h, same_hour, lower_first, unsure, noul_status, checks_for,
     YEAR, moment, minutes_between, duration, show, weighings, first_slip, check, names, named, plural, EACH_PHOTO,
-    each_photo, plate_check, photo_checks, metres_between, distance, from_square, chance_away, plant_check,
-    final_slip, LOOK_FOR, choice_check, seal_checks, verra_checks, bill_checks, photo_moments, busy_time,
+    each_photo, plate_check, photo_checks, metres_between, distance, from_square, chance_away, plant_check, near_check,
+    final_slip, LOOK_FOR, choice_check, seal_checks, verra_checks, bill_checks, weighbridge_check, photo_moments,
+    busy_time,
     overlap_minutes, photo_window,
     photo_timing, same_day, trip_checks, short_trip, and_list, reuse_check, overlap_checks
 )
