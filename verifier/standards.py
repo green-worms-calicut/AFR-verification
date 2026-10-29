@@ -7,7 +7,7 @@ the rules of its own day, also when it is edited later. Results name the standar
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from check_proof import Limits
+from proof_check import Limits
 
 IST = timezone(timedelta(hours=5, minutes=30), "IST")  # the field team's time; gw_sales sends UTC
 # Jev versions, pinned so answers don't change under us when an alias moves; upgrade on purpose after testing.

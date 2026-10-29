@@ -18,10 +18,10 @@ from procrastinate import exceptions
 from psycopg_pool import AsyncConnectionPool
 from typesafe_sdk import TypeSafeClient
 
-import check_proof
-from verifier import VERSION, checker, compare, signing, store
-from verifier.config import Settings
-from verifier.photos import Photos
+import proof_check
+from verifier import VERSION, compare_disposals, database, disposal_check, signatures
+from verifier.settings import Settings
+from verifier.s3_photos import Photos
 
 log = logging.getLogger("verifier")
 app = procrastinate.App(connector=procrastinate.PsycopgConnector())
@@ -59,8 +59,8 @@ async def running(settings: Settings, transport: httpx.AsyncBaseTransport | None
         async with (AsyncConnectionPool(settings.database_url, open=False) as pool,
                     httpx.AsyncClient(transport=transport, timeout=10) as http,
                     app.open_async(pool)):
-            jev = jev or TypeSafeClient(api_key=settings.typesafe_api_key, headers=check_proof.HEADERS,
-                                        timeout=check_proof.TIMEOUT)
+            jev = jev or TypeSafeClient(api_key=settings.typesafe_api_key, headers=proof_check.HEADERS,
+                                        timeout=proof_check.TIMEOUT)
             _service = Service(settings, pool, http, Photos(boto3.client("s3"), settings.s3_bucket), jev)
             try:
                 yield _service
@@ -121,7 +121,7 @@ async def queue(task: procrastinate.tasks.Task, request_id: str) -> None:
     """
     lock = f"{task.name}:{request_id}"
     options = {"queueing_lock": lock}
-    if task is verify and (vehicle := vehicle_of(await store.request(service().pool, request_id))):
+    if task is verify and (vehicle := vehicle_of(await database.request(service().pool, request_id))):
         options["lock"] = f"vehicle:{vehicle}"
     try:
         job_id = await task.configure(**options).defer_async(request_id=request_id)
@@ -130,23 +130,23 @@ async def queue(task: procrastinate.tasks.Task, request_id: str) -> None:
         if not waiting:  # it started meanwhile; the sweep catches it if it is lost
             return
         job_id = waiting[0].id
-    await store.note_job(service().pool, task.name, request_id, job_id)
+    await database.note_job(service().pool, task.name, request_id, job_id)
 
 
 def vehicle_of(request: dict | None) -> str | None:
     vehicle = ((request or {}).get("claims") or {}).get("vehicle") or {}
-    return check_proof.normalize_vehicle_number(str(vehicle.get("vehicleNumber") or ""))
+    return proof_check.normalize_vehicle_number(str(vehicle.get("vehicleNumber") or ""))
 
 
-async def others_of(request_id: str, request: dict, verra_project: str | None) -> list[compare.Other]:
+async def others_of(request_id: str, request: dict, verra_project: str | None) -> list[compare_disposals.Other]:
     """Note what the disposal is compared by, and fetch its vehicle's other disposals within a day."""
     svc = service()
-    d = checker.disposal(request, verra_project)
-    await store.note_disposal(svc.pool, request_id, d.vehicle_key, d.quantity_key, d.day)
+    d = disposal_check.disposal(request, verra_project)
+    await database.note_disposal(svc.pool, request_id, d.vehicle_key, d.quantity_key, d.day)
     if not d.vehicle_key:
         return []
-    rows = await store.others(svc.pool, request["subject"]["id"], d.vehicle_key, d.day)
-    return [compare.Other(*row) for row in rows]
+    rows = await database.others(svc.pool, request["subject"]["id"], d.vehicle_key, d.day)
+    return [compare_disposals.Other(*row) for row in rows]
 
 
 async def lost(job_id: int | None) -> bool:
@@ -164,12 +164,12 @@ async def lost(job_id: int | None) -> bool:
 async def verify(context, request_id: str) -> None:
     """Check a saved request and put its result in the outbox, then queue sending it."""
     svc = service()
-    if await store.result(svc.pool, request_id) is None:
-        request = await store.request(svc.pool, request_id)
+    if await database.result(svc.pool, request_id) is None:
+        request = await database.request(svc.pool, request_id)
         analysis = cost = None
         try:
             others = await others_of(request_id, request, svc.settings.verra_project)
-            checked = await asyncio.to_thread(checker.check, request, svc.photos.fetch, svc.jev,
+            checked = await asyncio.to_thread(disposal_check.check, request, svc.photos.fetch, svc.jev,
                                               svc.settings.verra_project, others)
             result = make_result(request, checked.outcome, checked.flags, standard=checked.standard,
                                  extractions=checked.extractions)
@@ -181,7 +181,7 @@ async def verify(context, request_id: str) -> None:
             log.exception("ALERT %s: checking kept failing, sending outcome error", request_id)
             result = make_result(request, "error", error={
                 "code": type(error).__name__, "message": "The verifier could not check this disposal."})
-        await store.save_result(svc.pool, request_id, result, analysis, cost)
+        await database.save_result(svc.pool, request_id, result, analysis, cost)
         log.info("%s: %s with %d flag(s), $%.4f", request_id, result["outcome"], len(result["flags"]), cost or 0)
     await queue(send_result, request_id)
 
@@ -190,12 +190,12 @@ async def verify(context, request_id: str) -> None:
 async def send_result(context, request_id: str) -> None:
     """Post a result to its callbackUrl, signed; retried while gw_sales is unavailable, for up to 24 hours."""
     svc = service()
-    row = await store.result(svc.pool, request_id)
+    row = await database.result(svc.pool, request_id)
     if row is None or row["sent_at"] or row["gave_up_at"]:
         return
     body = json.dumps(row["body"], separators=(",", ":")).encode()
     headers = {"Content-Type": "application/json", "X-API-Key": svc.settings.api_key,
-               **signing.sign(body, svc.settings.callback_secret)}
+               **signatures.sign(body, svc.settings.callback_secret)}
     try:
         response = await svc.http.post(row["callback_url"], content=body, headers=headers)
     except httpx.TransportError as error:  # timeouts and refused connections
@@ -203,20 +203,20 @@ async def send_result(context, request_id: str) -> None:
     else:
         status, answer = response.status_code, response.text[:500]
     if status == 200:
-        await store.note_attempt(svc.pool, request_id, status, sent=True)
+        await database.note_attempt(svc.pool, request_id, status, sent=True)
         log.info("%s: result stored by gw_sales: %s", request_id, answer)
         return
     if status is None or status == 429 or status >= 500:
         error = Unavailable(f"gw_sales {answer if status is None else status}")
         if SEND_RETRY.gives_up(error, context.job):
-            await store.note_attempt(svc.pool, request_id, status, gave_up=f"still unavailable after 24 hours: {error}")
+            await database.note_attempt(svc.pool, request_id, status, gave_up=f"still unavailable after 24 hours: {error}")
             log.error("ALERT %s: gave up sending the result, %s", request_id, error)
         else:
-            await store.note_attempt(svc.pool, request_id, status)
+            await database.note_attempt(svc.pool, request_id, status)
             log.warning("%s: %s, will retry", request_id, error)
         raise error
     # 401/403 key or signature, 404 unknown request or disposal, 413 too large, 422 invalid: resending won't help.
-    await store.note_attempt(svc.pool, request_id, status, gave_up=f"gw_sales answered {status}: {answer}")
+    await database.note_attempt(svc.pool, request_id, status, gave_up=f"gw_sales answered {status}: {answer}")
     if status == 404:
         log.warning("%s: gw_sales doesn't know the request or disposal (404): %s", request_id, answer)
     else:
@@ -232,7 +232,7 @@ async def sweep(timestamp: int) -> None:
         log.warning("%s: %s job %s stalled, retrying", job.task_kwargs.get("request_id"), job.task_name, job.id)
         await app.job_manager.retry_job(job)
     tasks = {"verify": verify, "send_result": send_result}
-    for name, rows in (await store.waiting(svc.pool, datetime.now(UTC) - LOST_AFTER)).items():
+    for name, rows in (await database.waiting(svc.pool, datetime.now(UTC) - LOST_AFTER)).items():
         for request_id, job_id in rows:
             if await lost(job_id):
                 log.warning("%s: %s job %s lost, queueing it again", request_id, name, job_id)

@@ -12,8 +12,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from verifier import jobs, signing, store
-from verifier.config import Settings
+from verifier import database, signatures, tasks
+from verifier.settings import Settings
 
 log = logging.getLogger("verifier")
 EVENT = "disposal_log.verification_requested"
@@ -21,12 +21,12 @@ SCHEMA_VERSION = 1
 
 
 @asynccontextmanager
-async def lifespan(api: FastAPI):
-    async with jobs.running(Settings.from_env()):
+async def lifespan(app: FastAPI):
+    async with tasks.running(Settings.from_env()):
         yield
 
 
-api = FastAPI(title="Jev verifier", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="Jev verifier", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
 def problem(request: dict, headers, settings: Settings) -> str | None:
@@ -52,12 +52,12 @@ def problem(request: dict, headers, settings: Settings) -> str | None:
     return None
 
 
-@api.post("/v1/verifications")
+@app.post("/v1/verifications")
 async def receive(request: Request) -> JSONResponse:
-    svc = jobs.service()
+    svc = tasks.service()
     body = await request.body()  # the raw bytes are what was signed
     headers = request.headers
-    if not signing.verify(body, headers.get("x-gw-timestamp"), headers.get("x-gw-signature"), svc.settings.webhook_secret):
+    if not signatures.verify(body, headers.get("x-gw-timestamp"), headers.get("x-gw-signature"), svc.settings.webhook_secret):
         log.warning("refused a request (%s): bad or expired signature", headers.get("x-gw-delivery"))
         return JSONResponse({"error": "bad or expired signature"}, status_code=401)
     try:
@@ -70,10 +70,10 @@ async def receive(request: Request) -> JSONResponse:
         log.warning("refused a request (%s): %s", headers.get("x-gw-delivery"), why)
         return JSONResponse({"error": why}, status_code=400)
     request_id = payload["requestId"]
-    new = await store.save_request(svc.pool, payload)
+    new = await database.save_request(svc.pool, payload)
     if new:
         try:
-            await jobs.queue(jobs.verify, request_id)
+            await tasks.queue(tasks.verify, request_id)
         except Exception:  # saved, so the sweep queues it
             log.exception("%s: saved but not queued", request_id)
     log.info("%s: %s disposal %s (%s)", request_id, "received" if new else "already had", payload["subject"]["id"],
@@ -81,10 +81,10 @@ async def receive(request: Request) -> JSONResponse:
     return JSONResponse({"accepted": True, "duplicate": not new}, status_code=202)
 
 
-@api.get("/health")
+@app.get("/health")
 async def health() -> JSONResponse:
     try:
-        async with jobs.service().pool.connection() as conn:
+        async with tasks.service().pool.connection() as conn:
             await conn.execute("SELECT 1")
     except Exception as error:
         log.error("ALERT health: database unreachable: %r", error)

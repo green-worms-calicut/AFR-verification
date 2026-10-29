@@ -11,7 +11,7 @@ from pathlib import Path
 
 from psycopg_pool import AsyncConnectionPool
 
-from verifier import jobs
+from verifier import tasks
 
 log = logging.getLogger("verifier")
 OURS = Path(__file__).parent / "migrations"
@@ -19,14 +19,14 @@ LOCK = 7_291_301  # pg advisory lock: one migrate at a time
 
 
 def procrastinate_migrations() -> list[Path]:
-    return sorted(Path(jobs.app.schema_manager.get_migrations_path()).glob("*.sql"))
+    return sorted(Path(tasks.app.schema_manager.get_migrations_path()).glob("*.sql"))
 
 
 def our_migrations() -> list[Path]:
     return sorted(OURS.glob("[0-9][0-9][0-9]_*.sql"))
 
 
-async def migrate(pool: AsyncConnectionPool) -> list[str]:
+async def apply(pool: AsyncConnectionPool) -> list[str]:
     """Apply every migration not applied yet; returns their names."""
     applied_now = []
     async with pool.connection() as conn:
@@ -43,7 +43,7 @@ async def migrate(pool: AsyncConnectionPool) -> list[str]:
             theirs = [("procrastinate/" + p.name, p) for p in procrastinate_migrations()]
 
             if not installed:
-                await conn.execute(jobs.app.schema_manager.get_schema())
+                await conn.execute(tasks.app.schema_manager.get_schema())
                 for name, _ in theirs:
                     await conn.execute("INSERT INTO verifier_migration (name) VALUES (%s)", (name,))
                 await conn.commit()

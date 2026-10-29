@@ -1,11 +1,11 @@
-"""Local test page for check_proof.py: type a vehicle number, quantity and the plant's location, tick a Verra project trip, add a
+"""Local test page for proof_check.py: type a vehicle number, quantity and the plant's location, tick a Verra project trip, add a
 trip's loading photos, unloading photos and weigh bills (or load a trip folder from trips/), and see
 what Jev finds.
 
 The API key stays in this process; the browser only talks to this server.
 
 Usage:
-    .venv/bin/python app.py [--port 8765]   # then open the address it prints
+    .venv/bin/python -m tools.test_page.server [--port 8765]   # then open the address it prints
 """
 
 import argparse
@@ -22,25 +22,26 @@ from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
 from typesafe_sdk import TypeSafeClient, TypeSafeError
 
-import check_proof
-import run_trips
+import proof_check
+from tools import check_trip_folders
 
 HERE = Path(__file__).parent
+ROOT = HERE.parents[1]  # the project folder
 HOST, PORT = "127.0.0.1", 8765
-TRIPS = HERE / "trips"  # trip folders to load on the page, and to find images used again
+TRIPS = ROOT / "trips"  # trip folders to load on the page, and to find images used again
 MAX_BODY = 120 * 1024 * 1024  # a trip's phone photos and slips as base64 JSON are well under this
 MODELS = ("jev-latest", "jev-preview")
-PAGES = {"/": (HERE / "ui.html", "text/html; charset=utf-8")}
-_index: check_proof.ImageIndex | None = None
+PAGES = {"/": (HERE / "page.html", "text/html; charset=utf-8")}
+_index: proof_check.ImageIndex | None = None
 _index_lock = threading.Lock()
 
 
-def image_index() -> check_proof.ImageIndex | None:
+def image_index() -> proof_check.ImageIndex | None:
     """Fingerprints of every image under trips/, made once, or None if there is no trips/ folder."""
     global _index
     with _index_lock:
         if _index is None and TRIPS.is_dir():
-            _index = check_proof.ImageIndex.of_folders(TRIPS)
+            _index = proof_check.ImageIndex.of_folders(TRIPS)
         return _index
 
 
@@ -63,21 +64,21 @@ def trip_folder(trip_id: str) -> Path | None:
     folder = (TRIPS / trip_id).resolve()
     if not folder.is_relative_to(TRIPS.resolve()) or not folder.is_dir():
         return None
-    return folder if any(check_proof.role_of(p.name) for p in folder.iterdir()) else None
+    return folder if any(proof_check.role_of(p.name) for p in folder.iterdir()) else None
 
 
 def typed_for(folder: Path) -> tuple[dict | None, str]:
-    truth = run_trips.find_truth(folder.parent)
-    return run_trips.typed_for(folder, truth.get(folder.name))
+    truth = check_trip_folders.find_truth(folder.parent)
+    return check_trip_folders.typed_for(folder, truth.get(folder.name))
 
 
 def list_trips() -> list[dict]:
     if not TRIPS.is_dir():
         return []
     trips = []
-    for folder in run_trips.find_trips(TRIPS):
+    for folder in check_trip_folders.find_trips(TRIPS):
         typed, source = typed_for(folder)
-        counts = {role: len(u) for role, u in check_proof.read_trip_folder(folder).items()}
+        counts = {role: len(u) for role, u in proof_check.read_trip_folder(folder).items()}
         trips.append({"id": folder.relative_to(TRIPS).as_posix(), "name": folder.name, "counts": counts,
                       "vehicle_number": (typed or {}).get("vehicle_number"), "typed_from": source})
     return trips
@@ -94,8 +95,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/api/status":
-            self.send_json(200, {"key_set": bool(check_proof.api_key()), "key_help": check_proof.NO_KEY, "models": MODELS,
-                                 "limits": asdict(check_proof.Limits())})
+            self.send_json(200, {"key_set": bool(proof_check.api_key()), "key_help": proof_check.NO_KEY, "models": MODELS,
+                                 "limits": asdict(proof_check.Limits())})
             return
         if self.path == "/api/trips":
             self.send_json(200, list_trips())
@@ -107,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             typed, source = typed_for(folder)
             images = {role: [{"name": u.name, "data": file_url(u.data)} for u in uploads]
-                      for role, uploads in check_proof.read_trip_folder(folder).items()}
+                      for role, uploads in proof_check.read_trip_folder(folder).items()}
             self.send_json(200, {"id": folder.relative_to(TRIPS.resolve()).as_posix(), "images": images,
                                  "typed": typed or {}, "typed_from": source})
             return
@@ -135,24 +136,24 @@ class Handler(BaseHTTPRequestHandler):
             model = body.get("model", MODELS[0])
             if model not in MODELS:
                 raise ValueError(f"Unknown model {model!r}.")
-            number = check_proof.normalize_vehicle_number(body.get("vehicle_number", ""))
+            number = proof_check.normalize_vehicle_number(body.get("vehicle_number", ""))
             if not number:
                 self.send_json(400, {"error": "Type the vehicle number first: 4 to 12 letters and digits, such as KL05AF9341."})
                 return
             try:
-                quantity = check_proof.parse_quantity(body.get("quantity"))
-                plant = check_proof.parse_plant(body.get("plant"))
-                verra = check_proof.parse_switch(body.get("verra"), "verra")
-                limits = check_proof.parse_limits(body)
+                quantity = proof_check.parse_quantity(body.get("quantity"))
+                plant = proof_check.parse_plant(body.get("plant"))
+                verra = proof_check.parse_switch(body.get("verra"), "verra")
+                limits = proof_check.parse_limits(body)
             except ValueError as error:
                 self.send_json(400, {"error": str(error)})
                 return
-            uploads = {role: [] for role in check_proof.ROLES}
-            for role in check_proof.ROLES:
+            uploads = {role: [] for role in proof_check.ROLES}
+            for role in proof_check.ROLES:
                 for i, item in enumerate(body.get("images", {}).get(role) or []):
                     data = base64.b64decode(item["data"].split(",", 1)[-1])
-                    check_proof.load_bytes(data)  # fails early if it isn't an image
-                    uploads[role].append(check_proof.Upload(item.get("name") or f"{role}{i + 1}.jpg", data))
+                    proof_check.load_bytes(data)  # fails early if it isn't an image
+                    uploads[role].append(proof_check.Upload(item.get("name") or f"{role}{i + 1}.jpg", data))
             if not any(uploads.values()):
                 raise ValueError("Add the loading photos, unloading photos and weigh bills.")
             trip_id = body.get("trip_id") or None
@@ -163,12 +164,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": f"Bad request: {error}"})
             return
 
-        if not (key := check_proof.api_key()):
-            self.send_json(503, {"error": check_proof.NO_KEY})
+        if not (key := proof_check.api_key()):
+            self.send_json(503, {"error": proof_check.NO_KEY})
             return
         try:
-            with TypeSafeClient(api_key=key, headers=check_proof.HEADERS, timeout=check_proof.TIMEOUT) as client:
-                trip, sent = check_proof.analyze_trip(client, uploads, number, model, quantity, limits,
+            with TypeSafeClient(api_key=key, headers=proof_check.HEADERS, timeout=proof_check.TIMEOUT) as client:
+                trip, sent = proof_check.analyze_trip(client, uploads, number, model, quantity, limits,
                                                       image_index(), trip_id, plant=plant, verra=verra)
         except TypeSafeError as error:
             self.send_json(502, {"error": f"Jev returned an error: {error}"})
@@ -200,7 +201,7 @@ def main() -> None:
     args = parser.parse_args()
 
     server = serve(args.port)
-    print("API key: found" if check_proof.api_key() else check_proof.NO_KEY)
+    print("API key: found" if proof_check.api_key() else proof_check.NO_KEY)
     print(f"Open http://{HOST}:{server.server_port} in your browser. Press Ctrl+C to stop.", flush=True)
     try:
         server.serve_forever()

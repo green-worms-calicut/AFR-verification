@@ -38,7 +38,7 @@ Only Verra project trips are checked for these, and Jev is only asked about them
 
 **Across trips**
 - Was any image already used in another trip? The same file, or a look-alike copy.
-- Is the vehicle on two trips at the same time? This is checked when a whole day is run with `run_trips.py`.
+- Is the vehicle on two trips at the same time? This is checked when a whole day is run with `tools/check_trip_folders.py`.
 
 These checks fall into three parts, each with its own verdict:
 - **Trip is real:** did the trip happen as claimed? The plates in the photos and the number on every slip match the vehicle number you typed; the weighing order, the gap between weighings, the tare weighed on this trip and Time In with the tare; every photo's time; the photos and bills taken directly; unloading at the plant; and no image or trip a duplicate.
@@ -57,7 +57,7 @@ Jev is a "System One" model. A chat model writes text; Jev doesn't. You send it 
 
 **Jev can't read text out of an image.** It can't tell you "the plate says KL05AF9341". So the vehicle number you type goes into the request next to the image, and Jev judges whether the plate, or the bill, shows *that* number. Spaces, hyphens and line breaks are ignored; every letter and digit must match. The quantity works the same way: it goes into a bill's request as `quantity_kg`, and Jev judges whether the net weight is that many kilograms. Leading zeros are ignored, so a bill printing `00480 Kg` matches `480`.
 
-`check_proof.py` sends each image in its own request, all at the same time. Loading and unloading photos get the photo questions; weigh bills get the bill questions. An image added twice to a trip is asked about once.
+`proof_check` sends each image in its own request, all at the same time. Loading and unloading photos get the photo questions; weigh bills get the bill questions. An image added twice to a trip is asked about once.
 
 **Each photo:** 10 questions
 
@@ -108,21 +108,21 @@ Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`)
 
 A time like `03:09` is two questions: which hour and which minute. Code puts the parts together and does all the comparing. Jev is unreliable at comparing dates and times itself.
 
-Bills come in two layouts. Some print a date and time with each weight (the G W weighbridge); others print only a Time In and Time Out. Both sets of questions are asked at once, and `check_proof.weighings` uses whichever the final slip has. With Time In and Time Out, `first_weight` says which weight was taken first, by comparing the first weight with the second. That also reads slips that print First Wt and Second Wt with a date and time on each, such as Kuttiyadi's, which labels both times "Gross Wt. Date & Time". Some slips (Lakshmi's) print no time beside the weights, only one at the top of each slip: then the first slip (one weight) gives the first weighing's time and the final slip the second's, and `first_weight` says which was the tare. The surest layout that can be read is used. Only the day and month are read, so a trip that runs past midnight or across New Year still works.
+Bills come in two layouts. Some print a date and time with each weight (the G W weighbridge); others print only a Time In and Time Out. Both sets of questions are asked at once, and `proof_check.weighings` uses whichever the final slip has. With Time In and Time Out, `first_weight` says which weight was taken first, by comparing the first weight with the second. That also reads slips that print First Wt and Second Wt with a date and time on each, such as Kuttiyadi's, which labels both times "Gross Wt. Date & Time". Some slips (Lakshmi's) print no time beside the weights, only one at the top of each slip: then the first slip (one weight) gives the first weighing's time and the final slip the second's, and `first_weight` says which was the tare. The surest layout that can be read is used. Only the day and month are read, so a trip that runs past midnight or across New Year still works.
 
 Jev can lean towards the first option of a choice, so `same` is never listed first in the number, net weight and stamp questions.
 
-Jev can't read a stamp's words out either, so it compares the weighbridge's stamp with the name printed in the slip's own heading. Our company's name (`check_proof.OUR_COMPANY`, set once in the code) goes into the bill's request as `our_company`, so our own stamp isn't taken for the weighbridge's. The stamp and material questions (`check_proof.VERRA`) are only asked for a Verra project trip, so other trips don't pay for them. Whether the stamp is there and whose name it shows are asked apart, as one question for both was often unsure. The stamp passes only when it is surely there and its name surely matches the heading; an unsure name goes to a person (on 22 Oct, 2 of 3 genuine stamps had unsure names).
+Jev can't read a stamp's words out either, so it compares the weighbridge's stamp with the name printed in the slip's own heading. Our company's name (`proof_check.OUR_COMPANY`, set once in the code) goes into the bill's request as `our_company`, so our own stamp isn't taken for the weighbridge's. The stamp and material questions (`proof_check.VERRA`) are only asked for a Verra project trip, so other trips don't pay for them. Whether the stamp is there and whose name it shows are asked apart, as one question for both was often unsure. The stamp passes only when it is surely there and its name surely matches the heading; an unsure name goes to a person (on 22 Oct, 2 of 3 genuine stamps had unsure names).
 
 If Jev finds an image isn't upright with at least 0.5 confidence (`ROTATE`), it is rotated and asked again. That cut-off is lower than the others because a wrong turn costs little: one more request, and unsure answers that go to a person anyway. Before sending, each image has its camera rotation flag applied and is scaled so its longest side is 1568 px, the largest Jev accepts.
 
-**Each weigh bill is cut to its slip first.** A Box question (`check_proof.SLIP`, on Jev 1.14) finds the slip in the photo as uploaded, code cuts it out of the full-resolution photo with a little room around it, and the cut-out is turned upright and read. A slip photographed as a strip across a tall phone photo otherwise ends up in tiny print once scaled to 1568 px. On 21 final slips from 19 Oct (23 Oct test), times read on the cut-out were right 21 times and sure 15, against 20 and 13 on the whole photo; a Maliyekkal slip filling 19% of its photo went from wrong to right and 97% sure. On sideways photos the box takes the whole slip too, even when its confidence is low (0.32 on a Lakshmi sheet), so the cut is used whatever the confidence.
+**Each weigh bill is cut to its slip first.** A Box question (`proof_check.SLIP`, on Jev 1.14) finds the slip in the photo as uploaded, code cuts it out of the full-resolution photo with a little room around it, and the cut-out is turned upright and read. A slip photographed as a strip across a tall phone photo otherwise ends up in tiny print once scaled to 1568 px. On 21 final slips from 19 Oct (23 Oct test), times read on the cut-out were right 21 times and sure 15, against 20 and 13 on the whole photo; a Maliyekkal slip filling 19% of its photo went from wrong to right and 97% sure. On sideways photos the box takes the whole slip too, even when its confidence is low (0.32 on a Lakshmi sheet), so the cut is used whatever the confidence.
 
 The minute of a bill time is asked as "the two digits right after the hour", not the seconds: slips often print seconds (07:02:14), and Jev's second guess for the minute was often the seconds (09:46:54 was once read as 09:54).
 
 ### How the verdict is decided
 
-All of this is in code (`check_proof.trip_checks`, `decide_parts`, `verdict`), not in the questions. Which part each check is in is `check_proof.PART_OF`:
+All of this is in code (`proof_check.trip_checks`, `decide_parts`, `verdict`), not in the questions. Which part each check is in is `proof_check.PART_OF`:
 
 | Part | Check | Pass | Needs a person | Problem |
 |-|-|-|-|-|
@@ -140,7 +140,7 @@ All of this is in code (`check_proof.trip_checks`, `decide_parts`, `verdict`), n
 | Real | Unloading on the weighing day | every unloading photo dated the gross weighing's day | a stamp date unreadable or unsure | any on another day |
 | Real | At the plant (with `--plant`) | at least one unloading photo's stamp, picked surely to four decimals, places it within 500 m of the plant | no photo read surely to four decimals | any photo's stamp places it farther away: four decimals picked surely, or two read surely or at least 80% likely |
 | Real | Images not used in other trips | none seen in another trip | a look-alike copy | the same file |
-| Real | One trip at a time (`run_trips.py`) | – | – | the vehicle is on another trip at the same time |
+| Real | One trip at a time (`tools/check_trip_folders.py`) | – | – | the vehicle is on another trip at the same time |
 | Docs | Loading photos, unloading photos, weigh bills | added | none added | – |
 | Docs | Vehicle, GPS stamp | every photo of the kind: yes ≥ 0.8 | any photo unsure | any photo clearly fails |
 | Docs | Weighbridge slip, final slip | a final slip, clearly | no slip, or no clear final slip | – |
@@ -155,9 +155,9 @@ Each part is **Flagged: problem found** if any of its checks finds a problem, **
 
 Each flagged check gives its reason as a sentence a person can act on: what is wrong or unclear, in which image, and what to look at, such as "collection1.jpg was taken at 06:35, before the tare (empty) weighing at 06:53. Loading photos must come after it (5 min clock difference allowed)." An unsure answer says how sure Jev was ("Only 62% sure: …") and which value was unclear: the photo's stamp time, or the weighing times on the slip. Each check also names the images to look at (`images`), and checks flagged for the same reason share a `cause`: an unsure reading of the weighing times (`weigh_times`) also leaves the gap and every photo time unsure, and a missing kind of image (`loading_missing`, `bill_missing`) or final slip (`no_final`) leaves its other checks with nothing to read.
 
-The limits are `check_proof.Limits`: `min_gap_tare_first` (60), `min_gap_gross_first` (10), `clock_slack` (5) and `max_overnight_gap` (720), in minutes, and `plant_radius` (500), in metres. Each run can change them on the command line or in a trip's `trip.json`, and all but `max_overnight_gap` on the page.
+The limits are `proof_check.Limits`: `min_gap_tare_first` (60), `min_gap_gross_first` (10), `clock_slack` (5) and `max_overnight_gap` (720), in minutes, and `plant_radius` (500), in metres. Each run can change them on the command line or in a trip's `trip.json`, and all but `max_overnight_gap` on the page.
 
-The 0.8 and 0.2 thresholds (`CONFIDENT`, `YES`, `NO` in `check_proof.py`), and the 0.5 rotation cut-off (`ROTATE`), are placeholders. Choose real ones with `run_trips.py` and `evaluate.py` (below).
+The 0.8 and 0.2 thresholds (`CONFIDENT`, `YES`, `NO` in `proof_check/trip_rules.py`), and the 0.5 rotation cut-off (`ROTATE`), are placeholders. Choose real ones with `tools/check_trip_folders.py` and `tools/measure_accuracy.py` (below).
 
 ## Setup
 
@@ -191,7 +191,7 @@ It asks for a "Password": paste the key there. Nothing is shown as you type. To 
 secret-tool lookup service typesafe account api >/dev/null && echo saved
 ```
 
-`app.py`, `check_proof.py`, `run_trips.py` and `evaluate.py` read the key from the keyring when they need it, and hand it straight to the TypeSafe client. A `TYPESAFE_API_KEY` environment variable, if set, is used instead, which is handy on a server without a keyring.
+The test page, `proof_check`, and the trip-folder and accuracy tools read the key from the keyring when they need it, and hand it straight to the TypeSafe client. A `TYPESAFE_API_KEY` environment variable, if set, is used instead, which is handy on a server without a keyring.
 
 To replace the key, run the `store` command again. To remove it: `secret-tool clear service typesafe account api`.
 
@@ -217,7 +217,7 @@ trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773/
 ### Test page
 
 ```bash
-.venv/bin/python app.py
+.venv/bin/python -m tools.test_page.server
 ```
 
 Open the address it prints. It's `http://127.0.0.1:8765` unless that port is taken, in which case the app uses the next free one; choose a port with `--port`.
@@ -234,41 +234,41 @@ Each flagged part has its own **Accept** and **Reject**; **Undo** takes a decisi
 
 Images are compared with every image under `trips/`, so one already used in another trip is flagged. A trip loaded from `trips/` isn't compared with itself.
 
-Changing the number, the quantity, a limit or an image clears the result, so a verdict always matches what's on screen. The server only listens on your own computer (`127.0.0.1`). The API key stays in the `app.py` process and is never sent to the browser.
+Changing the number, the quantity, a limit or an image clears the result, so a verdict always matches what's on screen. The server only listens on your own computer (`127.0.0.1`). The API key stays in the server's process and is never sent to the browser.
 
 ### Command line
 
 ```bash
-.venv/bin/python check_proof.py KL57AB8815 --trip trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773 --quantity 1630
-.venv/bin/python check_proof.py KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg --bill slip1.jpg slip2.jpg \
+.venv/bin/python -m proof_check KL57AB8815 --trip trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773 --quantity 1630
+.venv/bin/python -m proof_check KL57AB8815 --loading c1.jpg c2.jpg --unloading u1.jpg u2.jpg --bill slip1.jpg slip2.jpg \
     --quantity 1630 --min-gap-tare-first 45 --min-gap-gross-first 15 --clock-slack 10 --others trips/   # this run's own limits, and flag reused images
-.venv/bin/python check_proof.py KL57AB8815 --trip … --plant "11.4404, 75.9420" --plant-radius 300   # unloaded at the plant?
-.venv/bin/python check_proof.py KL57AB8815 --trip … --verra   # a Verra project trip: material and weighbridge stamp checked
-.venv/bin/python check_proof.py KL57AB8815 --trip … --model jev-preview   # try Jev 1.14
+.venv/bin/python -m proof_check KL57AB8815 --trip … --plant "11.4404, 75.9420" --plant-radius 300   # unloaded at the plant?
+.venv/bin/python -m proof_check KL57AB8815 --trip … --verra   # a Verra project trip: material and weighbridge stamp checked
+.venv/bin/python -m proof_check KL57AB8815 --trip … --model jev-preview   # try Jev 1.14
 ```
 
 Prints each image's answers and readings, then the verdict, timeline and limits, and each part's verdict and flags.
 
-### Check a whole day: run_trips.py
+### Check a whole day: tools/check_trip_folders.py
 
 ```bash
-.venv/bin/python run_trips.py trips/inward-2026-10-19              # asks Jev about every trip, saves the answers in eval/
-.venv/bin/python run_trips.py trips/inward-2026-10-19 --cached     # re-checks with saved answers: free
-.venv/bin/python run_trips.py trips/inward-2026-10-19 --only 171773 171496 --json eval/two.json
-.venv/bin/python run_trips.py trips/inward-2026-10-19 --plant "11.4404, 75.9420"   # every trip without its own plant in trip.json
+.venv/bin/python -m tools.check_trip_folders trips/inward-2026-10-19              # asks Jev about every trip, saves the answers in eval/
+.venv/bin/python -m tools.check_trip_folders trips/inward-2026-10-19 --cached     # re-checks with saved answers: free
+.venv/bin/python -m tools.check_trip_folders trips/inward-2026-10-19 --only 171773 171496 --json eval/two.json
+.venv/bin/python -m tools.check_trip_folders trips/inward-2026-10-19 --plant "11.4404, 75.9420"   # every trip without its own plant in trip.json
 ```
 
 It prints a line per trip (its verdict, each part's, and its first flags), how many trips each part accepted, flagged or sent to a person, the totals, and, where `truth.jsonl` has hand-read values, how often Jev read each kind of value right, with every wrong reading. Saved answers are reused whenever the image, questions, typed values and model are the same, so after changing a rule or a threshold, `--cached` re-checks the whole day without asking Jev again.
 
-### Measure accuracy per image: evaluate.py
+### Measure accuracy per image: tools/measure_accuracy.py
 
-`evaluate.py` measures how often Jev is right on single labeled images, and shows what each confidence threshold would do. TypeSafe's guidance is to set thresholds per question, by the risk of acting on a wrong answer, from accuracy measured on your own data.
+`tools/measure_accuracy.py` measures how often Jev is right on single labeled images, and shows what each confidence threshold would do. TypeSafe's guidance is to set thresholds per question, by the risk of acting on a wrong answer, from accuracy measured on your own data.
 
-1. Copy `labels.example.csv` to `labels.csv`. Add one row per check: the image, its slot (`photo` or `bill`), the vehicle number typed in, for a bill the quantity typed in (kg), and the correct answers. `net_weight` can only be labeled on a row with a quantity. File paths are relative to the CSV. Leave a cell blank to skip it.
+1. Copy `examples/labels.example.csv` to `labels.csv`. Add one row per check: the image, its slot (`photo` or `bill`), the vehicle number typed in, for a bill the quantity typed in (kg), and the correct answers. `net_weight` can only be labeled on a row with a quantity. File paths are relative to the CSV. Leave a cell blank to skip it.
 
    **Add rows with a wrong vehicle number or quantity too**, labeled `different`. That's how you find out whether Jev catches a mismatch. Numbers one character off, like `9341` and `9314`, or `2570` and `2750`, are the hardest case; include plenty of them.
 
-2. Ask Jev about every row (`.venv/bin/python evaluate.py labels.csv`), then re-score the saved answers for free with `--cached`.
+2. Ask Jev about every row (`.venv/bin/python -m tools.measure_accuracy labels.csv`), then re-score the saved answers for free with `--cached`.
 
 The report shows accuracy per field, accuracy at each confidence level per group, what each candidate threshold would accept and how many of those would be wrong, and every mistake, most confident first.
 
@@ -276,9 +276,9 @@ The report shows accuracy per field, accuracy at each confidence level per group
 
 `verifier/` runs the check as the service gw_sales calls for every new or edited disposal, as the Disposal Verification Contract sets out. It answers each signed request with 202, queues it, and later posts a signed result to the request's `callbackUrl`. Requests and results are kept in Postgres. A result is saved before it is sent, and sending is retried for up to 24 hours while gw_sales is down. A job runs every minute to pick up stalled or lost jobs.
 
-Each disposal is checked as one trip with `check_proof`. Its weigh bills, collection photos (as loading photos) and unloading photos are read from S3 by `s3Key`, and checked against the vehicle number and net quantity entered, with the facility's location as the plant. A disposal is a Verra project trip when one of its collection logs' clients has the Verra project as its default project. A photo that isn't in S3, or isn't an image, asks a person (`image_unavailable`, docs part), and the rest are still checked. Checks flagged for the same reason become one flag, whose `code` is the check's key. Severity follows from the check's part: a problem with the trip being real is `high`, an unsure Verra check is `info`, everything else `recheck`. The result also carries `extractions` (each part's status, the weighing timeline, each image's readings) and the `standard` it was checked against. check_proof's whole result and what Jev cost are kept in our database.
+Each disposal is checked as one trip with `proof_check`. Its weigh bills, collection photos (as loading photos) and unloading photos are read from S3 by `s3Key`, and checked against the vehicle number and net quantity entered, with the facility's location as the plant. A disposal is a Verra project trip when one of its collection logs' clients has the Verra project as its default project. A photo that isn't in S3, or isn't an image, asks a person (`image_unavailable`, docs part), and the rest are still checked. Checks flagged for the same reason become one flag, whose `code` is the check's key. Severity follows from the check's part: a problem with the trip being real is `high`, an unsure Verra check is `info`, everything else `recheck`. The result also carries `extractions` (each part's status, the weighing timeline, each image's readings) and the `standard` it was checked against. proof_check's whole result and what Jev cost are kept in our database.
 
-Each disposal is also compared with what was kept for other disposals (`verifier/compare.py`). It only looks at its vehicle's other disposals with a trip within a day of its own date, each as last checked, and never at its own earlier requests (those are edits).
+Each disposal is also compared with what was kept for other disposals (`verifier/compare_disposals.py`). It only looks at its vehicle's other disposals with a trip within a day of its own date, each as last checked, and never at its own earlier requests (those are edits).
 - Images are compared only with disposals that also have the same quantity entered. An exact copy is a problem and a look-alike asks a person (`reused`).
 - A collection or unloading photo stamped within 5 minutes of one in such a disposal asks a person (`same_moment`). Photos already found to be copies are left to `reused`.
 - Weighings that overlap another disposal's are a problem, whatever its quantity (`overlap`).
@@ -286,7 +286,7 @@ Each disposal is also compared with what was kept for other disposals (`verifier
 
 These flags name the other disposals in `related`. Checks of one vehicle's disposals run one at a time, so two copies arriving together still see each other. An earlier disposal isn't flagged again when a later copy arrives: how to show it there is still to agree with gw_sales.
 
-The limits a trip is checked by are those of its own day (`verifier/standard.py`, `STANDARDS`). To change a limit, add an entry from the day it applies rather than editing one. The Jev versions are pinned there too (`MODEL`, `BOX_MODEL`, `jev-1.14.0`), so answers don't change when an alias moves. Only upgrade them after testing.
+The limits a trip is checked by are those of its own day (`verifier/standards.py`, `STANDARDS`). To change a limit, add an entry from the day it applies rather than editing one. The Jev versions are pinned there too (`MODEL`, `BOX_MODEL`, `jev-1.14.0`), so answers don't change when an alias moves. Only upgrade them after testing.
 
 A dev Postgres for it runs in Docker, on port 5433:
 
@@ -314,9 +314,9 @@ Log lines start with the requestId; one that needs a person starts with `ALERT`:
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, the material entered on a Verra project trip, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, a tare from another day, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), which part each check is in and how each part is decided, reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
+The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, the material entered on a Verra project trip, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, a tare from another day, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), which part each check is in and how each part is decided, reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `tools/measure_accuracy.py`, `tools/check_trip_folders.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
 
-`tests/test_verifier.py` covers the verifier service against a fake gw_sales: signatures, gw_sales' end-to-end cases (a signed result for a new disposal, an edit checked again, a repeated request checked once, wrong secrets refused), each answer gw_sales can give, retries for 24 hours, a checking error sent as `outcome: error`, and lost jobs picked up. It also covers disposals checked with `check_proof`: photos from a fake S3 (moto) answered by the offline tests' fake Jev, what is taken from a request, the standard by trip date, pinned models, unavailable photos, comparisons with other disposals, and how checks become flags. It also covers migrations. It needs the dev Postgres on port 5433 and makes a `verifier_test` database there. Without that Postgres, those tests are skipped.
+`tests/test_verifier.py` covers the verifier service against a fake gw_sales: signatures, gw_sales' end-to-end cases (a signed result for a new disposal, an edit checked again, a repeated request checked once, wrong secrets refused), each answer gw_sales can give, retries for 24 hours, a checking error sent as `outcome: error`, and lost jobs picked up. It also covers disposals checked with `proof_check`: photos from a fake S3 (moto) answered by the offline tests' fake Jev, what is taken from a request, the standard by trip date, pinned models, unavailable photos, comparisons with other disposals, and how checks become flags. It also covers migrations. It needs the dev Postgres on port 5433 and makes a `verifier_test` database there. Without that Postgres, those tests are skipped.
 
 ## Real trips
 
@@ -333,7 +333,7 @@ What the 19 Oct day showed, from the hand-read values:
 - Images were reused across trips: 171531 and 171566 are the same files; 171496 uses 171562's loading photos and 171531's unloading photos and bill; 171654 and 171655 share a bill and unloading photos.
 - About half the trips use the G W weighbridge (a time printed with each weight). The rest use Lakshmi, Bhavani and other slips, which print times or labels differently.
 
-What Jev did on that day (`run_trips.py`, `jev-latest`, about $0.10 for the 42 trips; saved answers re-check it for free):
+What Jev did on that day (`tools/check_trip_folders.py`, `jev-latest`, about $0.10 for the 42 trips; saved answers re-check it for free):
 - **Verdicts:** 11 accepted, 12 flagged as a problem, 19 to check. Every problem matches the hand-read values: the six trips with reused images (171496 also has loading photos taken before the tare weighing), the photos of a phone screen (171656), a loading photo without a GPS stamp (171538), 171493 (swapped gross and tare labels, 48 minutes between weighings), 171595 (gross and tare a second apart), and 171503 and 171535 (the same vehicle on both at once, tared a minute apart). No genuine trip was flagged as a problem.
 - **Readings against the hand-read values:** photo stamp times 175 of 175 right, vehicle number on bills 73 of 73, plates 164 of 176 (each miss was Jev saying "same" where a person couldn't read the plate), slip kind 67 of 76, bill tare times 31 of 35 and gross times 30 of 35.
 - **The 19 to check** are mostly slips whose layout isn't read yet (Lakshmi, Bhavani and others), and bills read below 0.8 confidence.
@@ -348,7 +348,7 @@ What Jev did on that day (`run_trips.py`, `jev-latest`, about $0.10 for the 42 t
 
 ## Cost
 
-Jev charges **$0.042 per million input tokens**; output is free. Images count as input tokens at the same rate: a photo or slip is about 10,000 tokens, so a trip of 6 images is about $0.003, and the whole real day about $0.15. Each bill takes one more request to find its slip (about 4,300 tokens). With `--plant`, each unloading photo takes two more requests (finding and reading its Lat/Long line), about $0.001 more per photo. The page, the command line and `run_trips.py` show the exact count and cost.
+Jev charges **$0.042 per million input tokens**; output is free. Images count as input tokens at the same rate: a photo or slip is about 10,000 tokens, so a trip of 6 images is about $0.003, and the whole real day about $0.15. Each bill takes one more request to find its slip (about 4,300 tokens). With `--plant`, each unloading photo takes two more requests (finding and reading its Lat/Long line), about $0.001 more per photo. The page, the command line and `tools/check_trip_folders.py` show the exact count and cost.
 
 | Model | Alias | Notes |
 |-|-|-|
@@ -363,31 +363,58 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 - **A stamp isn't proof either.** Rubber stamps can be copied. The check only shows a stamp with the right name is there.
 - **Jev only sees pixels.** The API strips all file metadata, so GPS data stored in the photo file never reaches it. "GPS stamp" here means the stamp is printed on the photo. The real day's photos had no GPS data in their files anyway.
 - **A GPS stamp isn't proof.** GPS camera apps can be set to any place and time. With the plant's location given, an unloading photo's printed position must be near it, but a faked stamp can show any position.
-- **Reused images** are found only among the trips under `trips/` (or the folder `run_trips.py` is given). A copy that was cropped or edited may not be found.
+- **Reused images** are found only among the trips under `trips/` (or the folder `tools/check_trip_folders.py` is given). A copy that was cropped or edited may not be found.
 - **Net weight in kilograms.** The quantity is compared with the final slip's net weight as a number of kilograms.
 - **Other weighbridge layouts.** A Lakshmi-style trip (one print time per slip) needs both its first and final slip uploaded; with only the final slip, its times can't be read and it goes to a person. A layout not seen yet may not be read either.
 - **Image size limits.** PNG or JPEG only (real HEIC isn't), 280–1568 px on each side after scaling, at most 16 MiB per file.
 
 ## Files
 
+```
+proof_check/         the checks (a Python package; run it with `python -m proof_check`)
+verifier/            the gw_sales verifier service (`python -m verifier`)
+  migrations/        its database changes, numbered, applied once each
+tools/               tools for working on the checks
+  test_page/         the local test page: server and page
+examples/            sample images, an example labels file, playground JSON
+experiments/         earlier experiments (reading a clock), kept for reference
+docs/                a longer illustrated guide
+tests/               offline tests, no API key needed
+trips/ eval/ mockups/   real trips, saved answers and reports, design mockups: not in git
+```
+
 | Path | What it is |
 |-|-|
-| `check_proof.py` | The checks: questions, image preparation, rotation, the trip checks and verdict, reused images. Also a command-line tool. |
-| `run_trips.py` | Checks every trip folder under a folder, flags a vehicle on two trips at once, and compares Jev with hand-read values. |
-| `app.py` | Local server for the test page. Uses only Python's standard library. |
-| `ui.html` | The test page. |
-| `evaluate.py` | Measures accuracy on labeled single images and shows what each confidence threshold would do. |
-| `labels.example.csv` | Example labels file for `evaluate.py`, for the sample images, including wrong-number rows. |
+| `proof_check/questions.py` | The questions Jev is asked about each image, and the Box questions that find a slip or a stamp's position line. |
+| `proof_check/images.py` | Reading, sizing and cutting images, the images of a trip folder, and fingerprints to find an image used again. |
+| `proof_check/trip_rules.py` | Every check and which part it is in, the limits, and the (placeholder) confidence thresholds. |
+| `proof_check/inputs.py` | What people type in, checked and made uniform: vehicle number, quantity, plant, limits, switches. |
+| `proof_check/verdict.py` | Each part's verdict and the trip's, and the trip's timeline. |
+| `proof_check/ask_jev.py` | The API key, asking Jev about each image (turning, cutting the slip, reading the position), saved answers, and checking a whole trip (`analyze_trip`). |
+| `proof_check/__main__.py` | The command line for one trip. |
+| `verifier/api.py` | Receives gw_sales' requests (`POST /v1/verifications`) and answers `GET /health`. |
+| `verifier/tasks.py` | The queue's jobs: check a request, post its result, recover stalled or lost jobs. |
+| `verifier/disposal_check.py` | Checks a disposal with `proof_check` and turns its checks into gw_sales flags. |
+| `verifier/compare_disposals.py` | Compares a disposal with the same vehicle's other disposals: reused images, the same moment, overlapping weighings. |
+| `verifier/database.py` | Requests, the outbox of results, and what disposals are compared by. |
+| `verifier/migrate.py`, `verifier/migrations/` | Applies the database changes (ours and the queue's), each once, in order. |
+| `verifier/s3_photos.py` | Reads the photos from S3. |
+| `verifier/standards.py` | The limits by trip date and the pinned Jev versions. |
+| `verifier/signatures.py` | Signs and checks requests and results (HMAC-SHA256). |
+| `verifier/settings.py` | The service's settings, from the environment. |
+| `tools/check_trip_folders.py` | Checks every trip folder under a folder, flags a vehicle on two trips at once, and compares Jev with hand-read values. |
+| `tools/measure_accuracy.py` | Measures accuracy on labeled single images and shows what each confidence threshold would do. |
+| `tools/test_page/server.py`, `page.html` | The local test page. The server uses only Python's standard library. |
+| `examples/labels.example.csv` | Example labels for `tools/measure_accuracy.py`, including wrong-number rows. |
+| `examples/images/` | A low-resolution truck photo with a GPS stamp and a weighment slip (photographed sideways), for the example labels and tests. |
+| `examples/playground/` | The questions and a state for each slot, as JSON, to paste into the [TypeSafe playground](https://console.typesafe.ai/playground). Generated from `proof_check.QUESTIONS`. |
+| `experiments/clock_reading/` | An earlier experiment: reading the time on a clock (`read_time.py`, `make_test_clock.py`, sample clocks). |
+| `docs/jev-guide.html` | A longer illustrated guide to Jev, pricing, images and the first version of this project. Open it in a browser. |
+| `tests/test_proof_check.py` | Offline tests of the checks, the tools and the test page, against a fake Jev API. |
+| `tests/test_verifier.py` | Offline tests of the verifier service against a fake gw_sales, a fake S3 and the fake Jev. |
 | `trips/` | Real trip folders and their hand-read `truth.jsonl`. Not in git. |
 | `eval/` | Saved Jev answers and run reports. Not in git. |
 | `mockups/` | The design mockup of the trip page, with real photos. Not in git. |
-| `tests/test_offline.py` | Offline tests against a fake Jev API. |
-| `verifier/` | The verifier service for gw_sales: `web.py` receives requests, `jobs.py` queues, checks and posts results, `store.py` keeps requests and the outbox, `schema.py` and `migrations/` make the tables, `checker.py` checks a request with `check_proof` and makes the flags, `compare.py` compares it with other disposals, `photos.py` reads S3, `standard.py` holds the limits by date and the pinned models, `signing.py` signs both ways. |
-| `tests/test_verifier.py` | Offline tests of the verifier service against a fake gw_sales. |
-| `playground/` | The questions and a state for each slot, as JSON, to paste into the [TypeSafe playground](https://console.typesafe.ai/playground). Generated from `check_proof.QUESTIONS`. |
-| `samples/photo.png`, `samples/bill.png` | A low-resolution truck photo with a GPS stamp, and a weighment slip (photographed sideways), used by `evaluate.py`'s example labels. |
-| `read_time.py`, `make_test_clock.py`, `samples/analog-*.jpg`, `samples/digital-*.jpg` | An earlier experiment: reading the time on a clock. |
-| `jev-guide.html` | A longer illustrated guide to Jev, pricing, images and the first version of this project. Open it in a browser. |
 
 ## Ideas not built yet
 

@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass, field
 
-import check_proof
+import proof_check
 
 ENV = {
     "database_url": "VERIFIER_DATABASE_URL",
@@ -34,7 +34,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         """Settings from the environment; the TypeSafe key from TYPESAFE_API_KEY or, on a laptop, the keyring."""
         missing = [name for name in ENV.values() if not os.environ.get(name)]
-        typesafe_api_key = check_proof.api_key()
+        typesafe_api_key = proof_check.api_key()
         if not typesafe_api_key:
             missing.append("TYPESAFE_API_KEY (or the keyring)")
         if missing:

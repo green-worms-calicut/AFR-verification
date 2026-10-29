@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 def dumps(value) -> str:
-    """JSON for check_proof's results, which hold the odd date."""
+    """JSON for proof_check's results, which hold the odd date."""
     return json.dumps(value, default=str)
 
 
@@ -42,7 +42,7 @@ async def request(pool: AsyncConnectionPool, request_id: str) -> dict | None:
 
 async def save_result(pool: AsyncConnectionPool, request_id: str, result: dict, analysis: dict | None = None,
                       cost_usd: float | None = None) -> None:
-    """Put a result in the outbox, with check_proof's whole `analysis` and what it cost; a result already there
+    """Put a result in the outbox, with proof_check's whole `analysis` and what it cost; a result already there
     for the request is kept."""
     async with pool.connection() as conn:
         await conn.execute("INSERT INTO verification_result (request_id, body, analysis, cost_usd) VALUES (%s, %s, %s, %s) "
@@ -100,7 +100,7 @@ async def note_disposal(pool: AsyncConnectionPool, request_id: str, vehicle: str
 
 async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str, day: date) -> list[tuple[int, str | None, dict]]:
     """The other disposals of `vehicle` with a trip within a day of `day`, each as last checked:
-    (disposal id, quantity, check_proof's result). A disposal's earlier requests are its own edits, never others."""
+    (disposal id, quantity, proof_check's result). A disposal's earlier requests are its own edits, never others."""
     async with pool.connection() as conn:
         cur = await conn.execute(
             """SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.quantity, r.analysis

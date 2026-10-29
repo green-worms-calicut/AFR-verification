@@ -1,7 +1,7 @@
 """Draw an analog and a digital clock at a known time, for testing read_time.py.
 
 Usage:
-    .venv/bin/python make_test_clock.py 10:42   # writes samples/analog-1042.jpg and samples/digital-1042.jpg
+    .venv/bin/python experiments/clock_reading/make_test_clock.py 10:42   # writes experiments/clock_reading/samples/analog-1042.jpg and .../digital-1042.jpg
 """
 
 import math

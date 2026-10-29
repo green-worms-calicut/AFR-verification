@@ -1,4 +1,4 @@
-"""A disposal request checked with check_proof, and its flags as gw_sales stores them.
+"""A disposal request checked with proof_check, and its flags as gw_sales stores them.
 
 The request's photos are fetched by s3Key and checked as one trip: weigh bills, collection photos (loading) and
 unloading photos, against the vehicle number and net quantity entered, with the facility's location as the
@@ -12,13 +12,13 @@ from datetime import date, datetime
 
 from typesafe_sdk import TypeSafeClient
 
-import check_proof
-from check_proof import Upload
-from verifier import compare, photos, standard
+import proof_check
+from proof_check import Upload
+from verifier import compare_disposals, s3_photos, standards
 
 log = logging.getLogger("verifier")
 
-# The contract's evidence categories as check_proof's kinds of image. gps_photo and verification are
+# The contract's evidence categories as proof_check's kinds of image. gps_photo and verification are
 # never sent; anything else is skipped and logged.
 KINDS = {"weighbill": "bill", "collection": "loading", "unloading": "unloading"}
 WORDS = {"bill": "weigh bill", "loading": "collection photo", "unloading": "unloading photo"}
@@ -35,7 +35,7 @@ MAX_MESSAGE = 2000  # the contract's limit
 
 @dataclass
 class Disposal:
-    """What check_proof needs from a request."""
+    """What proof_check needs from a request."""
 
     vehicle_number: str
     quantity: str | None  # net kg, as entered; None when entered in bags
@@ -53,7 +53,7 @@ class Checked:
     flags: list[dict]
     extractions: dict
     standard: dict
-    analysis: dict  # check_proof's whole result, kept by us
+    analysis: dict  # proof_check's whole result, kept by us
     cost_usd: float
 
 
@@ -66,7 +66,7 @@ def disposal(request: dict, verra_project: str | None = None) -> Disposal:
     quantity_key = None if claims.get("quantity") is None else f"{claims['quantity']} {unit}"
     if claims.get("quantity") is not None and unit in ("kg", "kgs"):
         try:
-            quantity = check_proof.parse_quantity(str(claims["quantity"]))
+            quantity = proof_check.parse_quantity(str(claims["quantity"]))
         except ValueError:  # 0 or not a number: nothing to match the slip's net weight against
             log.warning("%s: quantity %r not checked", request["requestId"], claims["quantity"])
     location = (reference.get("facility") or {}).get("location") or {}
@@ -82,9 +82,9 @@ def disposal(request: dict, verra_project: str | None = None) -> Disposal:
             continue
         if item.get("s3Key") not in evidence[kind]:
             evidence[kind].append(item["s3Key"])
-    day = (standard.ist_day(claims.get("arrivalTime")) or standard.ist_day((request.get("subject") or {}).get("createdAt"))
-           or datetime.now(standard.IST).date())
-    vehicle = check_proof.normalize_vehicle_number(typed)
+    day = (standards.ist_day(claims.get("arrivalTime")) or standards.ist_day((request.get("subject") or {}).get("createdAt"))
+           or datetime.now(standards.IST).date())
+    vehicle = proof_check.normalize_vehicle_number(typed)
     return Disposal(vehicle or typed.strip() or "(not entered)", quantity, plant,
                     bool(verra_project) and verra_project in projects, day, evidence, vehicle,
                     f"{quantity} kg" if quantity else quantity_key)
@@ -95,13 +95,13 @@ def unavailable_check(kind: str, found: list[tuple[str, str]], none_left: bool) 
     is left, it shares the missing kind's cause, so it leads one flag with the checks that leaves unsure."""
     detail = " ".join(f"The {WORDS[kind]} {key} {why}." for key, why in found)
     them = "it" if len(found) == 1 else "them"
-    return check_proof.check(kind, "image_unavailable", f"{WORDS[kind].capitalize()}s available", "review",
+    return proof_check.check(kind, "image_unavailable", f"{WORDS[kind].capitalize()}s available", "review",
                              f"{detail} Find {them} in gw_sales and add {them} again.", images=[key for key, _ in found],
                              cause=MISSING_KEY[kind] if none_left else None)
 
 
 def flags_of(checks: list[dict]) -> list[dict]:
-    """One flag per cause: checks flagged for the same reason (check_proof's `cause`) together, led by a problem
+    """One flag per cause: checks flagged for the same reason (proof_check's `cause`) together, led by a problem
     if there is one, naming the others it affects. Problems first, then by severity."""
     groups = []
     for c in checks:
@@ -123,12 +123,12 @@ def flag(group: list[dict]) -> dict:
     status = "fail" if any(c["status"] == "fail" for c in group) else "review"
     message = lead["detail"]
     if also:
-        message += " It also affects: " + check_proof.and_list([c["label"] for c in also]) + "."
+        message += " It also affects: " + proof_check.and_list([c["label"] for c in also]) + "."
     made = {"code": lead["key"], "severity": min((SEVERITY[c["part"], c["status"]] for c in group), key=RANK.get),
             "kind": KIND[status], "message": message[:MAX_MESSAGE],
             "evidence": list(dict.fromkeys(i for c in [lead, *also] for i in c["images"])),
             "checks": [c["key"] for c in [lead, *also]]}
-    if others := compare.related(x["id"] for c in group for x in c.get("related", [])):
+    if others := compare_disposals.related(x["id"] for c in group for x in c.get("related", [])):
         made["related"] = others
     sure = [c["certainty"] for c in group if c["certainty"] is not None]
     if sure:
@@ -151,21 +151,21 @@ def extractions(trip: dict, unavailable: list[str]) -> dict:
 
 
 def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeClient,
-          verra_project: str | None = None, others: list[compare.Other] = ()) -> Checked:
+          verra_project: str | None = None, others: list[compare_disposals.Other] = ()) -> Checked:
     """Check one request's disposal, and compare it with `others`: the same vehicle's other disposals within a day
     of its date (`store.others`). Jev or S3 failing raises, so the job retries."""
     d = disposal(request, verra_project)
-    std = standard.for_day(d.day)
+    std = standards.for_day(d.day)
     uploads, unavailable = {kind: [] for kind in WORDS}, []  # (kind, s3Key, why)
     for kind, keys in d.evidence.items():
         for key in keys:
             data = fetch(key)
-            if why := photos.problem(data):
+            if why := s3_photos.problem(data):
                 unavailable.append((kind, key, why))
             else:
                 uploads[kind].append(Upload(key, data))
-    trip, _ = check_proof.analyze_trip(client, uploads, d.vehicle_number, standard.MODEL, d.quantity, std.limits,
-                                       plant=d.plant, verra=d.verra, box_model=standard.BOX_MODEL)
+    trip, _ = proof_check.analyze_trip(client, uploads, d.vehicle_number, standards.MODEL, d.quantity, std.limits,
+                                       plant=d.plant, verra=d.verra, box_model=standards.BOX_MODEL)
     # A kind whose every image is unavailable wasn't left out: its missing check would say none were added.
     gone = {kind for kind, _, _ in unavailable if not uploads[kind]}
     by_kind = {}
@@ -174,8 +174,8 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
     # First, so each leads the flag of the checks its missing images leave unsure.
     checks = [unavailable_check(kind, found, kind in gone) for kind, found in by_kind.items()]
     checks += [c for c in trip["verdict"]["checks"] if c["key"] not in {MISSING_KEY[k] for k in gone}]
-    checks += compare.checks(d.vehicle_key, d.quantity_key, trip, list(others))
-    trip["verdict"] = {**trip["verdict"], **check_proof.decide_parts(checks)}
+    checks += compare_disposals.checks(d.vehicle_key, d.quantity_key, trip, list(others))
+    trip["verdict"] = {**trip["verdict"], **proof_check.decide_parts(checks)}
     for kind, key, why in unavailable:
         log.warning("%s: %s %s %s", request["requestId"], WORDS[kind], key, why)
     made = flags_of(checks)

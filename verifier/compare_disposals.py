@@ -1,4 +1,4 @@
-"""Checks across disposals, from what was kept when each was checked (its latest check_proof result).
+"""Checks across disposals, from what was kept when each was checked (its latest proof_check result).
 
 Only disposals of the same vehicle within a day of this trip's date are looked at, never this disposal itself
 (its earlier requests are edits). Images are compared only with those also of the same quantity: an exact copy
@@ -11,8 +11,8 @@ problem (`overlap`). Within the disposal, one file as both a collection and an u
 from dataclasses import dataclass
 from datetime import datetime
 
-import check_proof
-from check_proof import and_list, check
+import proof_check
+from proof_check import and_list, check
 
 SAME_MOMENT = 5  # minutes between photo stamps in two disposals that make them look like one moment
 PHOTOS = ("loading", "unloading")
@@ -24,7 +24,7 @@ class Other:
 
     disposal_id: int
     quantity: str | None
-    analysis: dict  # check_proof's result: {"images": {kind: [result]}, "verdict": ...}
+    analysis: dict  # proof_check's result: {"images": {kind: [result]}, "verdict": ...}
 
 
 def related(ids) -> list[dict]:
@@ -51,7 +51,7 @@ def same_file(images: dict[str, list[dict]]) -> dict:
 
 def reused(images: dict[str, list[dict]], others: list[Other]) -> tuple[dict, set[tuple[str, int]]]:
     """Images also in another disposal: the check, and the (this image, other disposal) pairs found."""
-    index, of = check_proof.ImageIndex(), {}
+    index, of = proof_check.ImageIndex(), {}
     for o in others:
         for results in o.analysis["images"].values():
             for r in results:
@@ -78,7 +78,7 @@ def reused(images: dict[str, list[dict]], others: list[Other]) -> tuple[dict, se
 
 def moments(images: dict[str, list[dict]]) -> list[tuple[dict, dict]]:
     """Each collection and unloading photo with its readable stamp time."""
-    return [(r, m) for kind in PHOTOS for r, m in check_proof.photo_moments(images.get(kind, [])) if m]
+    return [(r, m) for kind in PHOTOS for r, m in proof_check.photo_moments(images.get(kind, [])) if m]
 
 
 def same_moment(images: dict[str, list[dict]], others: list[Other], copies: set[tuple[str, int]]) -> dict:

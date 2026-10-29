@@ -1,4 +1,4 @@
-"""Run the verifier. Settings come from the environment (see config.ENV).
+"""Run the verifier. Settings come from the environment (see settings.ENV).
 
 Usage:
     .venv/bin/python -m verifier migrate                 # apply the queue's and our migrations not applied yet
@@ -12,19 +12,19 @@ import logging
 
 import uvicorn
 
-from verifier import jobs, schema
-from verifier.config import Settings
+from verifier import migrate, tasks
+from verifier.settings import Settings
 
 
-async def migrate(settings: Settings) -> None:
-    async with jobs.running(settings) as svc:
-        applied = await schema.migrate(svc.pool)
+async def run_migrations(settings: Settings) -> None:
+    async with tasks.running(settings) as svc:
+        applied = await migrate.apply(svc.pool)
     print("Applied: " + ", ".join(applied) if applied else "Up to date.")
 
 
-async def work(settings: Settings) -> None:
-    async with jobs.running(settings):
-        await jobs.app.run_worker_async()
+async def run_worker(settings: Settings) -> None:
+    async with tasks.running(settings):
+        await tasks.app.run_worker_async()
 
 
 def main() -> None:
@@ -35,10 +35,10 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if args.command == "web":
-        uvicorn.run("verifier.web:api", host=args.host, port=args.port)
+        uvicorn.run("verifier.api:app", host=args.host, port=args.port)
     else:
         settings = Settings.from_env()
-        asyncio.run(migrate(settings) if args.command == "migrate" else work(settings))
+        asyncio.run(run_migrations(settings) if args.command == "migrate" else run_worker(settings))
 
 
 if __name__ == "__main__":
