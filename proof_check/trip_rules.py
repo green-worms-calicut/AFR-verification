@@ -640,7 +640,8 @@ def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, ve
 
 
 def weighbridge_check(final: dict | None, weighbridge: str, cause: str = "no_final") -> dict:
-    """The final slip is from the weighbridge entered: a different one is a problem, unsure asks a person."""
+    """The final slip is from the weighbridge entered: a different one or unsure asks a person, since a different one may
+    only be the wrong weighbridge entered (30 Oct 2026)."""
     label = f"Slip from {weighbridge}"
     if not final:
         what = "No weigh bills" if cause == "bill_missing" else "No final slip"
@@ -654,7 +655,7 @@ def weighbridge_check(final: dict | None, weighbridge: str, cause: str = "no_fin
               "different": f"{final['name']} is from another weighbridge than {weighbridge}, the one entered. Check the "
                            "weighbridge entered, or the slip.",
               NOT_SHOWN: f"No weighbridge name could be read on {final['name']}. Check it is from {weighbridge}."}[answer["choice"]]
-    status = {"same": "pass", "different": "fail", NOT_SHOWN: "review"}[answer["choice"]]
+    status = "pass" if answer["choice"] == "same" else "review"
     if answer["confidence"] < CONFIDENT:
         status, detail = "review", unsure(detail, answer["confidence"]).split(". Check")[0] + \
             f". Compare the slip's heading with {weighbridge}."

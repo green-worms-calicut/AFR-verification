@@ -956,11 +956,11 @@ class WeighbridgeTests(unittest.TestCase):
         trip, _ = run_trip(weighbridge=self.NAME, bill=(FIRST, {**FINAL, "weighbridge_entered": answer}))
         return by_key(trip["verdict"]["checks"])["weighbridge_matches"]
 
-    def test_same_passes_different_is_a_problem_unsure_asks(self):
+    def test_same_passes_different_or_unsure_asks(self):
         same = self.outcome(("same", 0.9))
         self.assertEqual((same["status"], same["part"], same["detail"]), ("pass", "docs", f"weighbill2.jpg is from {self.NAME}"))
         different = self.outcome(("different", 0.9))
-        self.assertEqual(different["status"], "fail")
+        self.assertEqual(different["status"], "review", "even a sure mismatch may only be the wrong weighbridge entered")
         self.assertIn(f"from another weighbridge than {self.NAME}, the one entered", different["detail"])
         unsure = self.outcome(("same", 0.6))
         self.assertEqual(unsure["status"], "review")

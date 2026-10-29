@@ -362,7 +362,7 @@ class EntryCheckTests(unittest.TestCase):
         checked = self.checked(disposal(uploads, weighbridge={"id": 5, "name": "ABC Weighbridge"}), uploads)
         self.assertTrue(any(b"ABC Weighbridge" in sent(r) for r in self.jev.requests), "the name entered is sent")
         [flag] = [f for f in checked.flags if f["code"] == "weighbridge_matches"]
-        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "recheck"))
+        self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
         self.assertIn("from another weighbridge than ABC Weighbridge, the one entered", flag["message"])
 
     def test_no_weighbridge_entered_asks_nothing_about_it(self):
