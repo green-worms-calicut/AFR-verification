@@ -624,6 +624,7 @@ PART_OF = {
     "loading_vehicle": "docs", "unloading_vehicle": "docs", "loading_stamp": "docs", "unloading_stamp": "docs",
     "bill_found": "docs", "net_weight": "docs", "gross_vs_tare": "docs",
     "material": "verra", "weighbridge_seal": "verra",
+    "image_unavailable": "docs",  # the verifier: an image gw_sales listed that isn't in S3 or isn't an image
 }
 
 
@@ -1686,17 +1687,17 @@ def cut_slip(img: PILImage.Image, box: dict) -> PILImage.Image:
     return img.crop((left, top, max(right, left + 1), max(bottom, top + 1)))
 
 
-def find_slip(client: TypeSafeClient, img: PILImage.Image) -> tuple[dict, int]:
+def find_slip(client: TypeSafeClient, img: PILImage.Image, box_model: str = BOX_MODEL) -> tuple[dict, int]:
     """Where the slip is in a bill image, turned or not: its edges and confidence (a Box answer on BOX_MODEL),
     and the request's input tokens.
     """
     found = client.system_one(state={"bill": Image.from_pil(fit(img), format="jpeg")}, questions={"slip": SLIP},
-                              model=BOX_MODEL)
+                              model=box_model)
     box = found.answers["slip"]
     return {**box.box.model_dump(), "confidence": box.confidence}, found.usage.input_tokens or 0
 
 
-def read_line(client: TypeSafeClient, img: PILImage.Image, raw: dict, model: str) -> dict:
+def read_line(client: TypeSafeClient, img: PILImage.Image, raw: dict, model: str, box_model: str = BOX_MODEL) -> dict:
     """Add the position picked to four decimals (`lat_pick`, `long_pick`) to an unloading photo's answers.
 
     The stamp's Lat/Long line is found with a Box question (on BOX_MODEL), cut out of the upright
@@ -1708,7 +1709,7 @@ def read_line(client: TypeSafeClient, img: PILImage.Image, raw: dict, model: str
     if not lat or not long:
         return raw
     found = client.system_one(state={"photo": Image.from_pil(fit(img), format="jpeg")}, questions={"line": LINE},
-                              model=BOX_MODEL)
+                              model=box_model)
     box = found.answers["line"]
     line = Image.from_pil(fit(cut_line(img, box.box)), format="jpeg")
     questions = {"lat_pick": pick("latitude", "Lat or Latitude", lat), "long_pick": pick("longitude", "Long, Lng or Longitude", long)}
@@ -1721,14 +1722,14 @@ def read_line(client: TypeSafeClient, img: PILImage.Image, raw: dict, model: str
 
 def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehicle_number: str, model: str,
             quantity: str | None = None, cache: dict | None = None, key: str | None = None,
-            place: bool = False, verra: bool = False) -> tuple[dict, PILImage.Image]:
+            place: bool = False, verra: bool = False, box_model: str = BOX_MODEL) -> tuple[dict, PILImage.Image]:
     """Check one upright-by-EXIF RGB image in its slot. Returns the result and the image as finally sent.
 
     `quantity` is the typed quantity in kilograms, which a bill's net weight must match. With `place`,
     a photo's GPS stamp position is read too, to four decimals where it can be (`read_line`). With
     `verra`, a bill is asked about the material and the weighbridge's stamp. A bill is first cut to its slip (`find_slip`),
     then turned upright. With `cache` and `key`, saved answers are used instead of asking Jev, and new
-    answers are saved.
+    answers are saved. `box_model` answers the Box questions (the verifier pins it).
     """
     if cache is not None and key in cache:
         raw = cache[key]
@@ -1738,7 +1739,7 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
         return result, fit(img.rotate(raw["rotated"], expand=True))
     slip, tokens, requests = None, 0, 0
     if slot == "bill":
-        slip, tokens = find_slip(client, img)
+        slip, tokens = find_slip(client, img, box_model)
         img, requests = cut_slip(img, slip), 1
     response = ask(client, slot, img, vehicle_number, model, quantity, place, verra)
     tokens, requests, rotated = tokens + (response.usage.input_tokens or 0), requests + 1, 0
@@ -1758,7 +1759,7 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
            "answers": {q: summary(a) for q, a in response.answers.items()}, "input_tokens": tokens,
            **({"slip": slip} if slip else {})}
     if place:
-        raw = read_line(client, img, raw, model)
+        raw = read_line(client, img, raw, model, box_model)
     if cache is not None and key:
         cache[key] = raw
     return result_from(slot, raw, vehicle_number, quantity), fit(img)
@@ -1767,7 +1768,8 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
 def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]], vehicle_number: str, model: str,
                  quantity: str | None = None, limits: Limits = Limits(), index: ImageIndex | None = None,
                  trip: str | None = None, cache: dict | None = None,
-                 plant: tuple[float, float] | None = None, verra: bool = False) -> tuple[dict, dict]:
+                 plant: tuple[float, float] | None = None, verra: bool = False,
+                 box_model: str = BOX_MODEL) -> tuple[dict, dict]:
     """Check every image of a trip in parallel and decide.
 
     Returns ({"images": {role: [result]}, "verdict": ...}, {role: [image as sent]}). An image uploaded
@@ -1775,6 +1777,7 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
     `trip` itself) are flagged. `cache` holds saved answers (see `analyze`). With `plant`, the
     plant's (latitude, longitude), unloading photos are read for where they were taken and checked
     against it. With `verra` (a Verra project trip), bills are checked for the material and the weighbridge's stamp.
+    `box_model` answers the Box questions (finding the slip and the stamp's position line).
     """
     jobs = []  # (role, upload, image, fingerprints)
     for role in ROLES:
@@ -1792,7 +1795,7 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
         slot, place = SLOT_OF[role], prints["md5"] in placed
         asked = verra and slot == "bill"  # the Verra questions are only for bills
         return analyze(client, slot, img, vehicle_number, model, quantity, cache,
-                       answer_key(prints, slot, vehicle_number, quantity, model, place, asked), place, asked)
+                       answer_key(prints, slot, vehicle_number, quantity, model, place, asked), place, asked, box_model)
 
     unique = [j for j in jobs if first_of[j[3]["md5"]] == j[1].name]
     with ThreadPoolExecutor(max(1, min(8, len(unique)))) as pool:

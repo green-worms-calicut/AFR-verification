@@ -274,7 +274,11 @@ The report shows accuracy per field, accuracy at each confidence level per group
 
 ### Verifier service (gw_sales)
 
-`verifier/` runs the check as the service gw_sales calls for every new or edited disposal, as the Disposal Verification Contract sets out. It answers each signed request with 202, queues it, and later posts a signed result to the request's `callbackUrl`. Requests and results are kept in Postgres. A result is saved before it is sent, and sending is retried for up to 24 hours while gw_sales is down. A job runs every minute to pick up stalled or lost jobs. So far (build step 1) it only checks that each kind of image was added. The Jev checks come with the photos from S3.
+`verifier/` runs the check as the service gw_sales calls for every new or edited disposal, as the Disposal Verification Contract sets out. It answers each signed request with 202, queues it, and later posts a signed result to the request's `callbackUrl`. Requests and results are kept in Postgres. A result is saved before it is sent, and sending is retried for up to 24 hours while gw_sales is down. A job runs every minute to pick up stalled or lost jobs.
+
+Each disposal is checked as one trip with `check_proof`. Its weigh bills, collection photos (as loading photos) and unloading photos are read from S3 by `s3Key`, and checked against the vehicle number and net quantity entered, with the facility's location as the plant. A disposal is a Verra project trip when one of its collection logs' clients has the Verra project as its default project. A photo that isn't in S3, or isn't an image, asks a person (`image_unavailable`, docs part), and the rest are still checked. Checks flagged for the same reason become one flag, whose `code` is the check's key. Severity follows from the check's part: a problem with the trip being real is `high`, an unsure Verra check is `info`, everything else `recheck`. The result also carries `extractions` (each part's status, the weighing timeline, each image's readings) and the `standard` it was checked against. check_proof's whole result and what Jev cost are kept in our database.
+
+The limits a trip is checked by are those of its own day (`verifier/standard.py`, `STANDARDS`). To change a limit, add an entry from the day it applies rather than editing one. The Jev versions are pinned there too (`MODEL`, `BOX_MODEL`, `jev-1.14.0`), so answers don't change when an alias moves. Only upgrade them after testing.
 
 A dev Postgres for it runs in Docker, on port 5433:
 
@@ -284,7 +288,7 @@ docker run -d --name jev-verifier-db --restart unless-stopped -p 127.0.0.1:5433:
   -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18
 ```
 
-Settings come from the environment: `VERIFIER_DATABASE_URL` (`postgresql://verifier@127.0.0.1:5433/verifier` for the dev one), `VERIFIER_WEBHOOK_SECRET` (gw_sales signs its requests with it), `VERIFIER_CALLBACK_SECRET` (we sign our results with it), `VERIFIER_API_KEY` (sent as `X-API-Key` with our results) and `GW_SALES_URL` (results are only posted under it).
+Settings come from the environment: `VERIFIER_DATABASE_URL` (`postgresql://verifier@127.0.0.1:5433/verifier` for the dev one), `VERIFIER_WEBHOOK_SECRET` (gw_sales signs its requests with it), `VERIFIER_CALLBACK_SECRET` (we sign our results with it), `VERIFIER_API_KEY` (sent as `X-API-Key` with our results), `GW_SALES_URL` (results are only posted under it), `VERIFIER_S3_BUCKET` (the photos; AWS credentials and region come the usual AWS ways), the TypeSafe key (`TYPESAFE_API_KEY`, or on a laptop the keyring, as above), and optionally `VERIFIER_VERRA_PROJECT` (the project code that makes a disposal a Verra project trip; unset, no Verra checks).
 
 ```bash
 .venv/bin/python -m verifier migrate      # apply the queue's and our migrations not applied yet
@@ -304,7 +308,7 @@ Log lines start with the requestId; one that needs a person starts with `ALERT`:
 
 The tests use a fake Jev API that tells the test images apart by colour, so they need no key and cost nothing. They cover the API key, image sizing, what is sent with each image, rotation, each image's answers, every trip check (both bill layouts, first and final slips, ignored notes, the material entered on a Verra project trip, one clear plate per kind, every photo's timing with the clock slack, both weighing orders and their gaps, past midnight, a tare from another day, limits per run, missing images and quantity, unloading at or away from the plant given, unreadable or unsure positions, the weighbridge's stamp on a Verra project trip's final slip), which part each check is in and how each part is decided, reused images and look-alikes, a vehicle on two trips at once, saved answers, the question wording rules, `evaluate.py`, `run_trips.py`'s comparison, and the test page's server. The page itself was checked by hand in a browser.
 
-`tests/test_verifier.py` covers the verifier service against a fake gw_sales: signatures, gw_sales' end-to-end cases (a signed result for a new disposal, an edit checked again, a repeated request checked once, wrong secrets refused), each answer gw_sales can give, retries for 24 hours, a checking error sent as `outcome: error`, and lost jobs picked up. It needs the dev Postgres on port 5433 and makes a `verifier_test` database there. Without that Postgres, those tests are skipped.
+`tests/test_verifier.py` covers the verifier service against a fake gw_sales: signatures, gw_sales' end-to-end cases (a signed result for a new disposal, an edit checked again, a repeated request checked once, wrong secrets refused), each answer gw_sales can give, retries for 24 hours, a checking error sent as `outcome: error`, and lost jobs picked up. It also covers disposals checked with `check_proof`: photos from a fake S3 (moto) answered by the offline tests' fake Jev, what is taken from a request, the standard by trip date, pinned models, unavailable photos, and how checks become flags. It also covers migrations. It needs the dev Postgres on port 5433 and makes a `verifier_test` database there. Without that Postgres, those tests are skipped.
 
 ## Real trips
 
@@ -370,7 +374,7 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 | `eval/` | Saved Jev answers and run reports. Not in git. |
 | `mockups/` | The design mockup of the trip page, with real photos. Not in git. |
 | `tests/test_offline.py` | Offline tests against a fake Jev API. |
-| `verifier/` | The verifier service for gw_sales: `web.py` receives requests, `jobs.py` queues, checks and posts results, `store.py` keeps requests and the outbox, `schema.py` and `migrations/` make the tables, `checker.py` makes the flags, `signing.py` signs both ways. |
+| `verifier/` | The verifier service for gw_sales: `web.py` receives requests, `jobs.py` queues, checks and posts results, `store.py` keeps requests and the outbox, `schema.py` and `migrations/` make the tables, `checker.py` checks a request with `check_proof` and makes the flags, `photos.py` reads S3, `standard.py` holds the limits by date and the pinned models, `signing.py` signs both ways. |
 | `tests/test_verifier.py` | Offline tests of the verifier service against a fake gw_sales. |
 | `playground/` | The questions and a state for each slot, as JSON, to paste into the [TypeSafe playground](https://console.typesafe.ai/playground). Generated from `check_proof.QUESTIONS`. |
 | `samples/photo.png`, `samples/bill.png` | A low-resolution truck photo with a GPS stamp, and a weighment slip (photographed sideways), used by `evaluate.py`'s example labels. |

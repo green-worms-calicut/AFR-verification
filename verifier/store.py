@@ -5,11 +5,17 @@ A result is saved before it is sent, so a crash or a gw_sales outage never loses
 job last queued for it, so the sweep can tell when one went missing.
 """
 
+import json
 from datetime import datetime
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+
+def dumps(value) -> str:
+    """JSON for check_proof's results, which hold the odd date."""
+    return json.dumps(value, default=str)
+
 
 # The column holding the job last queued for a request, by task (see migrations/001).
 JOB_COLUMN = {"verify": ("verification_request", "verify_job"), "send_result": ("verification_result", "send_job")}
@@ -34,11 +40,14 @@ async def request(pool: AsyncConnectionPool, request_id: str) -> dict | None:
         return row[0] if row else None
 
 
-async def save_result(pool: AsyncConnectionPool, request_id: str, result: dict) -> None:
-    """Put a result in the outbox; a result already there for the request is kept."""
+async def save_result(pool: AsyncConnectionPool, request_id: str, result: dict, analysis: dict | None = None,
+                      cost_usd: float | None = None) -> None:
+    """Put a result in the outbox, with check_proof's whole `analysis` and what it cost; a result already there
+    for the request is kept."""
     async with pool.connection() as conn:
-        await conn.execute("INSERT INTO verification_result (request_id, body) VALUES (%s, %s) "
-                           "ON CONFLICT (request_id) DO NOTHING", (request_id, Jsonb(result)))
+        await conn.execute("INSERT INTO verification_result (request_id, body, analysis, cost_usd) VALUES (%s, %s, %s, %s) "
+                           "ON CONFLICT (request_id) DO NOTHING",
+                           (request_id, Jsonb(result), None if analysis is None else Jsonb(analysis, dumps=dumps), cost_usd))
 
 
 async def result(pool: AsyncConnectionPool, request_id: str) -> dict | None:

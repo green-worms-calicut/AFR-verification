@@ -11,13 +11,17 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+import boto3
 import httpx
 import procrastinate
 from procrastinate import exceptions
 from psycopg_pool import AsyncConnectionPool
+from typesafe_sdk import TypeSafeClient
 
+import check_proof
 from verifier import VERSION, checker, signing, store
 from verifier.config import Settings
+from verifier.photos import Photos
 
 log = logging.getLogger("verifier")
 app = procrastinate.App(connector=procrastinate.PsycopgConnector())
@@ -30,6 +34,8 @@ class Service:
     settings: Settings
     pool: AsyncConnectionPool
     http: httpx.AsyncClient
+    photos: Photos
+    jev: TypeSafeClient
 
 
 _service: Service | None = None
@@ -42,8 +48,9 @@ def service() -> Service:
 
 
 @asynccontextmanager
-async def running(settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
-    """Open the pool, the queue and the HTTP client (`transport` lets the tests stand in for gw_sales).
+async def running(settings: Settings, transport: httpx.AsyncBaseTransport | None = None, jev: TypeSafeClient | None = None):
+    """Open the pool, the queue, the HTTP client, S3 and Jev (`transport` and `jev` let the tests stand in for
+    gw_sales and Jev).
 
     The queue gets a fresh connector each time: one given a pool keeps it after closing.
     """
@@ -52,11 +59,14 @@ async def running(settings: Settings, transport: httpx.AsyncBaseTransport | None
         async with (AsyncConnectionPool(settings.database_url, open=False) as pool,
                     httpx.AsyncClient(transport=transport, timeout=10) as http,
                     app.open_async(pool)):
-            _service = Service(settings, pool, http)
+            jev = jev or TypeSafeClient(api_key=settings.typesafe_api_key, headers=check_proof.HEADERS,
+                                        timeout=check_proof.TIMEOUT)
+            _service = Service(settings, pool, http, Photos(boto3.client("s3"), settings.s3_bucket), jev)
             try:
                 yield _service
             finally:
                 _service = None
+                jev.close()
 
 
 class Unavailable(Exception):
@@ -91,13 +101,13 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def make_result(request: dict, outcome: str, flags: list[dict] = (), error: dict | None = None) -> dict:
-    """The body posted to the request's callbackUrl."""
+def make_result(request: dict, outcome: str, flags: list[dict] = (), error: dict | None = None, **extra) -> dict:
+    """The body posted to the request's callbackUrl; `extra` are optional fields such as standard and extractions."""
     subject = request["subject"]
     result = {"requestId": request["requestId"],
               "subject": {"type": subject["type"], "id": subject["id"], "dataVersion": subject["dataVersion"]},
               "outcome": outcome, "flags": list(flags), "verifier": {"name": NAME, "version": VERSION},
-              "completedAt": utc_now()}
+              "completedAt": utc_now(), **extra}
     if error:
         result["error"] = error
     return result
@@ -133,9 +143,12 @@ async def verify(context, request_id: str) -> None:
     svc = service()
     if await store.result(svc.pool, request_id) is None:
         request = await store.request(svc.pool, request_id)
+        analysis = cost = None
         try:
-            outcome, flags = await asyncio.to_thread(checker.check, request)
-            result = make_result(request, outcome, flags)
+            checked = await asyncio.to_thread(checker.check, request, svc.photos.fetch, svc.jev, svc.settings.verra_project)
+            result = make_result(request, checked.outcome, checked.flags, standard=checked.standard,
+                                 extractions=checked.extractions)
+            analysis, cost = checked.analysis, checked.cost_usd
         except Exception as error:
             if not VERIFY_RETRY.gives_up(error, context.job):
                 log.warning("%s: checking failed, will retry: %r", request_id, error)
@@ -143,8 +156,8 @@ async def verify(context, request_id: str) -> None:
             log.exception("ALERT %s: checking kept failing, sending outcome error", request_id)
             result = make_result(request, "error", error={
                 "code": type(error).__name__, "message": "The verifier could not check this disposal."})
-        await store.save_result(svc.pool, request_id, result)
-        log.info("%s: %s with %d flag(s)", request_id, result["outcome"], len(result["flags"]))
+        await store.save_result(svc.pool, request_id, result, analysis, cost)
+        log.info("%s: %s with %d flag(s), $%.4f", request_id, result["outcome"], len(result["flags"]), cost or 0)
     await queue(send_result, request_id)
 
 
