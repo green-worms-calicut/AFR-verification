@@ -122,6 +122,10 @@ PART_OF = {
     # The verifier: an image gw_sales listed that isn't in S3 or isn't an image; one file as both a collection and an
     # unloading photo; a photo stamped within minutes of one in another disposal of the same vehicle.
     "image_unavailable": "docs", "same_file": "real", "same_moment": "real",
+    # The verifier, from what was entered in gw_sales: every collection log has a photo, every collection photo was
+    # taken on its pickup day, no unloading photo long after the end time, and the collections before the arrival.
+    "collection_has_photos": "docs", "collection_photo_date": "real", "unloading_too_late": "real",
+    "disposal_after_collections": "docs",
 }
 
 

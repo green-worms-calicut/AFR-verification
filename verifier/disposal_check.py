@@ -5,6 +5,7 @@ unloading photos, against the vehicle number and net quantity entered, with the 
 plant. A photo that isn't in storage, or isn't an image, asks a person (`image_unavailable`, docs part).
 """
 
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from typesafe_sdk import TypeSafeClient
 
 import proof_check
 from proof_check import Upload
-from verifier import compare_disposals, s3_photos, standards
+from verifier import compare_disposals, entry_checks, s3_photos, standards
 
 log = logging.getLogger("verifier")
 
@@ -130,6 +131,8 @@ def flag(group: list[dict]) -> dict:
             "checks": [c["key"] for c in [lead, *also]]}
     if others := compare_disposals.related(x["id"] for c in group for x in c.get("related", [])):
         made["related"] = others
+    if len({json.dumps(c.get("target"), sort_keys=True) for c in group}) == 1 and lead.get("target"):
+        made["target"] = lead["target"]  # the collection log it is about, when every check in it is about the same one
     sure = [c["certainty"] for c in group if c["certainty"] is not None]
     if sure:
         made["confidence"] = round(min(sure), 3)
@@ -174,11 +177,14 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
     # First, so each leads the flag of the checks its missing images leave unsure.
     checks = [unavailable_check(kind, found, kind in gone) for kind, found in by_kind.items()]
     checks += [c for c in trip["verdict"]["checks"] if c["key"] not in {MISSING_KEY[k] for k in gone}]
+    checks += entry_checks.checks(request, trip["images"])
     checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack)
     trip["verdict"] = {**trip["verdict"], **proof_check.decide_parts(checks)}
     for kind, key, why in unavailable:
         log.warning("%s: %s %s %s", request["requestId"], WORDS[kind], key, why)
     made = flags_of(checks)
     cost = sum(r["cost_usd"] for results in trip["images"].values() for r in results)
-    return Checked("flagged" if made else "passed", made, extractions(trip, [key for _, key, _ in unavailable]),
+    found = {**extractions(trip, [key for _, key, _ in unavailable]),
+             "collectedVsWeighed": entry_checks.collected_vs_weighed(request)}
+    return Checked("flagged" if made else "passed", made, found,
                    {**std.describe(), "plant": d.plant is not None, "verra": d.verra}, trip, cost)

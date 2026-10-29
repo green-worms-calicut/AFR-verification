@@ -284,6 +284,14 @@ Each disposal is also compared with what was kept for other disposals (`verifier
 - A trip whose photos (first collection photo to last unloading photo) overlap another disposal's by more than the clock slack is a problem, whatever its quantity (`overlap`). The weighings aren't used: one morning tare is often printed on every slip of the day, which made normal second and third trips look like overlaps (about 40 wrong flags on 19 and 23 Oct).
 - Within the disposal itself, one file used as both a collection and an unloading photo is a problem (`same_file`).
 
+What was entered in gw_sales is also checked against the photos (`verifier/entry_checks.py`). gw_sales sends every time in UTC, and a photo's GPS stamp shows the phone's time (IST), so each time is turned into IST first. Stamps are read without a year, so dates are compared by day and month. Each of these asks a person when it fails:
+- Every collection log has a photo of its own. This flag is aimed at the log (`target`) (`collection_has_photos`, docs).
+- Every collection photo is stamped on its log's pickup day (`collectionDate`). A collection photo of the disposal itself, linked to no log, must be stamped on the pickup day of one of the disposal's logs (`collection_photo_date`, real).
+- No unloading photo is stamped more than 1 h 30 min after the end time entered. This is skipped without an end time (`unloading_too_late`, real).
+- Every pickup is before the arrival entered. For a manual trip entry, the disposal's or the log's, only the dates are compared (`disposal_after_collections`, docs).
+
+What the logs weighed by hand scale (kg, with bags counted apart) is recorded against the net weight entered, in `extractions.collectedVsWeighed`. It isn't flagged, so a tolerance can be chosen from real numbers.
+
 These flags name the other disposals in `related`. Checks of one vehicle's disposals run one at a time, so two copies arriving together still see each other. An earlier disposal isn't flagged again when a later copy arrives: how to show it there is still to agree with gw_sales.
 
 The limits a trip is checked by are those of its own day (`verifier/standards.py`, `STANDARDS`). To change a limit, add an entry from the day it applies rather than editing one. The Jev versions are pinned there too (`MODEL`, `BOX_MODEL`, `jev-1.14.0`), so answers don't change when an alias moves. Only upgrade them after testing.
@@ -396,6 +404,7 @@ trips/ eval/ mockups/   real trips, saved answers and reports, design mockups: n
 | `verifier/tasks.py` | The queue's jobs: check a request, post its result, recover stalled or lost jobs. |
 | `verifier/disposal_check.py` | Checks a disposal with `proof_check` and turns its checks into gw_sales flags. |
 | `verifier/compare_disposals.py` | Compares a disposal with the same vehicle's other disposals: reused images, overlapping trips (by photo times), the same moment. |
+| `verifier/entry_checks.py` | Checks what was entered in gw_sales against the photos: a photo for every collection log, pickup days, the end time, the arrival after the pickups, and collected vs weighed (recorded only). |
 | `verifier/database.py` | Requests, the outbox of results, and what disposals are compared by. |
 | `verifier/migrate.py`, `verifier/migrations/` | Applies the database changes (ours and the queue's), each once, in order. |
 | `verifier/s3_photos.py` | Reads the photos from S3. |

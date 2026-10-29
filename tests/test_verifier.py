@@ -267,6 +267,101 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(all(f["kind"] == "please check" for f in checked.flags))
 
 
+def log(log_id: int = 45001, picked_up: str = "2026-10-14T21:00:00.000Z", **kw) -> dict:
+    """A collection log as gw_sales sends it; 14 Oct 21:00 UTC is 15 Oct 02:30 IST, the day make_trip's photos say."""
+    return {"id": log_id, "createdVia": "COLLECTION_ENTRY", "collectionDate": picked_up, "client": {"name": "ABC Hotel"},
+            "collectionPoint": {"name": "Main Kitchen", "location": None}, **kw}
+
+
+class EntryCheckTests(unittest.TestCase):
+    """What was entered in gw_sales (collection logs, times) against the photos, every time turned from UTC to IST."""
+
+    def checked(self, request=None, uploads=None, **kw):
+        if uploads is None:
+            uploads, self.jev = make_trip()
+        request = request or disposal(uploads, **kw)
+        with self.jev.client() as client:
+            return disposal_check.check(request, files(uploads).get, client)
+
+    def check_of(self, checked, key):
+        return next((c for c in checked.analysis["verdict"]["checks"] if c["key"] == key), None)
+
+    def test_pickup_in_utc_is_compared_as_ist(self):
+        checked = self.checked(logs=[log()])  # 14 Oct 21:00 UTC = 15 Oct IST, the photos' day
+        self.assertEqual(self.check_of(checked, "collection_photo_date")["status"], "pass")
+        self.assertEqual(checked.flags, [])
+
+    def test_a_collection_photo_from_another_day_asks_a_person(self):
+        checked = self.checked(logs=[log(picked_up="2026-10-13T05:00:00.000Z")])
+        c = self.check_of(checked, "collection_photo_date")
+        self.assertEqual((c["status"], c["part"]), ("review", "real"))
+        self.assertIn("collection-logs/2026/10/15/collection1.jpg was stamped 15/10, but collection log 45001 (ABC Hotel, "
+                      "Main Kitchen) was picked up on 13/10", c["detail"])
+        self.assertEqual(len(c["images"]), 2, "every photo is checked, not one of them")
+
+    def test_a_photo_of_the_disposal_itself_needs_the_day_of_one_of_its_logs(self):
+        uploads, self.jev = make_trip()
+        request = disposal(uploads, logs=[log(1, "2026-10-13T05:00:00.000Z"), log(2)])
+        for item in request["evidence"]:
+            item["owner"] = {"type": "disposal_log", "id": DISPOSAL}
+        self.assertEqual(self.check_of(self.checked(request, uploads), "collection_photo_date")["status"], "pass")
+        self.jev = make_trip()[1]
+        request["reference"]["collectionLogs"] = [log(1, "2026-10-13T05:00:00.000Z")]
+        c = self.check_of(self.checked(request, uploads), "collection_photo_date")
+        self.assertEqual(c["status"], "review")
+        self.assertIn("but the disposal's logs were picked up on 13/10", c["detail"])
+
+    def test_a_log_without_a_photo_asks_a_person_aimed_at_it(self):
+        checked = self.checked(logs=[log(), log(45002, client={"name": "XYZ School"})])
+        [flag] = [f for f in checked.flags if f["code"] == "collection_has_photos"]
+        self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
+        self.assertEqual(flag["target"], {"type": "collection_log", "id": 45002})
+        self.assertIn("Collection log 45002 (XYZ School, Main Kitchen) has no collection photo", flag["message"])
+
+    def test_unloading_long_after_the_end_time_asks_a_person(self):
+        # End 14 Oct 21:00 UTC = 15 Oct 02:30 IST, so photos by 04:00; the unloading photos are 04:09.
+        checked = self.checked(endTime="2026-10-14T21:00:00.000Z")
+        c = self.check_of(checked, "unloading_too_late")
+        self.assertEqual((c["status"], c["part"]), ("review", "real"))
+        self.assertIn("unloading1.jpg was stamped 04:09 on 15/10", c["detail"])
+        self.assertIn("after the end time entered, 02:30 on 15/10", c["detail"])
+        self.jev = make_trip()[1]
+        on_time = self.checked(endTime="2026-10-14T22:40:00.000Z")  # 04:10 IST: photos by 05:40
+        self.assertEqual(self.check_of(on_time, "unloading_too_late")["status"], "pass")
+        self.jev = make_trip()[1]
+        self.assertIsNone(self.check_of(self.checked(), "unloading_too_late"), "no end time: not checked")
+
+    def test_a_pickup_after_the_arrival_asks_a_person(self):
+        # Arrival 15 Oct 03:00 UTC = 08:30 IST; this log was picked up at 09:30 IST.
+        checked = self.checked(logs=[log(picked_up="2026-10-15T04:00:00.000Z")])
+        c = self.check_of(checked, "disposal_after_collections")
+        self.assertEqual((c["status"], c["part"]), ("review", "docs"))
+        self.assertIn("picked up at 09:30 on 15/10: after the disposal's arrival entered, 08:30 on 15/10", c["detail"])
+
+    def test_a_manual_entry_is_compared_by_date_only(self):
+        uploads, self.jev = make_trip()
+        later_same_day = log(picked_up="2026-10-15T04:00:00.000Z", createdVia="MANUAL_TRIP_ENTRY")
+        self.assertEqual(self.check_of(self.checked(disposal(uploads, logs=[later_same_day]), uploads),
+                                       "disposal_after_collections")["status"], "pass")
+        self.jev = make_trip()[1]
+        next_day = log(picked_up="2026-10-15T20:00:00.000Z", createdVia="MANUAL_TRIP_ENTRY")  # 16 Oct IST
+        c = self.check_of(self.checked(disposal(uploads, logs=[next_day]), uploads), "disposal_after_collections")
+        self.assertEqual(c["status"], "review")
+        self.assertIn("was picked up on 16/10", c["detail"])
+
+    def test_collected_against_weighed_is_recorded_not_flagged(self):
+        materials = [{"materialName": "PET", "quantity": 2000, "unit": "kg"}, {"materialName": "Mixed", "quantity": 12, "unit": "bags"}]
+        checked = self.checked(logs=[log(materials=materials)])
+        self.assertEqual(checked.extractions["collectedVsWeighed"],
+                         {"logs": 1, "collectedKg": 2000, "collectedBags": 12, "netEnteredKg": float(QUANTITY), "differenceKg": 570.0})
+        self.assertEqual(checked.flags, [])
+
+    def test_without_logs_or_times_nothing_new_is_checked(self):
+        keys = {c["key"] for c in self.checked().analysis["verdict"]["checks"]}
+        self.assertFalse(keys & {"collection_has_photos", "collection_photo_date", "unloading_too_late",
+                                 "disposal_after_collections"})
+
+
 class CompareTests(unittest.TestCase):
     """A disposal compared with its vehicle's other disposals."""
 

@@ -35,11 +35,18 @@ def for_day(day: date) -> Standard:
     return max((s for s in STANDARDS if s.since <= day), key=lambda s: s.since, default=STANDARDS[0])
 
 
-def ist_day(utc: str | None) -> date | None:
-    """The IST date of a time gw_sales sent ("2026-10-27T19:30:00.000Z"), or None if there is none."""
+def ist_time(utc: str | None) -> datetime | None:
+    """A time gw_sales sent ("2026-10-27T19:30:00.000Z") in IST, the time the photos' GPS stamps show; None if
+    there is none."""
     if not utc:
         return None
     at = datetime.fromisoformat(utc.replace("Z", "+00:00"))
     if at.tzinfo is None:  # the contract says UTC; a time without a zone is taken as UTC too
         at = at.replace(tzinfo=timezone.utc)
-    return at.astimezone(IST).date()
+    return at.astimezone(IST)
+
+
+def ist_day(utc: str | None) -> date | None:
+    """The IST date of a time gw_sales sent, or None if there is none."""
+    at = ist_time(utc)
+    return at.date() if at else None
