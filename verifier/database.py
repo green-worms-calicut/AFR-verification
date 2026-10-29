@@ -98,12 +98,12 @@ async def note_disposal(pool: AsyncConnectionPool, request_id: str, vehicle: str
                            "WHERE request_id = %s", (vehicle, quantity, day, request_id))
 
 
-async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str, day: date) -> list[tuple[int, str | None, dict]]:
+async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str, day: date) -> list[tuple[int, dict]]:
     """The other disposals of `vehicle` with a trip within a day of `day`, each as last checked:
-    (disposal id, quantity, proof_check's result). A disposal's earlier requests are its own edits, never others."""
+    (disposal id, proof_check's result). A disposal's earlier requests are its own edits, never others."""
     async with pool.connection() as conn:
         cur = await conn.execute(
-            """SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.quantity, r.analysis
+            """SELECT DISTINCT ON (q.disposal_id) q.disposal_id, r.analysis
                FROM verification_request q JOIN verification_result r USING (request_id)
                WHERE q.vehicle_number = %s AND q.trip_day BETWEEN %s::date - 1 AND %s::date + 1
                  AND q.disposal_id <> %s AND r.analysis IS NOT NULL

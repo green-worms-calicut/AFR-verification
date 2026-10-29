@@ -504,7 +504,8 @@ class TripTests(unittest.TestCase):
         self.assertEqual((c["unloading_timing"]["label"], c["unloading_timing"]["detail"]),
                          ("Unloading photo times", "Unloading 04:09 is between gross 03:30 and tare 04:15"))
         self.assertEqual([e["what"] for e in v["timeline"]], ["Loading photos", "Gross", "Unloading photos", "Tare"])
-        self.assertEqual([t[5:16] for t in v["window"]], ["10-15T03:30", "10-15T04:15"])
+        # The trip's window is its photos', first loading to last unloading, not its weighings.
+        self.assertEqual([t[5:16] for t in v["window"]], ["10-15T02:40", "10-15T04:09"])
 
     def test_gross_first_weighings_too_close_are_a_problem(self):
         v = run_trip(bill=({**FINAL, **at("gross", "04:05"), **at("tare", "04:12")},))[0]["verdict"]
@@ -1023,9 +1024,27 @@ class CrossTripTests(unittest.TestCase):
                  "171773": trip("KL57AB8815", "2024-10-19T08:00", "2024-10-19T11:00")}
         found = proof_check.overlap_checks(trips)
         self.assertEqual(set(found), {"171531", "171566"})
-        self.assertEqual(found["171531"]["detail"], f"{NUMBER} is also on trip 171566 at the same time. A vehicle can't be on two trips at once.")
+        self.assertEqual(found["171531"]["detail"], f"{NUMBER} is also on trip 171566 at the same time, by the photos' stamps. "
+                                                    "A vehicle can't be on two trips at once.")
         proof_check.add_checks(trips["171531"], [found["171531"]])
         self.assertEqual(trips["171531"]["verdict"]["status"], "problem")
+
+    def test_trips_touching_within_the_clock_slack_are_not_on_two_trips(self):
+        def trip(start, end):
+            return {"vehicle_number": NUMBER, "verdict": {"window": [start, end], "checks": [], "flags": []}}
+        trips = {"1": trip("2024-10-19T07:52", "2024-10-19T09:35"), "2": trip("2024-10-19T09:31", "2024-10-19T11:00")}
+        self.assertEqual(proof_check.overlap_checks(trips), {}, "4 min apart: within the 5 min clock slack")
+        self.assertEqual(set(proof_check.overlap_checks(trips, slack=3)), {"1", "2"})
+
+    def test_a_morning_tare_on_every_slip_is_no_window(self):
+        # 19 Oct 2026, KL57AD9265: weighed empty at 05:10, that tare printed on slips with gross 07:02 and 09:23.
+        # By the weighings both trips would run from 05:10 and overlap; by the photos they don't.
+        first, _ = run_trip(bill=(FIRST, {**FINAL, **at("tare", "01:00")}))
+        later = {**PHOTO, **stamp("06:40")}
+        second, _ = run_trip(loading=({**PHOTO, **stamp("05:20")},) * 2, unloading=(later, later),
+                             bill=(FIRST, {**FINAL, **at("tare", "01:00"), **at("gross", "06:30")}))
+        trips = {n: {"vehicle_number": NUMBER, "verdict": t["verdict"]} for n, t in (("1", first), ("2", second))}
+        self.assertEqual(proof_check.overlap_checks(trips), {})
 
 
 class SavedAnswerTests(unittest.TestCase):

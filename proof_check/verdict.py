@@ -3,7 +3,7 @@
 Nothing is rejected here: a check that finds a problem flags its part, an unsure one asks a person.
 """
 
-from proof_check.trip_rules import Limits, PARTS, photo_moments, trip_checks
+from proof_check.trip_rules import Limits, PARTS, busy_time, photo_moments, trip_checks
 
 # A check's status is pass, fail (a problem found) or review (unsure). Nothing is rejected without a person.
 TITLES = {"pass": "Accepted", "problem": "Flagged: problem found", "review": "Flagged: please check"}
@@ -51,10 +51,8 @@ def verdict(images: dict[str, list[dict]], vehicle_number: str, quantity: str | 
     """The trip's verdict and each part's, with its checks, flags and timeline. `extra` are checks across trips."""
     checks, w = trip_checks(images, vehicle_number, quantity, limits, plant, verra)
     checks += list(extra)
-    # Between the two weighings, for finding a vehicle on two trips at once: only when their order and day are clear.
-    # A stored tare (`weigh_day` failed) would stretch it across a day and overlap the vehicle's other trips.
-    clear = all(any(c["key"] == key and c["status"] == "pass" for c in checks) for key in ("weigh_order", "weigh_day"))
-    window = sorted([w["tare"]["at"], w["gross"]["at"]]) if w and clear else None
+    # When the trip was out, by its photos, for finding a vehicle on two trips at once (`overlap_checks`).
+    window = busy_time(images)
     return {**decide_parts(checks), "timeline": timeline(images, w, checks),
             "window": [t.isoformat() for t in window] if window else None}
 

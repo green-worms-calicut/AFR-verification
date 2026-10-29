@@ -44,7 +44,7 @@ class Disposal:
     day: date  # the trip's date in IST, which picks the standard
     evidence: dict[str, list[str]]  # s3Keys by kind of image
     vehicle_key: str | None  # the vehicle number cleaned up, to find its other disposals; None if it isn't one
-    quantity_key: str | None  # the quantity as entered, to compare images only with disposals of the same one
+    quantity_key: str | None  # the quantity as entered, kept with the request (comparisons don't filter by it)
 
 
 @dataclass
@@ -174,7 +174,7 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
     # First, so each leads the flag of the checks its missing images leave unsure.
     checks = [unavailable_check(kind, found, kind in gone) for kind, found in by_kind.items()]
     checks += [c for c in trip["verdict"]["checks"] if c["key"] not in {MISSING_KEY[k] for k in gone}]
-    checks += compare_disposals.checks(d.vehicle_key, d.quantity_key, trip, list(others))
+    checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack)
     trip["verdict"] = {**trip["verdict"], **proof_check.decide_parts(checks)}
     for kind, key, why in unavailable:
         log.warning("%s: %s %s %s", request["requestId"], WORDS[kind], key, why)

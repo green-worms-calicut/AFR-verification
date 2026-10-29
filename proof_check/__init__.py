@@ -86,7 +86,8 @@ from proof_check.trip_rules import (
     GROUPS, PARTS, PART_OF, readings_for, position, to_24h, same_hour, lower_first, unsure, noul_status, checks_for,
     YEAR, moment, minutes_between, duration, show, weighings, first_slip, check, names, named, plural, EACH_PHOTO,
     each_photo, plate_check, photo_checks, metres_between, distance, from_square, chance_away, plant_check,
-    final_slip, LOOK_FOR, choice_check, seal_checks, verra_checks, bill_checks, photo_moments, photo_window,
+    final_slip, LOOK_FOR, choice_check, seal_checks, verra_checks, bill_checks, photo_moments, busy_time,
+    overlap_minutes, photo_window,
     photo_timing, same_day, trip_checks, short_trip, and_list, reuse_check, overlap_checks
 )
 from proof_check.inputs import normalize_vehicle_number, parse_limits, parse_quantity, parse_plant, parse_switch

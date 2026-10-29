@@ -38,7 +38,7 @@ Only Verra project trips are checked for these, and Jev is only asked about them
 
 **Across trips**
 - Was any image already used in another trip? The same file, or a look-alike copy.
-- Is the vehicle on two trips at the same time? This is checked when a whole day is run with `tools/check_trip_folders.py`.
+- Is the vehicle on two trips at the same time? This is checked when a whole day is run with `tools/check_trip_folders.py`. A trip's time is taken from its photos' GPS stamps, from the first collection photo to the last unloading photo. The weighings aren't used: most vehicles are weighed empty once in the morning, and that tare is printed on every slip of the day. Two trips must overlap by more than the clock slack.
 
 These checks fall into three parts, each with its own verdict:
 - **Trip is real:** did the trip happen as claimed? The plates in the photos and the number on every slip match the vehicle number you typed; the weighing order, the gap between weighings, the tare weighed on this trip and Time In with the tare; every photo's time; the photos and bills taken directly; unloading at the plant; and no image or trip a duplicate.
@@ -140,7 +140,7 @@ All of this is in code (`proof_check.trip_checks`, `decide_parts`, `verdict`), n
 | Real | Unloading on the weighing day | every unloading photo dated the gross weighing's day | a stamp date unreadable or unsure | any on another day |
 | Real | At the plant (with `--plant`) | at least one unloading photo's stamp, picked surely to four decimals, places it within 500 m of the plant | no photo read surely to four decimals | any photo's stamp places it farther away: four decimals picked surely, or two read surely or at least 80% likely |
 | Real | Images not used in other trips | none seen in another trip | a look-alike copy | the same file |
-| Real | One trip at a time (`tools/check_trip_folders.py`) | – | – | the vehicle is on another trip at the same time |
+| Real | One trip at a time (`tools/check_trip_folders.py`) | – | – | the vehicle's photos for another trip overlap this trip's (more than the clock slack) |
 | Docs | Loading photos, unloading photos, weigh bills | added | none added | – |
 | Docs | Vehicle, GPS stamp | every photo of the kind: yes ≥ 0.8 | any photo unsure | any photo clearly fails |
 | Docs | Weighbridge slip, final slip | a final slip, clearly | no slip, or no clear final slip | – |
@@ -279,9 +279,9 @@ The report shows accuracy per field, accuracy at each confidence level per group
 Each disposal is checked as one trip with `proof_check`. Its weigh bills, collection photos (as loading photos) and unloading photos are read from S3 by `s3Key`, and checked against the vehicle number and net quantity entered, with the facility's location as the plant. A disposal is a Verra project trip when one of its collection logs' clients has the Verra project as its default project. A photo that isn't in S3, or isn't an image, asks a person (`image_unavailable`, docs part), and the rest are still checked. Checks flagged for the same reason become one flag, whose `code` is the check's key. Severity follows from the check's part: a problem with the trip being real is `high`, an unsure Verra check is `info`, everything else `recheck`. The result also carries `extractions` (each part's status, the weighing timeline, each image's readings) and the `standard` it was checked against. proof_check's whole result and what Jev cost are kept in our database.
 
 Each disposal is also compared with what was kept for other disposals (`verifier/compare_disposals.py`). It only looks at its vehicle's other disposals with a trip within a day of its own date, each as last checked, and never at its own earlier requests (those are edits).
-- Images are compared only with disposals that also have the same quantity entered. An exact copy is a problem and a look-alike asks a person (`reused`).
-- A collection or unloading photo stamped within 5 minutes of one in such a disposal asks a person (`same_moment`). Photos already found to be copies are left to `reused`.
-- Weighings that overlap another disposal's are a problem, whatever its quantity (`overlap`).
+- An image also in such a disposal is a problem if it's an exact copy, and asks a person if it's a look-alike (`reused`). This applies whatever the quantity entered: photos borrowed from another trip come with a different quantity. On 23 Oct, 173186's collection photos were 172929's unloading photos (1870 against 1990 kg).
+- A collection or unloading photo stamped within 5 minutes of one in another disposal asks a person (`same_moment`). Each other disposal is flagged once, by the first check that finds it, in the order reused, overlap, same moment, so `same_moment` is left for photos close in time whose trips don't overlap.
+- A trip whose photos (first collection photo to last unloading photo) overlap another disposal's by more than the clock slack is a problem, whatever its quantity (`overlap`). The weighings aren't used: one morning tare is often printed on every slip of the day, which made normal second and third trips look like overlaps (about 40 wrong flags on 19 and 23 Oct).
 - Within the disposal itself, one file used as both a collection and an unloading photo is a problem (`same_file`).
 
 These flags name the other disposals in `related`. Checks of one vehicle's disposals run one at a time, so two copies arriving together still see each other. An earlier disposal isn't flagged again when a later copy arrives: how to show it there is still to agree with gw_sales.
@@ -395,7 +395,7 @@ trips/ eval/ mockups/   real trips, saved answers and reports, design mockups: n
 | `verifier/api.py` | Receives gw_sales' requests (`POST /v1/verifications`) and answers `GET /health`. |
 | `verifier/tasks.py` | The queue's jobs: check a request, post its result, recover stalled or lost jobs. |
 | `verifier/disposal_check.py` | Checks a disposal with `proof_check` and turns its checks into gw_sales flags. |
-| `verifier/compare_disposals.py` | Compares a disposal with the same vehicle's other disposals: reused images, the same moment, overlapping weighings. |
+| `verifier/compare_disposals.py` | Compares a disposal with the same vehicle's other disposals: reused images, overlapping trips (by photo times), the same moment. |
 | `verifier/database.py` | Requests, the outbox of results, and what disposals are compared by. |
 | `verifier/migrate.py`, `verifier/migrations/` | Applies the database changes (ours and the queue's), each once, in order. |
 | `verifier/s3_photos.py` | Reads the photos from S3. |

@@ -30,7 +30,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 import proof_check  # noqa: E402
 from proof_check import Upload  # noqa: E402
 from test_proof_check import (COLOURS, FINAL, FIRST, LOADING, NUMBER, QUANTITY, UNLOADING, FakeJev, at, coloured,  # noqa: E402
-                          make_trip, sent)
+                              make_trip, sent, stamp)
 from verifier import api, compare_disposals, database, disposal_check, migrate, signatures, standards, tasks  # noqa: E402
 from verifier.settings import Settings  # noqa: E402
 
@@ -278,7 +278,7 @@ class CompareTests(unittest.TestCase):
     def first(self):
         """Disposal 1000, already checked: make_trip's images, weighed 02:00-03:30."""
         uploads, jev = make_trip()
-        return compare_disposals.Other(1000, f"{QUANTITY} kg", self.checked(uploads, jev, disposal_id=1000).analysis)
+        return compare_disposals.Other(1000, self.checked(uploads, jev, disposal_id=1000).analysis)
 
     def flag(self, checked, code):
         return next((f for f in checked.flags if f["code"] == code), None)
@@ -299,47 +299,67 @@ class CompareTests(unittest.TestCase):
         self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
         self.assertIn("looks the same as", flag["message"])
 
-    def test_images_of_another_quantity_are_not_compared(self):
-        uploads, jev = other_trip(colours=0, bill=LATER)
+    def test_photos_borrowed_by_a_trip_of_another_quantity_are_a_problem(self):
+        # As 173186 on 23 Oct 2026: its collection photos were 172929's unloading photos; 1870 kg against 1990 kg.
+        first, _ = make_trip()
+        uploads, jev = other_trip(unloading={**UNLOADING, **stamp("07:30")}, bill=LATER)
+        uploads["loading"] = [Upload(f"b-collection{i + 1}.jpg", u.data) for i, u in enumerate(first["unloading"])]
+        jev.by_colour.update(make_trip()[1].by_colour)
         checked = self.checked(uploads, jev, [self.first()], quantity=999)
-        self.assertIsNone(self.flag(checked, "reused"))
+        flag = self.flag(checked, "reused")
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
+        self.assertIn("b-collection1.jpg is the same file as disposal/2026/10/15/unloading1.jpg in disposal 1000",
+                      flag["message"])
 
     def test_photos_at_the_same_moment_ask_a_person(self):
-        uploads, jev = other_trip(bill=LATER)  # other images, stamped as make_trip's
+        # Disposal 1000's last unloading photo is 04:09; this trip's collection photos are 04:11, its unloading 05:30.
+        # The trips don't overlap (by more than the clock slack), but 04:11 and 04:09 look like one moment.
+        uploads, jev = other_trip(loading={**LOADING, **stamp("04:11")}, unloading={**UNLOADING, **stamp("05:30")}, bill=LATER)
         checked = self.checked(uploads, jev, [self.first()])
         flag = self.flag(checked, "same_moment")
         self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
         self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
-        self.assertIn("b-collection1.jpg was stamped 02:40 on 15/10", flag["message"])
-        self.assertIsNone(self.flag(checked, "overlap"), "weighed later: no overlap")
+        self.assertIn("b-collection1.jpg was stamped 04:11 on 15/10", flag["message"])
+        self.assertIsNone(self.flag(checked, "overlap"))
         self.assertIsNone(self.flag(checked, "reused"))
 
     def test_more_than_five_minutes_apart_is_not_the_same_moment(self):
-        later = {**LOADING, "stamp_minute": ("46", 0.95)}  # 02:46 against 02:40
-        uploads, jev = other_trip(loading=later, unloading={**UNLOADING, "stamp_hour": ("05", 0.95)}, bill=LATER)
-        self.assertIsNone(self.flag(self.checked(uploads, jev, [self.first()]), "same_moment"))
+        uploads, jev = other_trip(loading={**LOADING, **stamp("04:15")}, unloading={**UNLOADING, **stamp("05:30")}, bill=LATER)
+        checked = self.checked(uploads, jev, [self.first()])
+        self.assertIsNone(self.flag(checked, "same_moment"), "04:15 is 6 min after 04:09")
+        self.assertIsNone(self.flag(checked, "overlap"))
 
-    def test_overlapping_weighings_are_a_problem_whatever_the_quantity(self):
-        uploads, jev = other_trip()  # weighed 02:00-03:30, as disposal 1000
+    def test_another_trip_at_the_same_time_is_a_problem_whatever_the_quantity(self):
+        uploads, jev = other_trip()  # other photos, stamped 02:40-04:09 as disposal 1000's
         checked = self.checked(uploads, jev, [self.first()], quantity=999)
         flag = self.flag(checked, "overlap")
         self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
-        self.assertIn("KL05AF9341 is weighed 02:00-03:30 on 15/10 for this disposal, overlapping disposal 1000", flag["message"])
+        self.assertIn("KL05AF9341's photos for this disposal were taken 02:40-04:09 on 15/10, overlapping disposal "
+                      "1000's 02:40-04:09 on 15/10", flag["message"])
         self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
 
-    def test_several_trips_a_day_are_not_an_overlap(self):
-        uploads, jev = other_trip(bill=LATER)  # weighed 05:00-06:30, after disposal 1000's 02:00-03:30
+    def test_a_pair_is_flagged_once_by_the_most_specific_check(self):
+        uploads, jev = other_trip()  # the same moments too, but overlap already names disposal 1000
+        checked = self.checked(uploads, jev, [self.first()])
+        self.assertIsNotNone(self.flag(checked, "overlap"))
+        self.assertIsNone(self.flag(checked, "same_moment"))
+        uploads, jev = other_trip(colours=0)  # copies: reused only
+        checked = self.checked(uploads, jev, [self.first()])
+        self.assertEqual([f["code"] for f in checked.flags if f.get("related")], ["reused"])
+
+    def test_several_trips_a_day_on_one_morning_tare_are_not_an_overlap(self):
+        # As KL57AD9265 on 19 Oct 2026: one tare weighed in the morning (02:00 here) printed on every slip. By the
+        # weighings this trip (02:00-06:30) would contain disposal 1000's (02:00-03:30); by the photos it comes after.
+        morning = (FIRST, {**FINAL, **at("gross", "06:30")})
+        uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")}, bill=morning)
         checked = self.checked(uploads, jev, [self.first()], quantity=999)
         self.assertEqual(next(c for c in checked.analysis["verdict"]["checks"] if c["key"] == "overlap")["status"], "pass")
 
-    def test_a_stored_tare_is_no_window(self):
-        # Tare from the day before (a stored one): the trip's weighings would span a day and overlap disposal 1000.
-        stored = (FIRST, {**FINAL, **at("tare", "05:00", "14/10"), **at("gross", "06:30")})
-        uploads, jev = other_trip(bill=stored)
+    def test_trips_without_both_kinds_of_photo_are_not_timed(self):
+        uploads, jev = other_trip()
+        uploads["unloading"] = []
         checked = self.checked(uploads, jev, [self.first()], quantity=999)
-        self.assertEqual(self.flag(checked, "weigh_day")["kind"], "problem found")
-        self.assertIsNone(checked.analysis["verdict"]["window"])
-        self.assertIsNone(self.flag(checked, "overlap"))
+        self.assertNotIn("overlap", {c["key"] for c in checked.analysis["verdict"]["checks"]})
 
     def test_alone_every_comparison_passes(self):
         uploads, jev = make_trip()
@@ -734,7 +754,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.work()
         flags = {f["code"]: f for f in self.gw.stored[again["requestId"]]["flags"]}
         self.assertEqual(flags["reused"]["related"], [{"type": "disposal_log", "id": 1000}])
-        self.assertEqual(flags["overlap"]["related"], [{"type": "disposal_log", "id": 1000}])
+        self.assertNotIn("overlap", flags, "the pair is flagged once, as reused")
         self.assertEqual(await self.sql("SELECT vehicle_number, quantity, trip_day FROM verification_request "
                                         "WHERE request_id = %s", again["requestId"]),
                          [(NUMBER, f"{QUANTITY} kg", date(2026, 10, 15))])

@@ -632,6 +632,26 @@ def photo_moments(results: list[dict]) -> list[tuple[dict, dict | None]]:
     return out
 
 
+def busy_time(images: dict[str, list[dict]]) -> tuple[datetime, datetime] | None:
+    """When the trip was out, by its photos' GPS stamps: from the first collection (loading) photo to the last
+    unloading photo. None without a readable stamp on both kinds.
+
+    Not the weighings: a vehicle is often weighed empty once in the morning and that tare printed on every slip of
+    the day, so tare to gross would span all its earlier trips (19 and 23 Oct 2026).
+    """
+    loading = [m["at"] for _, m in photo_moments(images.get("loading", [])) if m]
+    unloading = [m["at"] for _, m in photo_moments(images.get("unloading", [])) if m]
+    if not loading or not unloading:
+        return None
+    times = loading + unloading
+    return min(times), max(times)
+
+
+def overlap_minutes(a: tuple[datetime, datetime], b: tuple[datetime, datetime]) -> float:
+    """How long two spans of time overlap, in minutes; 0 or less if they don't."""
+    return (min(a[1], b[1]) - max(a[0], b[0])).total_seconds() / 60
+
+
 def photo_window(role: str, tare_first: bool) -> tuple[str | None, str | None]:
     """Which weighings a loading or unloading photo must fall between: (after, before), None where open.
 
@@ -894,9 +914,10 @@ def reuse_check(images: dict[str, list[dict]], index: ImageIndex, trip: str | No
     return check("trips", "reused", label, "pass", "None seen in another trip")
 
 
-def overlap_checks(trips: dict[str, dict]) -> dict[str, dict]:
-    """A vehicle can't be on two trips at once: {trip: check} for each trip whose window between weighings overlaps
-    another trip's with the same vehicle number. `trips` maps a trip id to {"vehicle_number", "verdict"}.
+def overlap_checks(trips: dict[str, dict], slack: int = Limits().clock_slack) -> dict[str, dict]:
+    """A vehicle can't be on two trips at once: {trip: check} for each trip whose window (its photos' `busy_time`)
+    overlaps another trip's with the same vehicle number by more than `slack` minutes (the cameras' clocks).
+    `trips` maps a trip id to {"vehicle_number", "verdict"}.
     """
     windows = {}
     for trip, t in trips.items():
@@ -905,10 +926,10 @@ def overlap_checks(trips: dict[str, dict]) -> dict[str, dict]:
     found = {}
     for a, (va, sa, ea) in windows.items():
         for b, (vb, sb, eb) in windows.items():
-            if a < b and va == vb and sa < eb and sb < ea:
+            if a < b and va == vb and overlap_minutes((sa, ea), (sb, eb)) > slack:
                 for x, y in ((a, b), (b, a)):
                     found.setdefault(x, []).append(y)
     return {trip: check("trips", "overlap", "One trip at a time", "fail",
-                        f"{trips[trip]['vehicle_number']} is also on trip {and_list(others)} at the same time. "
-                        "A vehicle can't be on two trips at once.")
+                        f"{trips[trip]['vehicle_number']} is also on trip {and_list(sorted(others))} at the same time, by "
+                        "the photos' stamps. A vehicle can't be on two trips at once.")
             for trip, others in found.items()}
