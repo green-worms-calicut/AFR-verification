@@ -169,6 +169,12 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
+The verifier service for gw_sales (`verifier/`, being built) also needs `requirements-verifier.txt`: FastAPI, Procrastinate on Postgres, boto3 for S3, and moto for its offline tests.
+
+```bash
+.venv/bin/pip install -r requirements-verifier.txt
+```
+
 ### API key
 
 Get a key from the TypeSafe console at <https://console.typesafe.ai/keys>.
