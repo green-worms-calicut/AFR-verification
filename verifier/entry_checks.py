@@ -61,7 +61,7 @@ def has_photos(request: dict) -> list[dict]:
     return made
 
 
-def photo_date(request: dict, images: dict[str, list[dict]]) -> dict | None:
+def photo_date(request: dict, images: dict[str, list[dict]], around=None) -> dict | None:
     """Every collection photo stamped on its log's pickup day; a photo of the disposal itself, on the pickup day of
     one of its logs. None when no photo has a readable stamp and a pickup to compare with."""
     pickups = {e["id"]: (e, at) for e in logs(request) if (at := pickup(e))}
@@ -69,7 +69,7 @@ def photo_date(request: dict, images: dict[str, list[dict]]) -> dict | None:
         return None
     owner_of = owners(request)
     wrong, checked = [], 0
-    for r, m in photo_moments(images.get("loading", [])):
+    for r, m in photo_moments(images.get("loading", []), around):
         if m is None or r["name"] not in owner_of:  # an unreadable stamp is the GPS stamp check's to ask about
             continue
         log_id = owner_of[r["name"]]
@@ -96,15 +96,16 @@ def photo_date(request: dict, images: dict[str, list[dict]]) -> dict | None:
                  "entered.", min(m["certainty"] for _, m, _ in wrong), images=[name for name, _, _ in wrong])
 
 
-def too_late(request: dict, images: dict[str, list[dict]]) -> dict | None:
+def too_late(request: dict, images: dict[str, list[dict]], around=None) -> dict | None:
     """No unloading photo stamped more than LATE_AFTER_END after the end time entered. None without an end time or
-    a readable unloading stamp."""
+    a readable unloading stamp. `around`, the trip's date, gives the stamps their year."""
     end = standards.ist_time((request.get("claims") or {}).get("endTime"))
-    stamped = [(r, m) for r, m in photo_moments(images.get("unloading", [])) if m]
+    stamped = [(r, m) for r, m in photo_moments(images.get("unloading", []), around) if m]
     if not end or not stamped:
         return None
     limit = end + LATE_AFTER_END
-    by = datetime(proof_check.YEAR, limit.month, limit.day, limit.hour, limit.minute)  # as stamps are read: no year
+    # As the stamps are read: in their year by the trip's date, or without one in proof_check.YEAR.
+    by = datetime(limit.year if around else proof_check.YEAR, limit.month, limit.day, limit.hour, limit.minute)
     late = [(r["name"], m) for r, m in stamped if m["at"] > by]
     label = "Unloading photos by the end time"
     if not late:
@@ -170,11 +171,12 @@ def collection_points(request: dict, images: dict[str, list[dict]], radius: floa
     return made
 
 
-def checks(request: dict, images: dict[str, list[dict]], radius: float = 500) -> list[dict]:
+def checks(request: dict, images: dict[str, list[dict]], radius: float = 500, around=None) -> list[dict]:
     """Every check of what was entered, for one disposal's request and its checked images; `radius` is how far from
-    its collection point a collection photo may be."""
+    its collection point a collection photo may be, and `around` the trip's date."""
     return [*has_photos(request),
-            *(c for c in (photo_date(request, images), too_late(request, images), after_collections(request)) if c),
+            *(c for c in (photo_date(request, images, around), too_late(request, images, around),
+                          after_collections(request)) if c),
             *collection_points(request, images, radius)]
 
 

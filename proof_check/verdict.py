@@ -9,7 +9,7 @@ from proof_check.trip_rules import Limits, PARTS, busy_time, photo_moments, trip
 TITLES = {"pass": "Accepted", "problem": "Flagged: problem found", "review": "Flagged: please check"}
 
 
-def timeline(images: dict[str, list[dict]], w: dict | None, checks: list[dict]) -> list[dict]:
+def timeline(images: dict[str, list[dict]], w: dict | None, checks: list[dict], around=None) -> list[dict]:
     """The trip's events in time order, for the page: tare, loading, gross and unloading, marking those in a failed check."""
     failed = {c["key"] for c in checks if c["status"] == "fail"}
     events = []
@@ -17,7 +17,7 @@ def timeline(images: dict[str, list[dict]], w: dict | None, checks: list[dict]) 
         events += [{"at": w["tare"], "what": "Tare", "bad": bool({"weigh_order", "weigh_gap", "weigh_day"} & failed)},
                    {"at": w["gross"], "what": "Gross", "bad": bool({"weigh_order", "weigh_gap", "weigh_day"} & failed)}]
     for role, word in (("loading", "Loading photos"), ("unloading", "Unloading photos")):
-        times = [m for _, m in photo_moments(images.get(role, [])) if m]
+        times = [m for _, m in photo_moments(images.get(role, []), around) if m]
         if times:
             first = min(times, key=lambda m: m["at"])
             events.append({"at": first, "what": word, "bad": f"{role}_timing" in failed or f"{role}_day" in failed})
@@ -47,14 +47,16 @@ def decide_parts(checks: list[dict]) -> dict:
 
 def verdict(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
             limits: Limits = Limits(), extra: list[dict] = (), plant: tuple[float, float] | None = None,
-            verra: bool = False, weighbridge: str | None = None) -> dict:
-    """The trip's verdict and each part's, with its checks, flags and timeline. `extra` are checks across trips."""
-    checks, w = trip_checks(images, vehicle_number, quantity, limits, plant, verra, weighbridge)
+            verra: bool = False, weighbridge: str | None = None, around=None) -> dict:
+    """The trip's verdict and each part's, with its checks, flags and timeline. `extra` are checks across trips;
+    `around` is the trip's date, for the years of stamps and slips."""
+    checks, w = trip_checks(images, vehicle_number, quantity, limits, plant, verra, weighbridge, around)
     checks += list(extra)
     # When the trip was out, by its photos, for finding a vehicle on two trips at once (`overlap_checks`).
-    window = busy_time(images)
-    return {**decide_parts(checks), "timeline": timeline(images, w, checks),
-            "window": [t.isoformat() for t in window] if window else None}
+    window, sure = busy_time(images, around=around), busy_time(images, sure_only=True, around=around)
+    return {**decide_parts(checks), "timeline": timeline(images, w, checks, around),
+            "window": [t.isoformat() for t in window] if window else None,
+            "sure_window": [t.isoformat() for t in sure] if sure else None}
 
 
 def add_checks(trip: dict, extra: list[dict]) -> None:

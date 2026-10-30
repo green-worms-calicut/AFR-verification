@@ -16,7 +16,12 @@ ENV = {
 OPTIONAL = {
     # A client's defaultProject code that makes a disposal a Verra project trip; unset, no Verra checks.
     "verra_project": "VERIFIER_VERRA_PROJECT",
+    # While changing the webhook secret: the new one, accepted as well as the old until gw_sales has switched.
+    "webhook_secret_next": "VERIFIER_WEBHOOK_SECRET_NEXT",
 }
+MIN_SECRET = 32  # characters: a secret shorter than this is too easy to guess
+SECRETS = ("webhook_secret", "callback_secret", "webhook_secret_next")
+LOCAL = ("http://localhost", "http://127.0.0.1")  # where gw_sales may be reached without https: tests on this machine
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,11 @@ class Settings:
     s3_bucket: str
     typesafe_api_key: str = field(repr=False)
     verra_project: str | None = None
+    webhook_secret_next: str | None = field(default=None, repr=False)
+
+    def webhook_secrets(self) -> list[str]:
+        """The secrets a request may be signed with: the current one, and the next while switching."""
+        return [self.webhook_secret, *([self.webhook_secret_next] if self.webhook_secret_next else [])]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -39,6 +49,12 @@ class Settings:
             missing.append("TYPESAFE_API_KEY (or the keyring)")
         if missing:
             raise SystemExit(f"Set {', '.join(missing)} in the environment.")
-        return cls(**{key: os.environ[name] for key, name in ENV.items()},
-                   **{key: os.environ.get(name) or None for key, name in OPTIONAL.items()},
-                   typesafe_api_key=typesafe_api_key)
+        settings = cls(**{key: os.environ[name] for key, name in ENV.items()},
+                       **{key: os.environ.get(name) or None for key, name in OPTIONAL.items()},
+                       typesafe_api_key=typesafe_api_key)
+        short = [{**ENV, **OPTIONAL}[key] for key in SECRETS if (v := getattr(settings, key)) is not None and len(v) < MIN_SECRET]
+        if short:
+            raise SystemExit(f"Make {', '.join(short)} at least {MIN_SECRET} characters (openssl rand -hex 32).")
+        if not settings.gw_sales_url.startswith("https://") and not settings.gw_sales_url.startswith(LOCAL):
+            raise SystemExit("GW_SALES_URL must start with https://: our results and API key are sent there.")
+        return settings

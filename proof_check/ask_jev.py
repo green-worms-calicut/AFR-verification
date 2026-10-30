@@ -7,16 +7,18 @@ import os
 import subprocess
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 from PIL import Image as PILImage
-from typesafe_sdk import Image, NoulAnswer, TypeSafeClient
+from typesafe_sdk import (Image, Noul, NoulAnswer, TypeSafeAPIConnectionError, TypeSafeAPIError, TypeSafeBadRequestError,
+                          TypeSafeClient, TypeSafeError, TypeSafeRateLimitError, TypeSafeUnprocessableEntityError)
 
 from proof_check.questions import (
-    BOX_MODEL, LINE, OUR_COMPANY, ROTATION, SLIP, pick, question_version, questions_for, starts_of
+    BOX_MODEL, LINE, NOT_SHOWN, OUR_COMPANY, ROTATION, SLIP, pick, question_version, questions_for, starts_of
 )
 from proof_check.images import ImageIndex, ROLES, SLOT_OF, Upload, cut_line, cut_slip, fingerprints, fit, load_bytes
-from proof_check.trip_rules import Limits, checks_for, readings_for, reuse_check
-from proof_check.verdict import verdict
+from proof_check.trip_rules import Limits, checks_for, readings_for, reuse_check, unanswered_check, unsure_yes
+from proof_check.verdict import decide_parts, verdict
 
 PRICE_PER_INPUT_TOKEN = 0.042 / 1_000_000  # USD; output tokens are free
 HEADERS = {"TypeSafe-Danger-Zone-Images": "true"}  # images are opt-in per request
@@ -100,6 +102,24 @@ def result_from(slot: str, raw: dict, vehicle_number: str, quantity: str | None)
             "readings": readings_for(slot, raw["answers"]), "cost_usd": tokens * PRICE_PER_INPUT_TOKEN}
 
 
+def fill_missing(slot: str, answers: dict[str, dict], asked: dict) -> dict[str, dict]:
+    """`answers` with an unsure one for each question `asked` that Jev's response left out (the SDK drops an answer
+    of a type it doesn't know): a yes/no halfway between its limits, a Choice at confidence 0 on its "not shown"
+    option where it has one.
+    The checks needing it then ask a person, instead of the trip failing on a missing key."""
+    filled = dict(answers)
+    for qid, question in asked.items():
+        if qid in filled:
+            continue
+        if isinstance(question, Noul):
+            filled[qid] = {"type": "noul", "yes": unsure_yes(slot, qid)}
+        else:
+            options = list(question.criteria)
+            filled[qid] = {"type": "choice", "choice": NOT_SHOWN if NOT_SHOWN in options else options[0],
+                           "confidence": 0.0, "top": []}
+    return filled
+
+
 def turn_for(answer, first: bool) -> int:
     """How far to turn an image (counterclockwise) by its `orientation` answer, or 0 to keep it.
 
@@ -107,7 +127,10 @@ def turn_for(answer, first: bool) -> int:
     turned the likelier way. Which way is close to a coin flip for Jev, so the next look decides only
     between the two places that turn can have left it: upright, or upside down (then half a turn more).
     In the 19 Oct 2026 run, 6 of 35 slips turned once were left upside down by waiting for ROTATE there.
+    No answer (left out of the response) keeps it.
     """
+    if answer is None:
+        return 0
     p = answer.probabilities
     if not first:
         return 180 if p.get("upside_down", 0) > p.get("upright", 0) else 0
@@ -175,20 +198,24 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
         img, requests = cut_slip(img, slip), 1
     response = ask(client, slot, img, vehicle_number, model, quantity, place, verra, weighbridge)
     tokens, requests, rotated = tokens + (response.usage.input_tokens or 0), requests + 1, 0
-    turned = response.choices["orientation"]
-    looks = [summary(turned)]  # each orientation answer, before each turn
+    turned = response.choices.get("orientation")
+    looks = [summary(turned)] if turned else []  # each orientation answer, before each turn
     # At most two turns: the likelier sideways guess, then half a turn if that left it upside down.
     looked = 1
-    while looked < 3 and (turn := turn_for(response.choices["orientation"], first=looked == 1)):
+    while looked < 3 and (turn := turn_for(response.choices.get("orientation"), first=looked == 1)):
         img = img.rotate(turn, expand=True)
         rotated = (rotated + turn) % 360
         response = ask(client, slot, img, vehicle_number, model, quantity, place, verra, weighbridge)
         tokens += response.usage.input_tokens or 0
         requests += 1
         looked += 1
-        looks.append(summary(response.choices["orientation"]))
-    raw = {"model": response.model, "requests": requests, "orientation": summary(turned), "rotated": rotated, "looks": looks,
-           "answers": {q: summary(a) for q, a in response.answers.items()}, "input_tokens": tokens,
+        if answer := response.choices.get("orientation"):
+            looks.append(summary(answer))
+    asked = questions_for(slot, quantity, place, verra, bool(weighbridge))
+    answers = fill_missing(slot, {q: summary(a) for q, a in response.answers.items()}, asked)
+    raw = {"model": response.model, "requests": requests, "orientation": summary(turned) if turned else answers["orientation"],
+           "rotated": rotated,
+           "looks": looks, "answers": answers, "input_tokens": tokens,
            **({"slip": slip} if slip else {})}
     if place:
         raw = read_line(client, img, raw, model, box_model)
@@ -197,12 +224,40 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
     return result_from(slot, raw, vehicle_number, quantity), fit(img)
 
 
+class JevRefused(Exception):
+    """Jev refused in a way asking again won't change: our key or access, a model or answer it doesn't know, or every
+    image of the trip."""
+
+
+@dataclass
+class Unanswered:
+    """An image Jev didn't answer for: `kind` "retry" (busy or down: asking again may work) or "image" (it refused it)."""
+
+    kind: str
+    why: str
+
+
+def failure_kind(error: Exception) -> str | None:
+    """How a failed Jev request is handled: "retry" when Jev was busy or down (5xx, 429, 529, a timeout or no
+    connection), "image" when it refused that image (400, 422), "fatal" for any other TypeSafe error (our key,
+    a model it doesn't know, an answer it couldn't give), and None for anything else, our own bug, which is raised."""
+    if not isinstance(error, TypeSafeError):
+        return None
+    if isinstance(error, (TypeSafeRateLimitError, TypeSafeAPIConnectionError)):
+        return "retry"
+    if isinstance(error, (TypeSafeBadRequestError, TypeSafeUnprocessableEntityError)):
+        return "image"
+    if isinstance(error, TypeSafeAPIError) and error.status >= 500:
+        return "retry"
+    return "fatal"
+
+
 def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]], vehicle_number: str, model: str,
                  quantity: str | None = None, limits: Limits = Limits(), index: ImageIndex | None = None,
                  trip: str | None = None, cache: dict | None = None,
                  plant: tuple[float, float] | None = None, verra: bool = False,
                  box_model: str = BOX_MODEL, weighbridge: str | None = None,
-                 place_also: Iterable[str] = ()) -> tuple[dict, dict]:
+                 place_also: Iterable[str] = (), around=None) -> tuple[dict, dict]:
     """Check every image of a trip in parallel and decide.
 
     Returns ({"images": {role: [result]}, "verdict": ...}, {role: [image as sent]}). An image uploaded
@@ -212,16 +267,19 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
     against it. With `verra` (a Verra project trip), bills are checked for the material and the weighbridge's stamp.
     `box_model` answers the Box questions (finding the slip and the stamp's position line). With `weighbridge`, the
     weighbridge entered, bills are asked whether they are from it. `place_also` names other images to read where
-    they were taken (the verifier: collection photos whose collection point is known).
+    they were taken (the verifier: collection photos whose collection point is known). `around`, the trip's date,
+    gives the stamps and slips, which print no year, the year nearest it.
     """
     jobs = []  # (role, upload, image, fingerprints)
     for role in ROLES:
         for u in uploads.get(role, []):
             img = load_bytes(u.data)
             jobs.append((role, u, img, fingerprints(u.data, img)))
+    # A file uploaded twice for the same kind of image is asked about once; as a photo and as a bill, once in each
+    # slot, so a bill is always asked the bill questions. The first copy is found by its place, not its name.
     first_of = {}
-    for _, u, _, prints in jobs:
-        first_of.setdefault(prints["md5"], u.name)
+    for i, (role, _, _, prints) in enumerate(jobs):
+        first_of.setdefault((prints["md5"], SLOT_OF[role]), i)
     # Asked where it was taken: an unloading photo, also when the same file is a loading photo too, and any image
     # named in `place_also`.
     placed = {prints["md5"] for role, _, _, prints in jobs if role == "unloading"} if plant else set()
@@ -232,21 +290,40 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
         slot, place = SLOT_OF[role], prints["md5"] in placed
         asked = verra and slot == "bill"  # the Verra questions are only for bills
         bridge = weighbridge if slot == "bill" else None
-        return analyze(client, slot, img, vehicle_number, model, quantity, cache,
-                       answer_key(prints, slot, vehicle_number, quantity, model, place, asked, bridge), place, asked,
-                       box_model, bridge)
+        try:
+            return analyze(client, slot, img, vehicle_number, model, quantity, cache,
+                           answer_key(prints, slot, vehicle_number, quantity, model, place, asked, bridge), place, asked,
+                           box_model, bridge)
+        except TypeSafeError as error:
+            if (kind := failure_kind(error)) == "fatal":
+                raise JevRefused(f"Jev refused {u.name}: {error}") from error
+            return Unanswered(kind, f"{type(error).__name__}: {error}")
 
-    unique = [j for j in jobs if first_of[j[3]["md5"]] == j[1].name]
+    first = {i: first_of[(prints["md5"], SLOT_OF[role])] for i, (role, _, _, prints) in enumerate(jobs)}
+    unique = [i for i in range(len(jobs)) if first[i] == i]
     with ThreadPoolExecutor(max(1, min(8, len(unique)))) as pool:
-        done = dict(zip((j[3]["md5"] for j in unique), pool.map(run, unique)))
+        done = dict(zip(unique, pool.map(run, (jobs[i] for i in unique))))
+    failed = [d for d in done.values() if isinstance(d, Unanswered)]
+    if failed and len(failed) == len(unique) and all(d.kind == "image" for d in failed):
+        raise JevRefused(f"Jev refused every image of the trip: {failed[0].why}")
     images, sent = {role: [] for role in ROLES}, {role: [] for role in ROLES}
-    for role, u, _, prints in jobs:
-        result, img = done[prints["md5"]]
-        repeat = first_of[prints["md5"]] != u.name
+    unanswered = []  # images Jev didn't answer for: left out of the checks, and flagged
+    for i, (role, u, _, prints) in enumerate(jobs):
+        if isinstance(done[first[i]], Unanswered):
+            unanswered.append({"role": role, "name": u.name, "kind": done[first[i]].kind, "why": done[first[i]].why})
+            continue
+        result, img = done[first[i]]
+        repeat = first[i] != i
         images[role].append({**result, "name": u.name, "prints": prints, "requests": 0 if repeat else result["requests"],
                              "input_tokens": 0 if repeat else result["input_tokens"],
-                             "cost_usd": 0 if repeat else result["cost_usd"], "same_as": first_of[prints["md5"]] if repeat else None})
+                             "cost_usd": 0 if repeat else result["cost_usd"],
+                             "same_as": jobs[first[i]][1].name if repeat else None})
         sent[role].append(img)
     extra = [reuse_check(images, index, trip)] if index is not None else []
-    return {"images": images, "verdict": verdict(images, vehicle_number, quantity, limits, extra, plant, verra,
-                                                 weighbridge)}, sent
+    gone = {u["role"] for u in unanswered if not images[u["role"]]}
+    extra += [unanswered_check(role, [u["name"] for u in unanswered if u["role"] == role], role in gone)
+              for role in ROLES if any(u["role"] == role for u in unanswered)]
+    v = verdict(images, vehicle_number, quantity, limits, extra, plant, verra, weighbridge, around)
+    if gone:  # they were added, only not read: the unanswered check says so instead of "none added"
+        v = {**v, **decide_parts([c for c in v["checks"] if c["key"] not in {f"{role}_missing" for role in gone}])}
+    return {"images": images, "verdict": v, "unanswered": unanswered}, sent

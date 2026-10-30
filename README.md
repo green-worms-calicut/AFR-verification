@@ -207,7 +207,7 @@ A trip is a folder of images named by what they are, as in the inward log export
 trips/inward-2026-10-19/InwardLog-2026-10-19-2026-10-19/171773/
   collection1.jpg  collection2.jpg     loading photos (also loading*.jpg)
   unloading1.jpg   unloading2.jpg      unloading photos
-  weighbill1.jpg   weighbill2.jpg      weigh bills (also bill*.jpg; .heic files that are really JPEGs work too)
+  weighbill1.jpg   weighbill2.jpg      weigh bills (also bill*.jpg; .heic works too)
   trip.json                            optional: {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10,
                                                   "plant": "11.4404, 75.9420", "plant_radius": 500, "verra": true}
 ```
@@ -274,15 +274,15 @@ The report shows accuracy per field, accuracy at each confidence level per group
 
 ### Verifier service (gw_sales)
 
-`verifier/` runs the check as the service gw_sales calls for every new or edited disposal, as the Disposal Verification Contract sets out. It answers each signed request with 202, queues it, and later posts a signed result to the request's `callbackUrl`. Requests and results are kept in Postgres. A result is saved before it is sent, and sending is retried for up to 24 hours while gw_sales is down. A job runs every minute to pick up stalled or lost jobs.
+`verifier/` runs the check as the service gw_sales calls for every new or edited disposal, as the Disposal Verification Contract sets out. It answers each signed request with 202, queues it, and later posts a signed result to the request's `callbackUrl`. Requests and results are kept in Postgres. A result is saved before it is sent, and sending is retried for up to 24 hours while gw_sales is down. A job runs every minute to pick up stalled or lost jobs, and a check or send that crashed outside its own error handling (a database blip while saving) or whose worker died on it: it is queued again, up to 3 times, after which the check is sent as `outcome: error` or the send is given up.
 
-Each disposal is checked as one trip with `proof_check`. Its weigh bills, collection photos (as loading photos) and unloading photos are read from S3 by `s3Key`, and checked against the vehicle number and net quantity entered, with the facility's location as the plant. A disposal is a Verra project trip when one of its collection logs' clients has the Verra project as its default project. A photo that isn't in S3, or isn't an image, asks a person (`image_unavailable`, docs part), and the rest are still checked. Checks flagged for the same reason become one flag, whose `code` is the check's key. Severity follows from the check's part: a problem with the trip being real is `high`, an unsure Verra check is `info`, everything else `recheck`. The result also carries `extractions` (each part's status, the weighing timeline, each image's readings) and the `standard` it was checked against. proof_check's whole result and what Jev cost are kept in our database.
+Each disposal is checked as one trip with `proof_check`. Its weigh bills, collection photos (as loading photos) and unloading photos are read from S3 by `s3Key`, and checked against the vehicle number and net quantity entered, with the facility's location as the plant. A disposal is a Verra project trip when one of its collection logs' clients has the Verra project as its default project. A photo that isn't in S3, or isn't an image, or whose `s3Key` isn't under `disposal/` or `collection-logs/` (it isn't read at all), asks a person (`image_unavailable`, docs part), and the rest are still checked. The read-only S3 key should allow only those two folders: `deploy/s3-read-policy.example.json` is the policy to compare the real one with. A check is tried again only when trying again can change it: Jev busy or down for an image (5xx, 429, a timeout), or S3 or the database not reached, 6 tries over about 25 minutes. Jev's answers are saved in Postgres as each image is answered (`jev_answer`), so a retry asks only the images not answered yet. If one image still isn't answered on the last try, it is flagged like a missing photo (`image_unavailable`) and the other checks are sent. If Jev answered for none, or refused every image, or refused our key or model, or the check hit our own bug, the disposal is sent at once as `outcome: error` with an alert. Checks flagged for the same reason become one flag, whose `code` is the check's key. Severity follows from the check's part: a problem with the trip being real is `high`, an unsure Verra check is `info`, everything else `recheck`. The result also carries `extractions` (each part's status, the weighing timeline, each image's readings) and the `standard` it was checked against. proof_check's whole result and what Jev cost are kept in our database.
 
 Each disposal is also compared with what was kept for other disposals (`verifier/compare_disposals.py`). It only looks at its vehicle's other disposals with a trip within a day of its own date, each as last checked, and never at its own earlier requests (those are edits).
 - An image also in such a disposal is a problem if it's an exact copy, and asks a person if it's a look-alike (`reused`). This applies whatever the quantity entered: photos borrowed from another trip come with a different quantity. On 23 Oct, 173186's collection photos were 172929's unloading photos (1870 against 1990 kg).
 - A collection or unloading photo stamped within 5 minutes of one in another disposal asks a person (`same_moment`). Each other disposal is flagged once, by the first check that finds it, in the order reused, overlap, same moment, so `same_moment` is left for photos close in time whose trips don't overlap.
 - A trip whose photos (first collection photo to last unloading photo) overlap another disposal's by more than the clock slack is a problem, whatever its quantity (`overlap`). The weighings aren't used: one morning tare is often printed on every slip of the day, which made normal second and third trips look like overlaps (about 40 wrong flags on 19 and 23 Oct).
-- Within the disposal itself, one file used as both a collection and an unloading photo is a problem (`same_file`).
+- Within the disposal itself, one file used as both a collection and an unloading photo is a problem (`same_file`). This one is part of every trip's checks, so the command line, the folder runner and the test page catch it too.
 
 What was entered in gw_sales is also checked against the photos (`verifier/entry_checks.py`). gw_sales sends every time in UTC, and a photo's GPS stamp shows the phone's time (IST), so each time is turned into IST first. Stamps are read without a year, so dates are compared by day and month. Each of these asks a person when it fails:
 - Every collection log has a photo of its own. This flag is aimed at the log (`target`) (`collection_has_photos`, docs).
@@ -306,7 +306,7 @@ docker run -d --name jev-verifier-db --restart unless-stopped -p 127.0.0.1:5433:
   -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18
 ```
 
-Settings come from the environment: `VERIFIER_DATABASE_URL` (`postgresql://verifier@127.0.0.1:5433/verifier` for the dev one), `VERIFIER_WEBHOOK_SECRET` (gw_sales signs its requests with it), `VERIFIER_CALLBACK_SECRET` (we sign our results with it), `VERIFIER_API_KEY` (sent as `X-API-Key` with our results), `GW_SALES_URL` (results are only posted under it), `VERIFIER_S3_BUCKET` (the photos; AWS credentials and region come the usual AWS ways), the TypeSafe key (`TYPESAFE_API_KEY`, or on a laptop the keyring, as above), and optionally `VERIFIER_VERRA_PROJECT` (the project code that makes a disposal a Verra project trip; unset, no Verra checks).
+Settings come from the environment: `VERIFIER_DATABASE_URL` (`postgresql://verifier@127.0.0.1:5433/verifier` for the dev one), `VERIFIER_WEBHOOK_SECRET` (gw_sales signs its requests with it), `VERIFIER_CALLBACK_SECRET` (we sign our results with it), `VERIFIER_API_KEY` (sent as `X-API-Key` with our results), `GW_SALES_URL` (results are only posted under it), `VERIFIER_S3_BUCKET` (the photos; AWS credentials and region come the usual AWS ways), the TypeSafe key (`TYPESAFE_API_KEY`, or on a laptop the keyring, as above), optionally `VERIFIER_VERRA_PROJECT` (the project code that makes a disposal a Verra project trip; unset, no Verra checks), and while changing the webhook secret `VERIFIER_WEBHOOK_SECRET_NEXT` (the new one, accepted as well as the old until gw_sales has switched; then make it the only one). The secrets must be at least 32 characters (`openssl rand -hex 32`) and `GW_SALES_URL` must be `https://` (`http://localhost` or `http://127.0.0.1` only for tests), or the service won't start. Before deploying this, check the dev server's secrets: if one is shorter, agree a new one with gw_sales first. A request over 1 MB is refused (413) before its signature is checked.
 
 ```bash
 .venv/bin/python -m verifier migrate      # apply the queue's and our migrations not applied yet
@@ -322,16 +322,18 @@ Log lines start with the requestId; one that needs a person starts with `ALERT`:
 
 The verifier runs on one Linux server with Docker, from `deploy/docker-compose.yml`. That starts Postgres, runs the migrations, then starts the web receiver and the worker, and restarts any that stop. The image (`Dockerfile`) holds only `proof_check/`, `verifier/` and their requirements. `.dockerignore` keeps `trips/`, `eval/`, `mockups/` and any `.env` out.
 
-1. Copy `deploy/dev.env.example` to `deploy/dev.env` on the server, fill it in, and make it root-only (`chmod 600`). It holds the secrets, so it is never committed (`deploy/*.env` is ignored) and never pasted anywhere.
-2. `cd deploy && sudo docker compose --env-file dev.env up -d --build`
-3. Put an HTTPS proxy (Caddy or nginx) at the verifier's URL, forwarding to `127.0.0.1:8080`. Give gw_sales that URL.
+1. Copy `deploy/dev.env.example` to `deploy/dev.env` on the server, fill it in, and make it root-only (`chmod 600`). It holds the secrets, so it is never committed (`deploy/*.env` is ignored) and never pasted anywhere. Make the passwords and secrets with `openssl rand -hex 32`.
+2. `cd deploy && sudo docker compose --env-file dev.env up -d --build`. On a new database volume Postgres runs `deploy/db-init/01-app-role.sh`, which makes the app's own login, `verifier_app`, owner of the `verifier` database; the web receiver and the worker connect as it, not as the superuser. A server set up before this has its database made the old way: since the dev database holds no real data yet, recreate it with `sudo docker compose --env-file dev.env down -v` (this deletes the database volume and everything in it) and step 2 again.
+3. Put an HTTPS proxy at the verifier's URL that forwards only `/v1/verifications` to `127.0.0.1:8080`, with a 1 MB request limit: `deploy/Caddyfile.example` does that with Caddy. Give gw_sales that URL.
+4. Back up the database each night: add `deploy/backup.sh` to root's crontab (the line is at its top). It keeps 14 days of copies in `/var/backups/jev-verifier`, and its top also says how to restore one. The copies stay on the server, so copy them somewhere else too.
 
 The photos are read from S3 with a read-only access key for `disposal/*` and `collection-logs/*`, because the server isn't on AWS.
 
 Monitoring:
 - **Logs:** one JSON object per line, with `requestId` when the line is about a request, and `"alert": true` on a line a person must act on (`sudo docker compose logs -f web worker`). In a terminal the lines are plain text.
 - **Health:** `GET /health` says the process is up, which the container's health check uses. `GET /ready` says the database can be reached.
-- **Daily summary:** every day at 00:05 IST the worker logs the day before: requests by reason, outcomes, flags by code, Jev's cost, and results still waiting or given up. It logs an alert when any result is waiting or given up. `python -m verifier report [--day 2026-10-29]` prints the same summary.
+- **Worker heartbeat:** the worker's sweep notes the time every minute, and the web process logs an alert when it has heard nothing for 5 minutes (again every 30 minutes while it stays silent), since Docker doesn't restart a worker that hangs.
+- **Daily summary:** every day at 00:05 IST the worker logs the day before: requests by reason, outcomes, flags by code, Jev's cost, results still waiting or given up, and requests that have no result. It logs an alert when any of those three isn't 0. `python -m verifier report [--day 2026-10-29]` prints the same summary.
 
 ### Tests
 
@@ -391,7 +393,7 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 - **Reused images** are found only among the trips under `trips/` (or the folder `tools/check_trip_folders.py` is given). A copy that was cropped or edited may not be found.
 - **Net weight in kilograms.** The quantity is compared with the final slip's net weight as a number of kilograms.
 - **Other weighbridge layouts.** A Lakshmi-style trip (one print time per slip) needs both its first and final slip uploaded; with only the final slip, its times can't be read and it goes to a person. A layout not seen yet may not be read either.
-- **Image size limits.** PNG or JPEG only (real HEIC isn't), 280–1568 px on each side after scaling, at most 16 MiB per file.
+- **Image size limits.** Jev takes PNG or JPEG, 280–1568 px on each side after scaling, at most 16 MiB per file. Every image is opened here and sent as JPEG, so real HEIC photos work (read with pillow-heif). A photo over 50 MP is read at 4000 px on its long side. One over 250 MP is refused from the size in its header, without being decoded, and like a cut-off file or a file that isn't an image it is flagged as unreadable.
 
 ## Files
 

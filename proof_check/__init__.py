@@ -78,13 +78,15 @@ from proof_check.questions import (
     OUR_COMPANY, WEIGHBRIDGE, REPORT, questions_for, question_version, SLIP
 )
 from proof_check.images import (
-    MIN_SIDE, MAX_SIDE, ROLES, SLOT_OF, ROLE_TITLES, IMAGE_TYPES, fit, Upload, role_of, read_trip_folder, load_bytes,
+    MIN_SIDE, MAX_SIDE, MAX_PIXELS, REDUCED_SIDE, UNREADABLE, ROLES, SLOT_OF, ROLE_TITLES, IMAGE_TYPES, fit, Upload,
+    role_of, read_trip_folder, load_bytes,
     load, fingerprints, LOOKS_ALIKE, FEATURELESS, ImageIndex, cut_line, cut_slip
 )
 from proof_check.trip_rules import (
-    CONFIDENT, YES, NO, NOUL_THRESHOLDS, Limits, LIMIT_NAMES, LIMIT_UNITS, NOUL_CHECKS, CHOICE_CHECKS, FINAL_ONLY,
-    GROUPS, PARTS, PART_OF, readings_for, position, to_24h, same_hour, lower_first, unsure, noul_status, checks_for,
+    CONFIDENT, YES, NO, LEANS, NOUL_THRESHOLDS, Limits, LIMIT_NAMES, LIMIT_UNITS, NOUL_CHECKS, CHOICE_CHECKS, FINAL_ONLY,
+    GROUPS, PARTS, PART_OF, readings_for, position, to_24h, same_hour, lower_first, unsure, unsure_yes, noul_status, checks_for, unanswered_check,
     YEAR, moment, minutes_between, duration, show, weighings, first_slip, check, names, named, plural, EACH_PHOTO,
+    unsure_stamps, same_file, stamp_year,
     each_photo, plate_check, photo_checks, metres_between, distance, from_square, chance_away, plant_check, near_check,
     final_slip, LOOK_FOR, choice_check, seal_checks, verra_checks, bill_checks, weighbridge_check, photo_moments,
     busy_time,
@@ -95,5 +97,6 @@ from proof_check.inputs import normalize_vehicle_number, parse_limits, parse_qua
 from proof_check.verdict import TITLES, timeline, decide, decide_parts, verdict, add_checks
 from proof_check.ask_jev import (
     PRICE_PER_INPUT_TOKEN, HEADERS, TIMEOUT, ROTATE, SIDEWAYS, KEY_LOOKUP, KEY_STORE_COMMAND, NO_KEY, api_key, ask,
-    top, summary, TURNING, answer_key, result_from, turn_for, find_slip, read_line, analyze, analyze_trip
+    top, summary, TURNING, answer_key, result_from, fill_missing, turn_for, find_slip, read_line, analyze, JevRefused, Unanswered,
+    failure_kind, analyze_trip
 )

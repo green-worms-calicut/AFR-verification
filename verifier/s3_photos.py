@@ -1,17 +1,24 @@
 """The disposal's photos, read from S3 by s3Key with read-only access (gw_sales' disposal/* and collection-logs/*).
 
-A key that isn't there comes back as None, to be flagged; any other S3 failure (access, network) is raised, so
-the check is retried and in the end sent as an error.
+A key that isn't there comes back as None, to be flagged. S3 busy or failing (5xx, throttling, a timeout) raises
+S3Unavailable, so the check is retried; any other S3 failure (access) is raised and sent as an error at once.
 """
 
-import io
-
 from botocore.exceptions import ClientError
-from PIL import Image as PILImage
-from PIL import UnidentifiedImageError
+
+from proof_check import UNREADABLE, load_bytes
 
 NOT_THERE = {"NoSuchKey", "404", "NotFound"}
+BUSY = {"SlowDown", "Throttling", "ThrottlingException", "RequestTimeout", "ServiceUnavailable", "InternalError"}
+
+
+class S3Unavailable(Exception):
+    """S3 was busy or failing for a moment: worth trying again."""
 MAX_BYTES = 30 * 1024 * 1024  # a phone photo or scan is far smaller; bigger isn't read
+# gw_sales' photo folders: a key elsewhere isn't read, whatever the read-only key's AWS policy allows
+# (deploy/s3-read-policy.example.json allows only these two).
+PHOTO_PREFIXES = ("disposal/", "collection-logs/")
+OUTSIDE = "isn't in one of gw_sales' photo folders"
 
 
 class Photos:
@@ -22,8 +29,11 @@ class Photos:
         try:
             found = self.s3.get_object(Bucket=self.bucket, Key=key)
         except ClientError as error:
-            if error.response.get("Error", {}).get("Code") in NOT_THERE:
+            code = error.response.get("Error", {}).get("Code")
+            if code in NOT_THERE:
                 return None
+            if code in BUSY or error.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0) >= 500:
+                raise S3Unavailable(f"S3 {code} for {key}") from error
             raise
         with found["Body"] as body:
             return body.read(MAX_BYTES + 1)
@@ -36,8 +46,7 @@ def problem(data: bytes | None) -> str | None:
     if len(data) > MAX_BYTES:
         return "is too large to read"
     try:
-        with PILImage.open(io.BytesIO(data)) as img:
-            img.verify()
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+        load_bytes(data)  # decoded in full: verify() alone lets a cut-off JPEG through
+    except UNREADABLE:
         return "isn't an image that can be read"
     return None

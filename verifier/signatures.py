@@ -29,4 +29,7 @@ def verify(body: bytes, timestamp: str | None, sent: str | None, secret: str, no
         return False
     if abs((time.time() if now is None else now) - sent_at) > TOLERANCE:
         return False
-    return hmac.compare_digest(signature(body, timestamp, secret), sent or "")
+    try:
+        return hmac.compare_digest(signature(body, timestamp, secret), sent or "")
+    except TypeError:  # a signature header with non-ASCII characters: not ours
+        return False

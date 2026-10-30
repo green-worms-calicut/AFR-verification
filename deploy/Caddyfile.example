@@ -1,0 +1,14 @@
+# The verifier's HTTPS proxy (Caddy gets and renews the certificate itself). Put the verifier's real host name in
+# place of verifier.example.org. Only gw_sales' requests are let through: /health and /ready stay on the server
+# (127.0.0.1:8080), and a request over 1 MB is refused before it reaches the verifier.
+verifier.example.org {
+	request_body {
+		max_size 1MB
+	}
+	handle /v1/verifications {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle {
+		respond 404
+	}
+}

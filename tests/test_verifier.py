@@ -8,6 +8,8 @@ Run:
     .venv/bin/python -m unittest discover -s tests -v
 """
 
+import asyncio
+import io
 import json
 import logging
 import os
@@ -16,7 +18,8 @@ import tempfile
 import time
 import unittest
 import uuid
-from datetime import date, datetime
+from dataclasses import replace
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +27,7 @@ import boto3
 import httpx
 import psycopg
 from moto import mock_aws
+from PIL import Image as PILImage
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
@@ -32,13 +36,14 @@ import proof_check  # noqa: E402
 from proof_check import Upload  # noqa: E402
 from test_proof_check import (AT_PLANT, COLOURS, FINAL, FIRST, LOADING, NUMBER, PLANT, PULATH, QUANTITY,  # noqa: E402
                               UNLOADING, FakeJev, at, coloured, make_trip, sent, stamp)
-from verifier import api, compare_disposals, database, disposal_check, logs, migrate, signatures, standards, tasks  # noqa: E402
+from verifier import (api, compare_disposals, database, disposal_check, entry_checks, logs, migrate, s3_photos,  # noqa: E402
+                      signatures, standards, tasks)
 from verifier.settings import Settings  # noqa: E402
 
 DB = os.environ.get("VERIFIER_TEST_DATABASE_URL", "postgresql://verifier@127.0.0.1:5433/verifier_test")
 GW = "https://dev-sales.example"
 BUCKET = "gw-photos"
-SETTINGS = Settings(database_url=DB, webhook_secret="webhook-secret", callback_secret="callback-secret",
+SETTINGS = Settings(database_url=DB, webhook_secret="webhook-secret-of-32-characters-0", callback_secret="callback-secret-of-32-characters-",
                     api_key="gws_test_key", gw_sales_url=GW, s3_bucket=BUCKET, typesafe_api_key="test")
 DISPOSAL = 1234
 # Where gw_sales keeps each kind of image, and its evidence category.
@@ -81,7 +86,8 @@ def other_trip(prefix: str = "b-", colours: int = 6, loading=LOADING, unloading=
     """Another trip of the same vehicle, its images named with `prefix`: in colours from COLOURS[colours] on
     (different images; 0 and another `quality` makes look-alikes of make_trip's), answered by its own fake Jev."""
     uploads, by_colour, n = {}, {}, colours
-    for kind, items, name in (("loading", (loading, loading), "collection"), ("unloading", (unloading, unloading), "unloading"),
+    pair = lambda picks: picks if isinstance(picks, tuple) else (picks, picks)  # one picks for both, or one each
+    for kind, items, name in (("loading", pair(loading), "collection"), ("unloading", pair(unloading), "unloading"),
                               ("bill", bill, "weighbill")):
         uploads[kind] = []
         for i, picks in enumerate(items):
@@ -147,6 +153,33 @@ class SigningTests(unittest.TestCase):
         self.assertFalse(signatures.verify(body, ts, sig, "other", now=now), "other secret")
         self.assertFalse(signatures.verify(body, "soon", sig, "s", now=now))
         self.assertFalse(signatures.verify(body, None, None, "s", now=now))
+        self.assertFalse(signatures.verify(body, ts, "sha256=é", "s", now=now), "not ASCII: refused, not an error")
+
+
+class SettingsTests(unittest.TestCase):
+    ENV = {"VERIFIER_DATABASE_URL": DB, "VERIFIER_WEBHOOK_SECRET": "w" * 32, "VERIFIER_CALLBACK_SECRET": "c" * 32,
+           "VERIFIER_API_KEY": "gws_test_key", "GW_SALES_URL": GW, "VERIFIER_S3_BUCKET": BUCKET, "TYPESAFE_API_KEY": "test"}
+
+    def from_env(self, **changes):
+        with mock.patch.dict(os.environ, {**self.ENV, **changes}):
+            return Settings.from_env()
+
+    def test_good_settings(self):
+        self.assertEqual(self.from_env().gw_sales_url, GW)
+        self.assertEqual(self.from_env(GW_SALES_URL="http://127.0.0.1:8001").gw_sales_url, "http://127.0.0.1:8001",
+                         "http only on this machine, for tests")
+
+    def test_results_are_only_sent_over_https(self):
+        with self.assertRaises(SystemExit) as e:
+            self.from_env(GW_SALES_URL="http://dev-sales.example")
+        self.assertIn("GW_SALES_URL", str(e.exception))
+
+    def test_secrets_are_long(self):
+        for name in ("VERIFIER_WEBHOOK_SECRET", "VERIFIER_CALLBACK_SECRET", "VERIFIER_WEBHOOK_SECRET_NEXT"):
+            with self.subTest(name=name):
+                with self.assertRaises(SystemExit) as e:
+                    self.from_env(**{name: "short"})
+                self.assertIn(name, str(e.exception))
 
 
 class DisposalTests(unittest.TestCase):
@@ -182,7 +215,46 @@ class DisposalTests(unittest.TestCase):
     def test_trip_date_is_in_ist(self):
         self.assertEqual(disposal_check.disposal(disposal(arrivalTime="2026-10-27T19:00:00.000Z")).day, date(2026, 10, 28))
         self.assertEqual(disposal_check.disposal(disposal(arrivalTime=None)).day, date(2026, 10, 15), "from createdAt")
-        self.assertEqual(standards.ist_day("2026-10-27 18:29:59"), date(2026, 10, 27), "no zone: taken as UTC")
+        with self.assertLogs("verifier", "WARNING"):
+            self.assertEqual(standards.ist_day("2026-10-27 18:29:59"), date(2026, 10, 27), "no zone: taken as IST")
+
+    def test_a_zone_less_time_is_read_as_ist(self):
+        with self.assertLogs("verifier", "WARNING") as logs:
+            at = standards.ist_time("2026-10-15T09:00:00")
+        self.assertEqual((at.hour, at.minute, at.utcoffset().total_seconds()), (9, 0, 5.5 * 3600))
+        self.assertIn("2026-10-15T09:00:00", logs.output[0])
+
+
+class PhotoProblemTests(unittest.TestCase):
+    """Which fetched files are flagged as unreadable instead of crashing the check."""
+
+    def test_a_truncated_jpeg_is_unreadable(self):
+        self.assertEqual(s3_photos.problem(coloured(COLOURS[0])[:-2000]), "isn't an image that can be read")
+
+    def test_a_photo_too_large_to_open_is_unreadable(self):
+        buffer = io.BytesIO()
+        PILImage.new("RGB", (3000, 2000)).save(buffer, "JPEG", quality=50)
+        with mock.patch.object(PILImage, "MAX_IMAGE_PIXELS", 1_000_000):
+            self.assertEqual(s3_photos.problem(buffer.getvalue()), "isn't an image that can be read")
+
+    def test_s3_busy_or_failing_is_retried_but_access_denied_is_not(self):
+        from botocore.exceptions import ClientError
+
+        def s3_answering(code, status):
+            error = ClientError({"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}}, "GetObject")
+            return mock.Mock(get_object=mock.Mock(side_effect=error))
+
+        job = mock.Mock(attempts=0)
+        for code, status in (("SlowDown", 503), ("InternalError", 500), ("RequestTimeout", 400)):
+            with self.subTest(code=code), self.assertRaises(s3_photos.S3Unavailable) as e:
+                s3_photos.Photos(s3_answering(code, status), BUCKET).fetch("disposal/x.jpg")
+            self.assertFalse(tasks.VERIFY_RETRY.gives_up(e.exception, job), "retried")
+        with self.assertRaises(Exception) as e:
+            s3_photos.Photos(s3_answering("AccessDenied", 403), BUCKET).fetch("disposal/x.jpg")
+        self.assertTrue(tasks.VERIFY_RETRY.gives_up(e.exception, job), "our key's policy: retrying won't change it")
+
+    def test_a_good_photo_has_no_problem(self):
+        self.assertIsNone(s3_photos.problem(coloured(COLOURS[0])))
 
 
 class StandardTests(unittest.TestCase):
@@ -219,6 +291,24 @@ class CheckTests(unittest.TestCase):
         self.assertIn("disposal/2026/10/15/weighbill2.jpg", checked.extractions["images"])
         self.assertGreater(checked.cost_usd, 0)
         json.dumps(checked.analysis, default=str)
+
+    def test_only_gw_sales_photo_folders_are_read(self):
+        uploads, jev = make_trip()
+        request = disposal(uploads)
+        request["evidence"].append({**request["evidence"][-1], "s3Key": "secrets/x.jpg"})
+        fetched = []
+        stored = files(uploads)
+
+        def fetch(key):
+            fetched.append(key)
+            return stored.get(key)
+
+        with jev.client() as client:
+            checked = disposal_check.check(request, fetch, client)
+        self.assertNotIn("secrets/x.jpg", fetched)
+        flag = next(f for f in checked.flags if f["code"] == "image_unavailable")
+        self.assertEqual(flag["evidence"], ["secrets/x.jpg"])
+        self.assertIn("isn't in one of gw_sales' photo folders", flag["message"])
 
     def test_flags_carry_code_evidence_and_severity(self):
         wrong = {**FINAL, "bill_number": ("different", 0.92)}
@@ -318,6 +408,14 @@ class EntryCheckTests(unittest.TestCase):
         self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
         self.assertEqual(flag["target"], {"type": "collection_log", "id": 45002})
         self.assertIn("Collection log 45002 (XYZ School, Main Kitchen) has no collection photo", flag["message"])
+
+    def test_unloading_just_before_new_year_is_not_late(self):
+        # End 31 Dec 23:00 IST, unloading stamped 31/12 23:20: by the end time + 1 h 30 min, across New Year.
+        images = {"unloading": [{"name": "unloading1.jpg", "readings": [
+            {"key": "photo_time", "value": "23:20", "missing": False, "min_confidence": 0.95},
+            {"key": "photo_date", "value": "31/12", "missing": False, "min_confidence": 0.95}]}]}
+        request = disposal(endTime="2026-12-31T17:30:00.000Z")
+        self.assertEqual(entry_checks.too_late(request, images, around=date(2026, 12, 31))["status"], "pass")
 
     def test_unloading_long_after_the_end_time_asks_a_person(self):
         # End 14 Oct 21:00 UTC = 15 Oct 02:30 IST, so photos by 04:00; the unloading photos are 04:09.
@@ -490,6 +588,17 @@ class CompareTests(unittest.TestCase):
         checked = self.checked(uploads, jev, [self.first()], quantity=999)
         self.assertEqual(next(c for c in checked.analysis["verdict"]["checks"] if c["key"] == "overlap")["status"], "pass")
 
+    def test_overlap_on_an_unsure_stamp_asks_a_person(self):
+        # This trip ran 05:20-06:40 by its sure stamps; one unloading stamp read as 03:00, only 30% sure, would put it
+        # on disposal 1000's trip (02:40-04:09).
+        unsure = {**UNLOADING, **stamp("03:00", confidence=0.3)}
+        uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading=({**UNLOADING, **stamp("06:40")}, unsure),
+                                  bill=(FIRST, {**FINAL, **at("gross", "05:00")}))
+        flag = self.flag(self.checked(uploads, jev, [self.first()], quantity=999), "overlap")
+        self.assertEqual(flag["kind"], "please check")
+        self.assertIn("b-unloading2.jpg", flag["message"])
+        self.assertIn("30% sure", flag["message"])
+
     def test_trips_without_both_kinds_of_photo_are_not_timed(self):
         uploads, jev = other_trip()
         uploads["unloading"] = []
@@ -514,6 +623,8 @@ class CompareTests(unittest.TestCase):
         keys = {c["key"] for c in checked.analysis["verdict"]["checks"]}
         self.assertIn("same_file", keys)
         self.assertFalse(keys & {"reused", "same_moment", "overlap"})
+        c = next(c for c in checked.analysis["verdict"]["checks"] if c["key"] == "not_compared")
+        self.assertEqual((c["status"], c["part"]), ("review", "real"))
 
 
 class FlagTests(unittest.TestCase):
@@ -573,6 +684,15 @@ class BackoffTests(unittest.TestCase):
         self.assertEqual(max(waits), 3600)
         self.assertTrue(23 * 3600 < sum(waits) <= 24 * 3600, sum(waits))
 
+    def test_checking_retries_only_what_can_change(self):
+        job = mock.Mock(attempts=0)
+        self.assertTrue(tasks.VERIFY_RETRY.gives_up(KeyError("weigh_bill"), job), "a bug fails at once")
+        for attempts in range(5):
+            job.attempts = attempts
+            self.assertFalse(tasks.VERIFY_RETRY.gives_up(disposal_check.JevUnavailable(), job), attempts)
+        job.attempts = 5
+        self.assertTrue(tasks.VERIFY_RETRY.gives_up(disposal_check.JevUnavailable(), job), "6 tries in all")
+
     def test_only_unavailable_is_retried_when_sending(self):
         job = mock.Mock(attempts=0)
         self.assertIsNone(tasks.SEND_RETRY.get_retry_decision(exception=ValueError(), job=job))
@@ -618,6 +738,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         applied = await self.migrate()
         self.assertTrue(applied[0].startswith("procrastinate 3."), applied)
         self.assertIn("verifier/001_requests_and_results.sql", applied)
+        self.assertIn("verifier/004_jev_answers.sql", applied)
         recorded = await self.recorded()
         self.assertTrue({"procrastinate/" + p.name for p in migrate.procrastinate_migrations()} <= recorded)
         self.assertEqual(await self.migrate(), [])
@@ -754,6 +875,19 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 401)
         self.assertEqual(await self.sql("SELECT * FROM verification_request"), [])
 
+    async def test_a_large_request_is_refused_before_anything_else(self):
+        body = b'{"padding": "' + b"x" * (2 * 1024 * 1024) + b'"}'
+        response = await self.client.post("/v1/verifications", content=body, headers={"Content-Type": "application/json"})
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(await self.sql("SELECT count(*) FROM verification_request"), [(0,)])
+
+    async def test_the_next_secret_is_accepted_while_switching(self):
+        request = disposal()
+        body, headers = signed(request, secret="next-webhook-secret-of-32-chars-0")
+        with mock.patch.object(self.svc, "settings", replace(SETTINGS, webhook_secret_next="next-webhook-secret-of-32-chars-0")):
+            response = await self.client.post("/v1/verifications", content=body, headers=headers)
+        self.assertEqual(response.status_code, 202)
+
     async def test_signature_is_checked_on_the_raw_bytes(self):
         request = disposal()
         body, headers = signed(request)
@@ -839,7 +973,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_checking_error_is_retried_then_sent_as_error(self):
         request = disposal()
-        with mock.patch.object(disposal_check, "check", side_effect=RuntimeError("Jev down")):
+        with mock.patch.object(disposal_check, "check", side_effect=disposal_check.JevUnavailable("Jev down")):
             await self.post(request)
             with self.assertLogs("verifier", "WARNING"):
                 await self.work()
@@ -849,8 +983,72 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 await self.work()
         result = self.gw.stored[request["requestId"]]
         self.assertEqual(result["outcome"], "error")
-        self.assertEqual(result["error"]["code"], "RuntimeError")
+        self.assertEqual(result["error"]["code"], "JevUnavailable")
         self.assertNotIn("Jev down", json.dumps(result))
+
+    async def test_a_bug_is_not_retried(self):
+        request = disposal()
+        with mock.patch.object(disposal_check, "check", side_effect=KeyError("weigh_bill")):
+            await self.post(request)
+            with self.assertLogs("verifier", "ERROR") as logs:
+                await self.work()
+        self.assertEqual(self.gw.stored[request["requestId"]]["outcome"], "error")
+        self.assertTrue(any("ALERT" in line for line in logs.output))
+
+    async def last_try(self):
+        """Run the verify job's last try now."""
+        await self.sql("UPDATE procrastinate_jobs SET attempts = 10, scheduled_at = now() WHERE task_name = 'verify'")
+        await self.work()
+
+    def photo_requests(self) -> int:
+        """Requests the fake Jev got for the loading and unloading photos (make_trip's first four colours)."""
+        return sum(self.jev.colour_of(sent(r)) in COLOURS[:4] for r in self.jev.requests)
+
+    async def test_jev_down_for_one_image_retries_then_sends_the_rest(self):
+        request = disposal(self.store_trip())
+        self.jev.fail = {COLOURS[5]: 500}  # the final slip
+        await self.post(request)
+        with self.assertLogs("verifier", "WARNING"):
+            await self.work()
+        self.assertEqual(self.gw.stored, {}, "retried, not sent yet")
+        asked = self.photo_requests()
+        await self.last_try()
+        self.assertEqual(self.photo_requests(), asked, "the photos' answers were saved, not asked again")
+        result = self.gw.stored[request["requestId"]]
+        self.assertEqual(result["outcome"], "flagged")
+        unread = [f for f in result["flags"] if f["code"] == "image_unavailable"]
+        self.assertEqual(sum((f["evidence"] for f in unread), []), ["disposal/2026/10/15/weighbill2.jpg"])
+
+    async def test_jev_down_for_everything_sends_error(self):
+        request = disposal(self.store_trip())
+        self.jev.fail = {c: 500 for c in COLOURS[:6]}
+        await self.post(request)
+        with self.assertLogs("verifier", "WARNING"):
+            await self.work()
+        with self.assertLogs("verifier", "ERROR"):
+            await self.last_try()
+        self.assertEqual(self.gw.stored[request["requestId"]]["outcome"], "error")
+
+    async def test_jev_refusing_every_image_sends_error_at_once(self):
+        request = disposal(self.store_trip())
+        self.jev.fail = {c: 422 for c in COLOURS[:6]}
+        await self.post(request)
+        with self.assertLogs("verifier", "ERROR"):
+            await self.work()
+        self.assertEqual(self.gw.stored[request["requestId"]]["outcome"], "error")
+
+    async def test_missing_in_s3_and_unanswered_are_both_flagged(self):
+        request = disposal(self.store_trip())
+        boto3.client("s3").delete_object(Bucket=BUCKET, Key="collection-logs/2026/10/15/collection1.jpg")
+        self.jev.fail = {COLOURS[5]: 500}
+        await self.post(request)
+        with self.assertLogs("verifier", "WARNING"):
+            await self.work()
+            await self.last_try()
+        result = self.gw.stored[request["requestId"]]
+        self.assertEqual(result["outcome"], "flagged")
+        unread = sorted(sum((f["evidence"] for f in result["flags"] if f["code"] == "image_unavailable"), []))
+        self.assertEqual(unread, ["collection-logs/2026/10/15/collection1.jpg", "disposal/2026/10/15/weighbill2.jpg"])
 
     async def test_sweep_queues_lost_work(self):
         lost_check, lost_send = disposal(), disposal()
@@ -894,6 +1092,94 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def sweep(self):
         await tasks.sweep(timestamp=int(time.time()))
 
+    async def make_old(self):
+        """Make every request and result old enough for the sweep to look at."""
+        await self.sql("UPDATE verification_request SET received_at = now() - interval '5 minutes'")
+        await self.sql("UPDATE verification_result SET made_at = now() - interval '5 minutes'")
+
+    def failing(self, target, times: int):
+        """Patch `database.<target>` to raise for its first `times` calls, as a database blip would."""
+        real, calls = getattr(database, target), []
+
+        async def flaky(*args, **kw):
+            calls.append(1)
+            if len(calls) <= times:
+                raise RuntimeError("database blip")
+            return await real(*args, **kw)
+
+        return mock.patch.object(database, target, flaky)
+
+    async def test_a_verify_that_crashed_outside_its_try_is_queued_again(self):
+        request = disposal(self.store_trip())
+        with self.failing("save_result", 1):
+            await self.post(request)
+            with self.assertLogs("procrastinate", "ERROR"):  # the job crashes: Procrastinate logs it
+                await self.work()
+            self.assertEqual(self.gw.stored, {})
+            await self.make_old()
+            with self.assertLogs("verifier", "ERROR") as logs:
+                await self.sweep()
+            self.assertTrue(any("ALERT" in line for line in logs.output))
+            await self.work()
+        self.assertEqual(self.gw.stored[request["requestId"]]["outcome"], "passed")
+
+    async def test_a_verify_that_keeps_crashing_ends_as_error(self):
+        request = disposal(self.store_trip())
+        with self.failing("save_result", 1 + tasks.MAX_REQUEUES), self.assertLogs("verifier", "WARNING"):
+            await self.post(request)
+            await self.work()
+            await self.make_old()
+            for _ in range(tasks.MAX_REQUEUES):
+                await self.sweep()
+                await self.work()
+            await self.sweep()  # at the cap: an error result is saved and sent
+            await self.work()
+        self.assertEqual(self.gw.stored[request["requestId"]]["outcome"], "error")
+
+    async def test_a_job_whose_worker_keeps_dying_is_given_up(self):
+        # A file that kills the worker (out of memory, a native decoder crashing) leaves its job stalled, not failed:
+        # it is retried, counted like any other requeue, and given up at the cap.
+        request = disposal()
+        await database.save_request(self.svc.pool, request)
+        rid = request["requestId"]
+        stalled = mock.Mock(id=1, task_name="verify", task_kwargs={"request_id": rid})
+        manager = tasks.app.job_manager
+        with mock.patch.object(manager, "get_stalled_jobs", mock.AsyncMock(return_value=[stalled])), \
+                mock.patch.object(manager, "retry_job", mock.AsyncMock()) as retried, \
+                mock.patch.object(manager, "finish_job_by_id_async", mock.AsyncMock()) as finished, \
+                self.assertLogs("verifier", "WARNING"):
+            for _ in range(tasks.MAX_REQUEUES):
+                await self.sweep()
+            self.assertEqual((retried.await_count, finished.await_count), (tasks.MAX_REQUEUES, 0))
+            await self.sweep()
+            finished.assert_awaited_once()
+        self.assertEqual((await database.result(self.svc.pool, rid))["body"]["outcome"], "error")
+
+    async def test_a_send_that_crashed_is_sent_again(self):
+        request = disposal(self.store_trip())
+        with self.failing("note_attempt", 1):
+            await self.post(request)
+            with self.assertLogs("procrastinate", "ERROR"):  # the job crashes: Procrastinate logs it
+                await self.work()
+            await self.make_old()
+            with self.assertLogs("verifier", "ERROR"):
+                await self.sweep()
+            await self.work()
+        self.assertEqual(len(self.gw.calls), 2, "sent again: gw_sales answers a repeated requestId with 200")
+        self.assertIsNotNone((await database.result(self.svc.pool, request["requestId"]))["sent_at"])
+
+    async def test_a_send_that_keeps_crashing_is_given_up(self):
+        request = disposal(self.store_trip())
+        with self.failing("note_attempt", 1 + tasks.MAX_REQUEUES), self.assertLogs("verifier", "WARNING"):
+            await self.post(request)
+            await self.work()
+            await self.make_old()
+            for _ in range(tasks.MAX_REQUEUES):
+                await self.sweep()
+                await self.work()
+            await self.sweep()
+        self.assertIsNotNone((await database.result(self.svc.pool, request["requestId"]))["gave_up_at"])
+
     # Comparing disposals
 
     async def test_a_second_disposal_with_the_same_photos_names_the_first(self):
@@ -921,6 +1207,28 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.work()
         self.assertEqual(self.gw.stored[edit["requestId"]]["outcome"], "passed")
 
+    async def test_a_disposal_is_compared_as_last_edited(self):
+        uploads = self.store_trip()
+        await self.post(disposal(uploads, disposal_id=1000))
+        await self.work()
+        await self.post(disposal(uploads, disposal_id=1000, reason="edited", data_version="sha256:bbb",
+                                 vehicle={"id": 13, "vehicleNumber": "kl 07 bc 1234"}))
+        await self.work()
+        again = disposal(uploads, disposal_id=1001)
+        await self.post(again)
+        await self.work()
+        self.assertNotIn("reused", {f["code"] for f in self.gw.stored[again["requestId"]]["flags"]},
+                         "1000 is now another vehicle's")
+
+    async def test_a_disposal_whose_last_edit_is_not_checked_yet_is_left_out(self):
+        uploads = self.store_trip()
+        await self.post(disposal(uploads, disposal_id=1000))
+        await self.work()
+        await database.save_request(self.svc.pool, disposal(uploads, disposal_id=1000, reason="edited",
+                                                            data_version="sha256:bbb"))
+        self.assertEqual(await database.others(self.svc.pool, 1001, NUMBER, date(2026, 10, 15)), [],
+                         "its earlier photos may have been changed")
+
     async def test_only_disposals_within_a_day_are_compared(self):
         uploads = self.store_trip()
         await self.post(disposal(uploads, disposal_id=1000, arrivalTime="2026-10-13T03:00:00.000Z"))  # two days before
@@ -929,6 +1237,53 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.post(again)
         await self.work()
         self.assertEqual(self.gw.stored[again["requestId"]]["outcome"], "passed")
+
+    async def test_answers_are_saved_as_they_come(self):
+        request = disposal()
+        await database.save_request(self.svc.pool, request)
+        rid = request["requestId"]
+        answers = database.SavedAnswers(self.svc.pool, asyncio.get_running_loop(), rid, {})
+
+        def in_the_worker_thread():
+            answers["k1"] = {"a": 1}
+            answers["k1"] = {"a": 1}  # an image asked again after a crash: kept once, no error
+            return "k1" in answers, answers["k1"]
+
+        self.assertEqual(await asyncio.to_thread(in_the_worker_thread), (True, {"a": 1}))
+        self.assertEqual(await database.saved_answers(self.svc.pool, rid), {"k1": {"a": 1}})
+        self.assertEqual(await database.saved_answers(self.svc.pool, str(uuid.uuid4())), {})
+
+    async def test_the_sweep_looks_back_a_week(self):
+        old = disposal()
+        await database.save_request(self.svc.pool, old)
+        await self.sql("UPDATE verification_request SET received_at = now() - interval '8 days'")
+        waiting = await database.waiting(self.svc.pool, datetime.now(standards.IST))
+        self.assertEqual(waiting["verify"], [], "older than a week: the daily report counts it instead")
+        report = await database.day_report(self.svc.pool, datetime.now(standards.IST).date())
+        self.assertEqual(report["requestsUnchecked"], 1)
+
+    async def test_any_2xx_from_gw_sales_is_delivered(self):
+        request = disposal(self.store_trip())
+        self.gw.statuses = [204]
+        await self.post(request)
+        with self.assertNoLogs("verifier", "ERROR"):
+            await self.work()
+        self.assertIsNotNone((await database.result(self.svc.pool, request["requestId"]))["sent_at"])
+
+    async def test_the_sweep_beats_and_the_web_alerts_when_the_worker_is_silent(self):
+        await self.sweep()
+        beat = await database.last_beat(self.svc.pool)
+        self.assertLess((datetime.now(standards.IST) - beat).total_seconds(), 60)
+        now, started = beat + timedelta(minutes=6), beat - timedelta(hours=1)
+        with self.assertLogs("verifier", "ERROR") as logs:
+            alerted = await api.watch_worker(self.svc.pool, started, None, now)
+        self.assertIn("ALERT worker", logs.output[0])
+        with self.assertNoLogs("verifier", "ERROR"):
+            self.assertEqual(await api.watch_worker(self.svc.pool, started, alerted, now + timedelta(minutes=10)), alerted)
+        with self.assertLogs("verifier", "ERROR"):
+            await api.watch_worker(self.svc.pool, started, alerted, now + timedelta(minutes=31))
+        with self.assertNoLogs("verifier", "ERROR"):
+            self.assertIsNone(await api.watch_worker(self.svc.pool, started, alerted, beat + timedelta(minutes=1)))
 
     async def test_health_and_ready(self):
         response = await self.client.get("/health")
@@ -947,6 +1302,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["received"], {"created": 2})
         self.assertEqual(sum(report["outcomes"].values()), 2)
         self.assertEqual(report["resultsWaiting"], 1)
+        self.assertEqual(report["requestsUnchecked"], 0)
+        await database.save_request(self.svc.pool, disposal(disposal_id=1002))  # never checked
+        self.assertEqual((await database.day_report(self.svc.pool, today))["requestsUnchecked"], 1)
         self.assertGreater(report["jevCostUsd"], 0)
         self.assertIn("reused", report["flags"], "disposal 1001 lists the same S3 files as the first disposal")
         with self.assertLogs("verifier", "INFO") as logged:

@@ -14,12 +14,12 @@ import io
 import json
 import threading
 from dataclasses import asdict
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
 from PIL import Image as PILImage
-from PIL import UnidentifiedImageError
 from typesafe_sdk import TypeSafeClient, TypeSafeError
 
 import proof_check
@@ -127,7 +127,22 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/api/check":
             self.send_error(404)
             return
-        length = int(self.headers.get("Content-Length", 0))
+        # Only JSON, and only from a page served here: another website open in the browser can post a plain form,
+        # or reach this port through a name of its own (DNS rebinding), and would check trips on your key.
+        if self.headers.get_content_type() != "application/json":
+            self.send_json(415, {"error": "Send the check as JSON."})
+            return
+        port = self.server.server_port
+        if self.headers.get("Host") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            self.send_json(403, {"error": "Open the page at http://127.0.0.1:%d/." % port})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = -1
+        if length < 0:
+            self.send_json(400, {"error": "Bad request: no length."})
+            return
         if length > MAX_BODY:
             self.send_json(413, {"error": "These images are too large to upload together. Use images under 10 MB each."})
             return
@@ -151,16 +166,20 @@ class Handler(BaseHTTPRequestHandler):
             uploads = {role: [] for role in proof_check.ROLES}
             for role in proof_check.ROLES:
                 for i, item in enumerate(body.get("images", {}).get(role) or []):
+                    if not isinstance(item.get("data"), str):
+                        raise ValueError("an image's data isn't text")
                     data = base64.b64decode(item["data"].split(",", 1)[-1])
-                    proof_check.load_bytes(data)  # fails early if it isn't an image
+                    proof_check.load_bytes(data)  # fails early if it isn't a whole image
                     uploads[role].append(proof_check.Upload(item.get("name") or f"{role}{i + 1}.jpg", data))
             if not any(uploads.values()):
                 raise ValueError("Add the loading photos, unloading photos and weigh bills.")
             trip_id = body.get("trip_id") or None
-        except UnidentifiedImageError:
-            self.send_json(400, {"error": "A file couldn't be opened as an image. Use JPEG or PNG."})
+            if trip_id is not None and (not isinstance(trip_id, str) or "\x00" in trip_id):
+                raise ValueError("the trip id isn't a folder name")
+        except (OSError, PILImage.DecompressionBombError):  # not an image, cut off, or too large (not ValueError: ours)
+            self.send_json(400, {"error": "A file couldn't be opened as a whole image. Use JPEG or PNG (or HEIC)."})
             return
-        except (ValueError, KeyError, TypeError) as error:
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
             self.send_json(400, {"error": f"Bad request: {error}"})
             return
 
@@ -170,8 +189,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with TypeSafeClient(api_key=key, headers=proof_check.HEADERS, timeout=proof_check.TIMEOUT) as client:
                 trip, sent = proof_check.analyze_trip(client, uploads, number, model, quantity, limits,
-                                                      image_index(), trip_id, plant=plant, verra=verra)
-        except TypeSafeError as error:
+                                                      image_index(), trip_id, plant=plant, verra=verra,
+                                                      around=date.today())
+        except (TypeSafeError, proof_check.JevRefused) as error:
             self.send_json(502, {"error": f"Jev returned an error: {error}"})
             return
         for role, imgs in sent.items():

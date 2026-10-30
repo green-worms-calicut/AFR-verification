@@ -7,6 +7,7 @@ Usage:
 import argparse
 import sys
 from dataclasses import fields
+from datetime import date
 from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient
@@ -32,6 +33,8 @@ def print_trip(trip: dict, vehicle_number: str, limits: Limits, plant: tuple[flo
             for reading in r["readings"]:
                 if not reading["missing"]:
                     print(f"       {reading['label']:<26} {reading['value']}  ({reading['min_confidence']:.2f})")
+    for u in trip.get("unanswered", []):
+        print(f"\n{ROLE_TITLES[u['role']]}: {u['name']}  (Jev couldn't answer: {u['why']})")
     v = trip["verdict"]
     tokens = sum(r["input_tokens"] for rs in trip["images"].values() for r in rs)
     print(f"\nVehicle {vehicle_number}: {v['title']}")
@@ -90,7 +93,7 @@ def main() -> None:
     with TypeSafeClient(api_key=key, headers=HEADERS, timeout=TIMEOUT) as client:
         try:
             trip, _ = analyze_trip(client, uploads, number, args.model, quantity, limits, index, trip_id, plant=plant,
-                                   verra=args.verra)
+                                   verra=args.verra, around=date.today())
         except Exception as error:
             sys.exit(f"{type(error).__name__}: {error}")
     print_trip(trip, number, limits, plant, args.verra)

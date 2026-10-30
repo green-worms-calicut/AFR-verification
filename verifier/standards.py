@@ -4,10 +4,13 @@ A change to a limit gets a new entry in STANDARDS from the date it applies, so a
 the rules of its own day, also when it is edited later. Results name the standard they used.
 """
 
+import logging
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from proof_check import Limits
+
+log = logging.getLogger("verifier")
 
 IST = timezone(timedelta(hours=5, minutes=30), "IST")  # the field team's time; gw_sales sends UTC
 # Jev versions, pinned so answers don't change under us when an alias moves; upgrade on purpose after testing.
@@ -43,8 +46,9 @@ def ist_time(utc: str | None) -> datetime | None:
     if not utc:
         return None
     at = datetime.fromisoformat(utc.replace("Z", "+00:00"))
-    if at.tzinfo is None:  # the contract says UTC; a time without a zone is taken as UTC too
-        at = at.replace(tzinfo=timezone.utc)
+    if at.tzinfo is None:  # the contract says UTC, but record 78050's zone-less times were local: taken as IST
+        log.warning("a time without a time zone, taken as IST: %s", utc)
+        return at.replace(tzinfo=IST)
     return at.astimezone(IST)
 
 

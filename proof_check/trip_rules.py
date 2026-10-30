@@ -12,14 +12,17 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from proof_check.questions import HOURS, NOT_SHOWN, PICKS, PLACE, QUESTIONS, REPORT, SEAL
-from proof_check.images import ImageIndex
+from proof_check.images import SLOT_OF, ImageIndex
 
 # Placeholder thresholds: choose real ones from evaluate.py reports on labeled images.
 CONFIDENT = 0.8  # a Choice answer below this confidence goes to a person
 YES, NO = 0.8, 0.2  # a yes/no answer between these goes to a person
-# Thresholds measured for one question: (yes at or above, no at or below). In the 19 Oct 2026 run of 42 real
-# trips, every photo taken directly scored 0.05-0.43 for screen_photo, and every photo of a screen 0.99.
-NOUL_THRESHOLDS = {"screen_photo": (0.8, 0.6)}
+LEANS = 0.5  # an unsure answer at least this likely still asks a person where staying silent would hide it (gross_vs_tare)
+# Thresholds measured for one question of one slot: (yes at or above, no at or below). In the 19 Oct 2026 run of
+# 42 real trips, every photo taken directly scored 0.05-0.43 for screen_photo, and every photo of a screen 0.99.
+# The bill's screen_photo is another question: on the 180 saved bills of 19 and 23 Oct 2026, all taken directly,
+# it scored at most 0.33 (no bill photographed off a screen was seen yet, so its yes limit stays YES).
+NOUL_THRESHOLDS = {("photo", "screen_photo"): (0.8, 0.6), ("bill", "screen_photo"): (0.8, 0.4)}
 
 
 @dataclass(frozen=True)
@@ -119,9 +122,11 @@ PART_OF = {
     "loading_vehicle": "docs", "unloading_vehicle": "docs", "loading_stamp": "docs", "unloading_stamp": "docs",
     "bill_found": "docs", "net_weight": "docs", "gross_vs_tare": "docs",
     "material": "verra", "weighbridge_seal": "verra",
-    # The verifier: an image gw_sales listed that isn't in S3 or isn't an image; one file as both a collection and an
-    # unloading photo; a photo stamped within minutes of one in another disposal of the same vehicle.
-    "image_unavailable": "docs", "same_file": "real", "same_moment": "real",
+    # The verifier: an image gw_sales listed that isn't in S3 or isn't an image; a photo stamped within minutes of one
+    # in another disposal of the same vehicle. Any trip: one file as both a loading and an unloading photo.
+    "image_unavailable": "docs", "same_file": "real", "same_moment": "real", "not_compared": "real",
+    # Any trip: an image Jev couldn't answer for after its retries (the others' checks still run).
+    "image_unanswered": "docs",
     # The verifier, from what was entered in gw_sales: every collection log has a photo, every collection photo was
     # taken on its pickup day, no unloading photo long after the end time, and the collections before the arrival.
     "collection_has_photos": "docs", "collection_photo_date": "real", "unloading_too_late": "real",
@@ -207,9 +212,15 @@ def unsure(detail: str, certainty: float) -> str:
     return f"Only {certainty:.0%} sure: {lower_first(detail)}"
 
 
-def noul_status(yes: float, pass_when_yes: bool = True, qid: str | None = None) -> str:
-    """pass, fail or review for a yes/no answer, by the question's own thresholds or YES and NO."""
-    high, low = NOUL_THRESHOLDS.get(qid, (YES, NO))
+def unsure_yes(slot: str, qid: str) -> float:
+    """A yes probability every check reads as unsure for this question: halfway between its yes and no limits."""
+    high, low = NOUL_THRESHOLDS.get((slot, qid), (YES, NO))
+    return (high + low) / 2
+
+
+def noul_status(yes: float, pass_when_yes: bool = True, qid: str | None = None, slot: str | None = None) -> str:
+    """pass, fail or review for a yes/no answer, by the question's own thresholds in its slot, or YES and NO."""
+    high, low = NOUL_THRESHOLDS.get((slot, qid), (YES, NO))
     status = "pass" if yes >= high else "fail" if yes <= low else "review"
     return status if pass_when_yes or status == "review" else {"pass": "fail", "fail": "pass"}[status]
 
@@ -230,7 +241,7 @@ def checks_for(slot: str, answers: dict[str, dict], vehicle_number: str, quantit
         a = answers[qid]
         if qid in NOUL_CHECKS:
             label, yes, no, pass_when_yes = NOUL_CHECKS[qid]
-            status = noul_status(a["yes"], pass_when_yes, qid)
+            status = noul_status(a["yes"], pass_when_yes, qid, slot)
             detail = {"pass": yes, "fail": no, "review": f"Not sure: {lower_first(yes if pass_when_yes else no)}?"}[status]
             checks.append({"key": qid, "label": label, "status": status, "detail": detail,
                            "certainty": a["yes"], "measure": "yes"})
@@ -246,11 +257,25 @@ def checks_for(slot: str, answers: dict[str, dict], vehicle_number: str, quantit
     return checks
 
 
-YEAR = 2024  # only the day and month are read; a leap year, so 29/02 is a date
+YEAR = 2024  # only the day and month are read; without a trip date, a leap year, so 29/02 is a date
 
 
-def moment(time: dict, date: dict) -> dict | None:
-    """A time and a date reading as {"at": datetime, "time": "08:57", "date": "15/10", "certainty": ...}.
+def stamp_year(day: int, month: int, around) -> int | None:
+    """The year that puts day/month nearest the trip's date `around` (a December stamp on a January trip is the year
+    before), or None if the date doesn't exist in any year near it, such as 29/02 in a common year."""
+    near = datetime(around.year, around.month, around.day)
+    found = []
+    for year in (around.year - 1, around.year, around.year + 1):
+        try:
+            found.append((abs(datetime(year, month, day) - near), year))
+        except ValueError:
+            continue
+    return min(found)[1] if found else None
+
+
+def moment(time: dict, date: dict, around=None) -> dict | None:
+    """A time and a date reading as {"at": datetime, "time": "08:57", "date": "15/10", "certainty": ...}, in the year
+    nearest `around` (the trip's date) when given, otherwise YEAR.
 
     None if either is missing or the date doesn't exist, such as 31/02.
     """
@@ -258,8 +283,8 @@ def moment(time: dict, date: dict) -> dict | None:
         return None
     (hour, minute), (day, month) = map(int, time["value"].split(":")), map(int, date["value"].split("/"))
     try:
-        at = datetime(YEAR, month, day, hour, minute)
-    except ValueError:
+        at = datetime(stamp_year(day, month, around) if around else YEAR, month, day, hour, minute)
+    except (ValueError, TypeError):
         return None
     return {"at": at, "time": time["value"], "date": date["value"],
             "certainty": min(time["min_confidence"], date["min_confidence"])}
@@ -284,7 +309,7 @@ def show(*moments: dict) -> list[str]:
     return [m["time"] if one_day else f"{m['time']} on {m['date']}" for m in moments]
 
 
-def weighings(bill: dict, first_slip: dict | None = None) -> dict | None:
+def weighings(bill: dict, first_slip: dict | None = None, around=None) -> dict | None:
     """When the gross and tare weights were taken: {"gross": moment, "tare": moment, "certainty", "source", "slips"},
     `slips` naming the bills the times were read from.
 
@@ -296,12 +321,12 @@ def weighings(bill: dict, first_slip: dict | None = None) -> dict | None:
     """
     r = {x["key"]: x for x in bill["readings"]}
     found = []
-    gross, tare = moment(r["gross_time"], r["gross_date"]), moment(r["tare_time"], r["tare_date"])
+    gross, tare = moment(r["gross_time"], r["gross_date"], around), moment(r["tare_time"], r["tare_date"], around)
     if gross and tare:
         found.append({"gross": gross, "tare": tare, "certainty": min(gross["certainty"], tare["certainty"]),
                       "source": "the times printed with each weight", "slips": [bill["name"]]})
     first = bill["answers"]["first_weight"]
-    time_in, time_out = moment(r["in_time"], r["in_date"]), moment(r["out_time"], r["out_date"])
+    time_in, time_out = moment(r["in_time"], r["in_date"], around), moment(r["out_time"], r["out_date"], around)
     if time_in and time_out and first["choice"] != NOT_SHOWN:
         gross, tare = (time_in, time_out) if first["choice"] == "gross" else (time_out, time_in)
         found.append({"gross": gross, "tare": tare,
@@ -309,7 +334,8 @@ def weighings(bill: dict, first_slip: dict | None = None) -> dict | None:
                       "source": f"Time In and Time Out, {first['choice']} first", "slips": [bill["name"]]})
     if first_slip and first["choice"] != NOT_SHOWN:
         before = {x["key"]: x for x in first_slip["readings"]}
-        earlier, later = moment(before["printed_time"], before["printed_date"]), moment(r["printed_time"], r["printed_date"])
+        earlier = moment(before["printed_time"], before["printed_date"], around)
+        later = moment(r["printed_time"], r["printed_date"], around)
         if earlier and later:
             gross, tare = (earlier, later) if first["choice"] == "gross" else (later, earlier)
             found.append({"gross": gross, "tare": tare,
@@ -363,7 +389,7 @@ def each_photo(role: str, key: str, label: str, results: list[dict], qid: str) -
     """A yes/no question that every photo of a role must pass, such as "shows a vehicle"."""
     pass_when_yes = NOUL_CHECKS[qid][3]
     problem, doubt = EACH_PHOTO[qid]
-    statuses = {r["name"]: noul_status(r["answers"][qid]["yes"], pass_when_yes, qid) for r in results}
+    statuses = {r["name"]: noul_status(r["answers"][qid]["yes"], pass_when_yes, qid, SLOT_OF[role]) for r in results}
     failed = [r for r in results if statuses[r["name"]] == "fail"]
     unsure = [r for r in results if statuses[r["name"]] == "review"]
     if failed:
@@ -390,6 +416,16 @@ def plate_check(role: str, results: list[dict], vehicle_number: str) -> dict:
     return check(role, f"{role}_plate", label, "review",
                  f"No {role} photo shows the number plate clearly enough to compare with {vehicle_number}. "
                  "Look for the plate in the photos.", images=named(results))
+
+
+def unanswered_check(role: str, names: list[str], none_left: bool) -> dict:
+    """The images of one kind Jev couldn't answer for. When none of the kind is left, it shares the missing kind's
+    cause, so it leads one flag with the checks that leaves unsure."""
+    word = {"loading": "loading photo", "unloading": "unloading photo", "bill": "weigh bill"}[role]
+    them = "it" if len(names) == 1 else "them"
+    return check(role, "image_unanswered", f"{word.capitalize()}s read", "review",
+                 f"Jev couldn't read the {word}{'s' if len(names) > 1 else ''} {and_list(names)}: look at {them} yourself.",
+                 images=names, cause=f"{role}_missing" if none_left else None)
 
 
 def photo_checks(role: str, results: list[dict], vehicle_number: str) -> list[dict]:
@@ -548,7 +584,7 @@ def seal_checks(final: dict | None) -> list[dict]:
                       "No final slip to look for the weighbridge's stamp on.", cause="no_final")]
     a = final["answers"]
     theirs, name = a["weighbridge_seal"]["yes"], a["weighbridge_name"]
-    status = noul_status(theirs, qid="weighbridge_seal")
+    status = noul_status(theirs, qid="weighbridge_seal", slot="bill")
     if status == "pass":
         return [choice_check("bill", "weighbridge_seal", "weighbridge_name", name, "", None, final)]
     detail = {"fail": "no weighbridge stamp found. The final slip must carry the weighbridge's own stamp.",
@@ -629,9 +665,11 @@ def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, ve
         checks.append(choice_check("bill", "net_weight", "net_weight", final["answers"]["net_weight"], vehicle_number, quantity,
                                    final))
     # Only when Jev is sure either way: many slips don't label gross and tare (19 Oct 2026 run), and an
-    # unsure answer there would send most trips to a person for nothing.
-    if final and final["answers"]["gross_vs_tare"]["confidence"] >= CONFIDENT \
-            and final["answers"]["gross_vs_tare"]["choice"] != NOT_SHOWN:
+    # unsure answer there would send most trips to a person for nothing. But leaning towards tare heavier, even
+    # unsure, asks a person: staying silent would hide labels that may be swapped (30 Oct 2026: none on 19 Oct).
+    weights = final["answers"]["gross_vs_tare"] if final else None
+    if weights and weights["choice"] != NOT_SHOWN and (
+            weights["confidence"] >= CONFIDENT or weights["choice"] == "tare_heavier" and weights["confidence"] >= LEANS):
         checks.append(choice_check("bill", "gross_vs_tare", "gross_vs_tare", final["answers"]["gross_vs_tare"],
                                    vehicle_number, quantity, final))
     if weighbridge:
@@ -663,28 +701,38 @@ def weighbridge_check(final: dict | None, weighbridge: str, cause: str = "no_fin
                  [final["name"]] if status != "pass" else [])
 
 
-def photo_moments(results: list[dict]) -> list[tuple[dict, dict | None]]:
-    """Each photo with its GPS stamp time as a moment, or None if it can't be read."""
+def photo_moments(results: list[dict], around=None) -> list[tuple[dict, dict | None]]:
+    """Each photo with its GPS stamp time as a moment (in the year nearest `around`), or None if it can't be read."""
     out = []
     for r in results:
         rd = {x["key"]: x for x in r["readings"]}
-        out.append((r, moment(rd["photo_time"], rd["photo_date"])))
+        out.append((r, moment(rd["photo_time"], rd["photo_date"], around)))
     return out
 
 
-def busy_time(images: dict[str, list[dict]]) -> tuple[datetime, datetime] | None:
+def busy_time(images: dict[str, list[dict]], sure_only: bool = False, around=None) -> tuple[datetime, datetime] | None:
     """When the trip was out, by its photos' GPS stamps: from the first collection (loading) photo to the last
-    unloading photo. None without a readable stamp on both kinds.
+    unloading photo, only by stamps read at least CONFIDENT with `sure_only`. None without a readable stamp on both
+    kinds.
 
     Not the weighings: a vehicle is often weighed empty once in the morning and that tare printed on every slip of
     the day, so tare to gross would span all its earlier trips (19 and 23 Oct 2026).
     """
-    loading = [m["at"] for _, m in photo_moments(images.get("loading", [])) if m]
-    unloading = [m["at"] for _, m in photo_moments(images.get("unloading", [])) if m]
+    def times(kind):
+        return [m["at"] for _, m in photo_moments(images.get(kind, []), around)
+                if m and (not sure_only or m["certainty"] >= CONFIDENT)]
+
+    loading, unloading = times("loading"), times("unloading")
     if not loading or not unloading:
         return None
     times = loading + unloading
     return min(times), max(times)
+
+
+def unsure_stamps(images: dict[str, list[dict]], around=None) -> list[tuple[str, dict]]:
+    """The loading and unloading photos whose stamp was read, but less than CONFIDENT: (name, moment)."""
+    return [(r["name"], m) for kind in ("loading", "unloading") for r, m in photo_moments(images.get(kind, []), around)
+            if m and m["certainty"] < CONFIDENT]
 
 
 def overlap_minutes(a: tuple[datetime, datetime], b: tuple[datetime, datetime]) -> float:
@@ -703,7 +751,8 @@ def photo_window(role: str, tare_first: bool) -> tuple[str | None, str | None]:
     return ("gross", None) if tare_first else ("gross", "tare")
 
 
-def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_first: bool = True) -> dict | None:
+def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_first: bool = True,
+                 around=None) -> dict | None:
     """Every loading or unloading photo in its window of the weighings (`photo_window`), give or take the clock slack.
 
     Unsure only because the weighing times are, it shares the weighing order's `cause`, "weigh_times".
@@ -717,7 +766,7 @@ def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_f
     plain = {"tare": f"the tare (empty) weighing at {shown['tare']}", "gross": f"the gross (loaded) weighing at {shown['gross']}"}
     word = "Loading" if role == "loading" else "Unloading"
     label = f"{word} photo times"
-    taken = photo_moments(results)
+    taken = photo_moments(results, around)
     unread = [r for r, m in taken if not m]
     wrong, times = [], []
     for r, m in taken:
@@ -750,7 +799,7 @@ def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_f
         c = min(m["certainty"] for _, m in unsure)
         return check(role, f"{role}_timing", label, "review",
                      f"The time on the GPS stamp of {names(photos)} was read as {read}, but only {c:.0%} sure. "
-                     f"Check {plural(photos, 'it was', 'they were')} taken {window}.", c, named(photos))
+                     f"Check {plural(photos, 'it was', 'they were')} taken {window}.", c, named(photos), f"{role}_stamps")
     short = (f"between {after} {shown[after]} and {before} {shown[before]}" if after and before
              else f"after {after} {shown[after]}" if after else f"before {before} {shown[before]}")
     if not weighed:
@@ -767,14 +816,14 @@ def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_f
                  min(min(m["certainty"] for _, m, _ in times), w["certainty"]))
 
 
-def same_day(results: list[dict], w: dict) -> dict | None:
+def same_day(results: list[dict], w: dict, around=None) -> dict | None:
     """Every unloading photo dated the same day as the gross weighing (by the calendar date, so a trip
     weighed just before midnight and unloaded just after is flagged too)."""
     if not results:
         return None
     gross = w["gross"]
     label = "Unloading on the weighing day"
-    taken = photo_moments(results)
+    taken = photo_moments(results, around)
     unread = [r for r, m in taken if not m]
     other_day = [(r, m) for r, m in taken if m and m["date"] != gross["date"]]
     sure = [(r, m) for r, m in other_day if min(m["certainty"], w["certainty"]) >= CONFIDENT]
@@ -789,7 +838,8 @@ def same_day(results: list[dict], w: dict) -> dict | None:
         c = min(m["certainty"] for _, m in doubtful)
         return check("unloading", "unloading_day", label, "review",
                      f"The date on the GPS stamp of {names(photos)} was read as {doubtful[0][1]['date']}, but only {c:.0%} sure; "
-                     f"the gross (loaded) weighing was on {gross['date']}. Check the stamp date.", c, named(photos))
+                     f"the gross (loaded) weighing was on {gross['date']}. Check the stamp date.", c, named(photos),
+                     "unloading_stamps")
     if other_day:
         r, m = other_day[0]
         return check("unloading", "unloading_day", label, "review",
@@ -799,6 +849,13 @@ def same_day(results: list[dict], w: dict) -> dict | None:
         return check("unloading", "unloading_day", label, "review",
                      f"The date on the GPS stamp of {names(unread)} couldn't be read. Check unloading was on {gross['date']}, "
                      "the day of the gross (loaded) weighing.", images=named(unread))
+    if unsure_day := [(r, m) for r, m in taken if m and m["certainty"] < CONFIDENT]:
+        # Read as the gross date, but unsure: the same reading leaves the unloading time unsure, so one flag with it.
+        photos = [r for r, _ in unsure_day]
+        c = min(m["certainty"] for _, m in unsure_day)
+        return check("unloading", "unloading_day", label, "review",
+                     f"The date on the GPS stamp of {names(photos)} was read as {gross['date']}, the day of the gross "
+                     f"(loaded) weighing, but only {c:.0%} sure. Check the stamp date.", c, named(photos), "unloading_stamps")
     if w["certainty"] < CONFIDENT:
         # The gross date is as unsure as the weighing times: one cause with them, not a pass (27 Oct 2026).
         return check("unloading", "unloading_day", label, "review", f"All on {gross['date']}, if the weighing times are right",
@@ -807,10 +864,24 @@ def same_day(results: list[dict], w: dict) -> dict | None:
                  min(min(m["certainty"] for _, m in taken), w["certainty"]))
 
 
+def same_file(images: dict[str, list[dict]]) -> dict:
+    """One file can't be both a loading (collection) photo and an unloading photo of the trip."""
+    loading = {r["prints"]["md5"]: r["name"] for r in images.get("loading", [])}
+    both = [(loading[r["prints"]["md5"]], r["name"]) for r in images.get("unloading", []) if r["prints"]["md5"] in loading]
+    label = "Different photos for loading and unloading"
+    if not both:
+        return check("trips", "same_file", label, "pass", "No photo is both a loading and an unloading photo")
+    pairs = "; ".join(a if a == b else f"{a} and {b}" for a, b in both)
+    return check("trips", "same_file", label, "fail",
+                 f"The same file is both a loading (collection) photo and an unloading photo: {pairs}. One photo can't "
+                 "show both the loading and the unloading.", images=list(dict.fromkeys(n for pair in both for n in pair)))
+
+
 def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: str | None = None,
                 limits: Limits = Limits(), plant: tuple[float, float] | None = None,
-                verra: bool = False, weighbridge: str | None = None) -> tuple[list[dict], dict | None]:
-    """Every check for a trip, and the weighings they used (None if the times couldn't be read).
+                verra: bool = False, weighbridge: str | None = None, around=None) -> tuple[list[dict], dict | None]:
+    """Every check for a trip, and the weighings they used (None if the times couldn't be read). Stamps and slips
+    carry no year: `around`, the trip's date, gives each the year nearest it.
 
     Tare first, the trip runs tare -> loading -> gross -> unloading: the weighings must be at least
     `min_gap_tare_first` apart, loading photos fall between them and unloading photos after gross.
@@ -823,13 +894,15 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     """
     checks = photo_checks("loading", images.get("loading", []), vehicle_number)
     checks += photo_checks("unloading", images.get("unloading", []), vehicle_number)
+    if images.get("loading") and images.get("unloading"):
+        checks.append(same_file(images))
     if plant and images.get("unloading"):
         checks.append(plant_check(images["unloading"], plant, limits))
     bills = images.get("bill", [])
     checks += bill_checks(bills, vehicle_number, quantity, verra, weighbridge)
 
     final = final_slip(bills)
-    w = weighings(final, first_slip(bills)) if final else None
+    w = weighings(final, first_slip(bills), around) if final else None
     gap = minutes_between(w["tare"], w["gross"]) if w else None  # positive when the tare was taken first
     not_checked = "so the weighing order and photo times weren't checked"
     if not w:
@@ -871,6 +944,11 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
             else:
                 status, detail = "review", f"{final['name']}: {unsure(swapped, first['confidence'])}. Check which weight is at Time In."
             checks.append(check("times", "time_in_tare", label, status, detail, first["confidence"], [final["name"]]))
+        elif first["confidence"] < CONFIDENT:
+            # The same unsure reading leaves the weighing times unsure: one flag with the weighing order.
+            checks.append(check("times", "time_in_tare", label, "review",
+                                f"{final['name']}: {unsure(f'the lighter weight is at Time In ({t})', first['confidence'])}. "
+                                "Check which weight is at Time In.", first["confidence"], [final["name"]], "weigh_times"))
         else:
             checks.append(check("times", "time_in_tare", label, "pass",
                                 f"{final['name']}: the lighter weight is at Time In ({t})", first["confidence"]))
@@ -906,9 +984,9 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     checks.append(check("times", "weigh_day", "Tare weighed on this trip", status, detail, w["certainty"],
                         w["slips"] if status == "fail" else [], cause))
     for role in ("loading", "unloading"):
-        if c := photo_timing(role, images.get(role, []), w, limits, tare_first):
+        if c := photo_timing(role, images.get(role, []), w, limits, tare_first, around):
             checks.append(c)
-    if c := same_day(images.get("unloading", []), w):
+    if c := same_day(images.get("unloading", []), w, around):
         checks.append(c)
     return checks, w
 
@@ -960,17 +1038,30 @@ def overlap_checks(trips: dict[str, dict], slack: int = Limits().clock_slack) ->
     overlaps another trip's with the same vehicle number by more than `slack` minutes (the cameras' clocks).
     `trips` maps a trip id to {"vehicle_number", "verdict"}.
     """
+    def span(w):
+        return (datetime.fromisoformat(w[0]), datetime.fromisoformat(w[1])) if w else None
+
     windows = {}
     for trip, t in trips.items():
         if w := t["verdict"].get("window"):
-            windows[trip] = (t["vehicle_number"], datetime.fromisoformat(w[0]), datetime.fromisoformat(w[1]))
-    found = {}
-    for a, (va, sa, ea) in windows.items():
-        for b, (vb, sb, eb) in windows.items():
-            if a < b and va == vb and overlap_minutes((sa, ea), (sb, eb)) > slack:
+            # By every stamp, and by the sure ones only (a verdict saved before they were kept: every stamp).
+            windows[trip] = (t["vehicle_number"], span(w), span(t["verdict"].get("sure_window", w)))
+    found = {}  # trip -> {other trip: whether by sure stamps}
+    for a, (va, wa, sa) in windows.items():
+        for b, (vb, wb, sb) in windows.items():
+            if a < b and va == vb and overlap_minutes(wa, wb) > slack:
+                sure = bool(sa and sb) and overlap_minutes(sa, sb) > slack
                 for x, y in ((a, b), (b, a)):
-                    found.setdefault(x, []).append(y)
-    return {trip: check("trips", "overlap", "One trip at a time", "fail",
-                        f"{trips[trip]['vehicle_number']} is also on trip {and_list(sorted(others))} at the same time, by "
-                        "the photos' stamps. A vehicle can't be on two trips at once.")
-            for trip, others in found.items()}
+                    found.setdefault(x, {})[y] = sure
+    made = {}
+    for trip, others in found.items():
+        number, sure = trips[trip]["vehicle_number"], sorted(o for o, s in others.items() if s)
+        if sure:
+            made[trip] = check("trips", "overlap", "One trip at a time", "fail",
+                               f"{number} is also on trip {and_list(sure)} at the same time, by the photos' stamps. "
+                               "A vehicle can't be on two trips at once.")
+        else:
+            made[trip] = check("trips", "overlap", "One trip at a time", "review",
+                               f"{number} may also be on trip {and_list(sorted(others))} at the same time, but Jev was "
+                               "not sure of some of the photos' stamp times that put it there. Check those stamps.")
+    return made

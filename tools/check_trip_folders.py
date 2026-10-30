@@ -25,9 +25,11 @@ trips at once, are flagged across the whole folder.
 
 import argparse
 import json
+import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient
@@ -111,6 +113,12 @@ def compare(trip: dict, truth: dict, typed: dict) -> list[dict]:
     return items
 
 
+def trip_date(folder: Path) -> date:
+    """The trip's date, for the stamps' year: the date in its folder's path (trips/inward-2026-10-19/...), or today."""
+    found = re.search(r"(\d{4})-(\d{2})-(\d{2})", folder.as_posix())
+    return date(*map(int, found.groups())) if found else date.today()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("root", type=Path, help="a folder of trip folders, such as trips/inward-2026-10-19")
@@ -172,12 +180,12 @@ def main() -> None:
             verra = proof_check.parse_switch(typed.get("verra"), "verra")
             trip, _ = proof_check.analyze_trip(client, proof_check.read_trip_folder(folder), number, args.model,
                                                quantity, limits, index, trip_id, saved, trip_plant, verra,
-                                               weighbridge=typed.get("weighbridge") or None)
+                                               weighbridge=typed.get("weighbridge") or None, around=trip_date(folder))
         except Exception as error:
             skipped[folder.name] = f"{type(error).__name__}: {error}"
             return
         results[folder.name] = {**trip, "vehicle_number": number, "quantity": quantity, "plant": trip_plant, "verra": verra,
-                                "typed_from": source}
+                                "typed_from": source, "clock_slack": limits.clock_slack}
         with lock:
             cache_path.parent.mkdir(exist_ok=True)
             cache_path.write_text(json.dumps(dict(saved)))
@@ -191,7 +199,10 @@ def main() -> None:
         if client:
             client.close()
 
-    for trip, c in proof_check.overlap_checks(results).items():
+    # Each trip may have its own limits (trip.json): the largest clock slack, so no pair is flagged for a few minutes
+    # one of its trips allows.
+    slack = max((r["clock_slack"] for r in results.values()), default=proof_check.Limits().clock_slack)
+    for trip, c in proof_check.overlap_checks(results, slack).items():
         proof_check.add_checks(results[trip], [c])
 
     parts = " ".join(f"{p:9}" for p in proof_check.PARTS)
@@ -212,7 +223,9 @@ def main() -> None:
                   f"{decided.count('review')} to check")
     counts = {s: sum(r["verdict"]["status"] == s for r in results.values()) for s in SHORT}
     tokens = sum(i["input_tokens"] for r in results.values() for rs in r["images"].values() for i in rs if not i.get("saved"))
-    print(f"\n{counts['pass']} accepted, {counts['problem']} with a problem, {counts['review']} to check, {len(skipped)} skipped. "
+    unanswered = sum(len(r.get("unanswered", [])) for r in results.values())
+    not_read = f" {unanswered} images Jev couldn't answer for." if unanswered else ""
+    print(f"\n{counts['pass']} accepted, {counts['problem']} with a problem, {counts['review']} to check, {len(skipped)} skipped.{not_read} "
           f"{tokens:,} new input tokens ≈ ${tokens * proof_check.PRICE_PER_INPUT_TOKEN:.4f} (saved answers cost nothing)")
 
     items = [dict(i, trip=name) for name, r in results.items() if name in truth for i in compare(r, truth[name], r)]

@@ -5,7 +5,9 @@ A result is saved before it is sent, so a crash or a gw_sales outage never loses
 job last queued for it, so the sweep can tell when one went missing.
 """
 
+import asyncio
 import json
+from collections.abc import MutableMapping
 from datetime import date, datetime
 
 from psycopg.rows import dict_row
@@ -18,6 +20,7 @@ def dumps(value) -> str:
 
 
 # The column holding the job last queued for a request, by task (see migrations/001).
+SWEEP_DAYS = 7  # how far back the sweep looks for work left undone; older is counted by the daily report instead
 JOB_COLUMN = {"verify": ("verification_request", "verify_job"), "send_result": ("verification_result", "send_job")}
 
 
@@ -75,19 +78,68 @@ async def note_job(pool: AsyncConnectionPool, task: str, request_id: str, job_id
         await conn.execute(f"UPDATE {table} SET {column} = %s WHERE request_id = %s", (job_id, request_id))
 
 
-async def waiting(pool: AsyncConnectionPool, before: datetime) -> dict[str, list[tuple[str, int | None]]]:
-    """By task, the (requestId, job) still waiting for it since before `before`: requests with no result
-    (verify) and results neither sent nor given up (send_result)."""
+async def waiting(pool: AsyncConnectionPool, before: datetime) -> dict[str, list[tuple[str, int | None, int]]]:
+    """By task, the (requestId, job, times queued again) still waiting for it since before `before`, within the last
+    SWEEP_DAYS: requests with no result (verify) and results neither sent nor given up (send_result)."""
+    since = f"now() - interval '{SWEEP_DAYS} days'"
     async with pool.connection() as conn:
         cur = await conn.execute(
-            "SELECT request_id::text, verify_job FROM verification_request q WHERE received_at < %s "
+            "SELECT request_id::text, verify_job, requeues FROM verification_request q "
+            f"WHERE received_at < %s AND received_at > {since} "
             "AND NOT EXISTS (SELECT 1 FROM verification_result r WHERE r.request_id = q.request_id)", (before,))
         unchecked = await cur.fetchall()
         cur = await conn.execute(
-            "SELECT request_id::text, send_job FROM verification_result WHERE made_at < %s "
-            "AND sent_at IS NULL AND gave_up_at IS NULL", (before,))
+            "SELECT request_id::text, send_job, requeues FROM verification_result "
+            f"WHERE made_at < %s AND made_at > {since} AND sent_at IS NULL AND gave_up_at IS NULL", (before,))
         unsent = await cur.fetchall()
     return {"verify": unchecked, "send_result": unsent}
+
+
+async def saved_answers(pool: AsyncConnectionPool, request_id: str) -> dict[str, dict]:
+    """Jev's answers already saved for a request, by answer_key (migrations/004)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT answer_key, raw FROM jev_answer WHERE request_id = %s", (request_id,))
+        return dict(await cur.fetchall())
+
+
+class SavedAnswers(MutableMapping):
+    """A request's Jev answers as proof_check's `cache`, for the thread that runs analyze_trip: read from `saved`,
+    and each new one written to Postgres straight away (on `loop`, the worker's), so a retry after a crash halfway
+    asks only the images not answered yet."""
+
+    def __init__(self, pool: AsyncConnectionPool, loop: asyncio.AbstractEventLoop, request_id: str, saved: dict[str, dict]):
+        self.pool, self.loop, self.request_id, self.saved = pool, loop, request_id, saved
+
+    def __getitem__(self, key: str) -> dict:
+        return self.saved[key]
+
+    def __setitem__(self, key: str, raw: dict) -> None:
+        self.saved[key] = raw
+        asyncio.run_coroutine_threadsafe(self.save(key, raw), self.loop).result()
+
+    async def save(self, key: str, raw: dict) -> None:
+        async with self.pool.connection() as conn:
+            await conn.execute("INSERT INTO jev_answer (request_id, answer_key, raw) VALUES (%s, %s, %s) "
+                               "ON CONFLICT DO NOTHING", (self.request_id, key, Jsonb(raw, dumps=dumps)))
+
+    def __delitem__(self, key: str) -> None:
+        raise TypeError("saved answers are kept")
+
+    def __iter__(self):
+        return iter(self.saved)
+
+    def __len__(self) -> int:
+        return len(self.saved)
+
+
+async def note_requeue(pool: AsyncConnectionPool, task: str, request_id: str) -> int | None:
+    """Count one more time the sweep queued a request's `task` again; the new count (None without its row)."""
+    table, _ = JOB_COLUMN[task]
+    async with pool.connection() as conn:
+        cur = await conn.execute(f"UPDATE {table} SET requeues = requeues + 1 WHERE request_id = %s RETURNING requeues",
+                                 (request_id,))
+        row = await cur.fetchone()
+        return row[0] if row else None
 
 
 async def note_disposal(pool: AsyncConnectionPool, request_id: str, vehicle: str | None, quantity: str | None,
@@ -99,21 +151,42 @@ async def note_disposal(pool: AsyncConnectionPool, request_id: str, vehicle: str
 
 
 async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str, day: date) -> list[tuple[int, dict]]:
-    """The other disposals of `vehicle` with a trip within a day of `day`, each as last checked:
-    (disposal id, proof_check's result). A disposal's earlier requests are its own edits, never others."""
+    """The other disposals of `vehicle` with a trip within a day of `day`, each as last edited: (disposal id,
+    proof_check's result). A disposal's earlier requests are its own edits, never others. One whose latest request
+    isn't analysed (still being checked, or it ended in an error) is left out: its earlier photos may have been
+    changed, and one still being checked compares itself with this one when it runs (one vehicle at a time)."""
     async with pool.connection() as conn:
         cur = await conn.execute(
-            """SELECT DISTINCT ON (q.disposal_id) q.disposal_id, r.analysis
-               FROM verification_request q JOIN verification_result r USING (request_id)
-               WHERE q.vehicle_number = %s AND q.trip_day BETWEEN %s::date - 1 AND %s::date + 1
-                 AND q.disposal_id <> %s AND r.analysis IS NOT NULL
-               ORDER BY q.disposal_id, q.received_at DESC""", (vehicle, day, day, disposal_id))
+            """SELECT disposal_id, analysis FROM (
+                   SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.vehicle_number, q.trip_day, r.analysis
+                   FROM verification_request q LEFT JOIN verification_result r USING (request_id)
+                   WHERE q.disposal_id <> %(disposal)s AND q.disposal_id IN (
+                       SELECT disposal_id FROM verification_request
+                       WHERE vehicle_number = %(vehicle)s AND trip_day BETWEEN %(day)s::date - 1 AND %(day)s::date + 1)
+                   ORDER BY q.disposal_id, q.received_at DESC) latest
+               WHERE vehicle_number = %(vehicle)s AND trip_day BETWEEN %(day)s::date - 1 AND %(day)s::date + 1
+                 AND analysis IS NOT NULL""", {"disposal": disposal_id, "vehicle": vehicle, "day": day})
         return await cur.fetchall()
+
+
+async def beat(pool: AsyncConnectionPool) -> None:
+    """The worker is alive (migrations/007)."""
+    async with pool.connection() as conn:
+        await conn.execute("INSERT INTO worker_heartbeat (id, beat_at) VALUES (1, now()) "
+                           "ON CONFLICT (id) DO UPDATE SET beat_at = now()")
+
+
+async def last_beat(pool: AsyncConnectionPool) -> datetime | None:
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT beat_at FROM worker_heartbeat")
+        row = await cur.fetchone()
+        return row[0] if row else None
 
 
 async def day_report(pool: AsyncConnectionPool, day: date) -> dict:
     """What happened on one IST day: requests received, results made by outcome and flags by code, what Jev cost, and
-    results not delivered yet (at any time), for the daily summary and `python -m verifier report`."""
+    results not delivered yet and requests without a result (at any time), for the daily summary and
+    `python -m verifier report`."""
     on_day = "(%s AT TIME ZONE 'Asia/Kolkata')::date = %%s"
     async with pool.connection() as conn:
         cur = await conn.execute(f"SELECT reason, count(*) FROM verification_request WHERE {on_day % 'received_at'} "
@@ -128,6 +201,9 @@ async def day_report(pool: AsyncConnectionPool, day: date) -> dict:
         cur = await conn.execute("SELECT count(*) FILTER (WHERE sent_at IS NULL AND gave_up_at IS NULL), "
                                  f"count(*) FILTER (WHERE {on_day % 'gave_up_at'}) FROM verification_result", (day,))
         waiting, gave_up = await cur.fetchone()
+        cur = await conn.execute("SELECT count(*) FROM verification_request q WHERE NOT EXISTS "
+                                 "(SELECT 1 FROM verification_result r WHERE r.request_id = q.request_id)")
+        (unchecked,) = await cur.fetchone()
     return {"day": day.isoformat(), "received": received, "outcomes": {o: n for o, (n, _) in outcomes.items()},
             "flags": flags, "jevCostUsd": round(sum(c for _, c in outcomes.values()), 4),
-            "resultsWaiting": waiting, "resultsGivenUp": gave_up}
+            "resultsWaiting": waiting, "resultsGivenUp": gave_up, "requestsUnchecked": unchecked}

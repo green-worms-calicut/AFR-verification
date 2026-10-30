@@ -12,14 +12,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import boto3
+import botocore.exceptions
 import httpx
 import procrastinate
+import psycopg
 from procrastinate import exceptions
 from psycopg_pool import AsyncConnectionPool
 from typesafe_sdk import TypeSafeClient
 
 import proof_check
-from verifier import VERSION, compare_disposals, database, disposal_check, signatures, standards
+from verifier import VERSION, compare_disposals, database, disposal_check, s3_photos, signatures, standards
 from verifier.settings import Settings
 from verifier.s3_photos import Photos
 
@@ -27,6 +29,7 @@ log = logging.getLogger("verifier")
 app = procrastinate.App(connector=procrastinate.PsycopgConnector())
 NAME = "gw-jev-verifier"
 LOST_AFTER = timedelta(minutes=2)  # a request or result this old with no job is queued again
+MAX_REQUEUES = 3  # times the sweep queues a crashed or lost job again; then a check is sent as an error, a send given up
 
 
 @dataclass
@@ -93,7 +96,11 @@ class Backoff(procrastinate.BaseRetryStrategy):
         return self.get_retry_decision(exception=exception, job=job) is None
 
 
-VERIFY_RETRY = Backoff(60, 600, 30 * 60)  # a checking error (Jev down) is tried for half an hour, then sent as an error
+# What can change when a check is tried again: Jev busy or down, S3 or the database not reached. Anything else, such
+# as our own bug, would fail the same way: it is sent as an error at once, not paid for six times.
+RETRYABLE = (disposal_check.JevUnavailable, s3_photos.S3Unavailable, botocore.exceptions.ConnectionError,
+             botocore.exceptions.HTTPClientError, psycopg.OperationalError)
+VERIFY_RETRY = Backoff(60, 600, 30 * 60, RETRYABLE)  # tried for half an hour (6 tries), then sent as an error
 SEND_RETRY = Backoff(30, 3600, 24 * 3600, (Unavailable,))  # the contract's 24 hours of retries
 
 
@@ -149,15 +156,16 @@ async def others_of(request_id: str, request: dict, verra_project: str | None) -
     return [compare_disposals.Other(*row) for row in rows]
 
 
-async def lost(job_id: int | None) -> bool:
-    """Whether a request's job is gone: never noted, removed, or finished without doing its work.
-
-    One waiting, running, or failed (it gave up and said why) isn't lost.
-    """
+async def lost(job_id: int | None) -> str | None:
+    """Why a request's job won't do its work: "missing" (never noted, removed, or finished without doing it) or
+    "failed" (it crashed outside its own error handling: a check or send that fails normally still saves its result
+    or notes the give-up). None while it waits, runs, or waits for its next try."""
     if job_id is None:
-        return True
+        return "missing"
     found = list(await app.job_manager.list_jobs_async(id=job_id))
-    return not found or found[0].status not in ("todo", "doing", "failed")
+    if not found or found[0].status not in ("todo", "doing", "failed"):
+        return "missing"
+    return "failed" if found[0].status == "failed" else None
 
 
 @app.task(name="verify", queue="verify", pass_context=True, retry=VERIFY_RETRY)
@@ -169,8 +177,11 @@ async def verify(context, request_id: str) -> None:
         analysis = cost = None
         try:
             others = await others_of(request_id, request, svc.settings.verra_project)
+            saved = database.SavedAnswers(svc.pool, asyncio.get_running_loop(), request_id,
+                                          await database.saved_answers(svc.pool, request_id))
+            last_try = VERIFY_RETRY.gives_up(disposal_check.JevUnavailable(), context.job)
             checked = await asyncio.to_thread(disposal_check.check, request, svc.photos.fetch, svc.jev,
-                                              svc.settings.verra_project, others)
+                                              svc.settings.verra_project, others, saved, last_try)
             result = make_result(request, checked.outcome, checked.flags, standard=checked.standard,
                                  extractions=checked.extractions)
             analysis, cost = checked.analysis, checked.cost_usd
@@ -178,7 +189,8 @@ async def verify(context, request_id: str) -> None:
             if not VERIFY_RETRY.gives_up(error, context.job):
                 log.warning("%s: checking failed, will retry: %r", request_id, error)
                 raise
-            log.exception("ALERT %s: checking kept failing, sending outcome error", request_id)
+            why = "kept failing" if isinstance(error, RETRYABLE) else "failed in a way trying again won't change"
+            log.exception("ALERT %s: checking %s, sending outcome error", request_id, why)
             result = make_result(request, "error", error={
                 "code": type(error).__name__, "message": "The verifier could not check this disposal."})
         await database.save_result(svc.pool, request_id, result, analysis, cost)
@@ -202,7 +214,7 @@ async def send_result(context, request_id: str) -> None:
         status, answer = None, f"no answer ({type(error).__name__})"
     else:
         status, answer = response.status_code, response.text[:500]
-    if status == 200:
+    if status is not None and 200 <= status < 300:  # the contract says 200; any success is delivered
         await database.note_attempt(svc.pool, request_id, status, sent=True)
         log.info("%s: result stored by gw_sales: %s", request_id, answer)
         return
@@ -231,22 +243,58 @@ async def daily_report(timestamp: int) -> None:
     day = datetime.fromtimestamp(timestamp, standards.IST).date() - timedelta(days=1)
     report = await database.day_report(service().pool, day)
     log.info("daily report %s", json.dumps(report))
-    if report["resultsWaiting"] or report["resultsGivenUp"]:
-        log.error("ALERT daily report %s: %d results waiting to be delivered, %d given up", day,
-                  report["resultsWaiting"], report["resultsGivenUp"])
+    if report["resultsWaiting"] or report["resultsGivenUp"] or report["requestsUnchecked"]:
+        log.error("ALERT daily report %s: %d results waiting to be delivered, %d given up, %d requests without a result",
+                  day, report["resultsWaiting"], report["resultsGivenUp"], report["requestsUnchecked"])
 
 
 @app.periodic(cron="* * * * *", periodic_id="sweep")
 @app.task(name="sweep", queue="sweep", queueing_lock="sweep")
 async def sweep(timestamp: int) -> None:
-    """Retry jobs whose worker died, and queue again requests or results whose job went missing."""
+    """Retry jobs whose worker died, and queue again requests or results whose job went missing. Each run is also the
+    worker's heartbeat, which the web process watches (api.watch_worker)."""
     svc = service()
+    await database.beat(svc.pool)
     for job in await app.job_manager.get_stalled_jobs():
-        log.warning("%s: %s job %s stalled, retrying", job.task_kwargs.get("request_id"), job.task_name, job.id)
+        # Its worker died: perhaps on this very job (out of memory, a native decoder crashing), so it counts as a
+        # requeue, and one that keeps killing workers is given up like a crash that repeats.
+        request_id = job.task_kwargs.get("request_id")
+        if job.task_name in database.JOB_COLUMN and request_id:
+            if (await database.note_requeue(svc.pool, job.task_name, request_id) or 0) > MAX_REQUEUES:
+                await app.job_manager.finish_job_by_id_async(job.id, procrastinate.jobs.Status.FAILED, delete_job=False)
+                await give_up(job.task_name, request_id, "stalled")
+                continue
+        log.warning("%s: %s job %s stalled, retrying", request_id, job.task_name, job.id)
         await app.job_manager.retry_job(job)
     tasks = {"verify": verify, "send_result": send_result}
     for name, rows in (await database.waiting(svc.pool, datetime.now(UTC) - LOST_AFTER)).items():
-        for request_id, job_id in rows:
-            if await lost(job_id):
+        for request_id, job_id, requeues in rows:
+            if not (why := await lost(job_id)):
+                continue
+            if requeues >= MAX_REQUEUES:
+                await give_up(name, request_id, why)
+                continue
+            await database.note_requeue(svc.pool, name, request_id)
+            if why == "failed":
+                log.error("ALERT %s: %s job %s crashed, queueing it again (%d of %d)", request_id, name, job_id,
+                          requeues + 1, MAX_REQUEUES)
+            else:
                 log.warning("%s: %s job %s lost, queueing it again", request_id, name, job_id)
-                await queue(tasks[name], request_id)
+            await queue(tasks[name], request_id)
+
+
+async def give_up(name: str, request_id: str, why: str) -> None:
+    """After MAX_REQUEUES: a check is sent as outcome error, so gw_sales still hears of it; a send is given up, which
+    the daily report counts. If even that fails, the daily report's counts still show it."""
+    svc = service()
+    log.error("ALERT %s: %s job %s %d times, giving up", request_id, name, why, MAX_REQUEUES)
+    try:
+        if name == "verify":
+            request = await database.request(svc.pool, request_id)
+            await database.save_result(svc.pool, request_id, make_result(request, "error", error={
+                "code": "VerifierFailed", "message": "The verifier could not check this disposal."}))
+            await queue(send_result, request_id)
+        else:
+            await database.note_attempt(svc.pool, request_id, None, gave_up=f"the send job {why} {MAX_REQUEUES} times")
+    except Exception:
+        log.exception("ALERT %s: couldn't give up on %s either", request_id, name)

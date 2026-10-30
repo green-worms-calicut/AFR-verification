@@ -2,7 +2,9 @@
 
 The request's photos are fetched by s3Key and checked as one trip: weigh bills, collection photos (loading) and
 unloading photos, against the vehicle number and net quantity entered, with the facility's location as the
-plant. A photo that isn't in storage, or isn't an image, asks a person (`image_unavailable`, docs part).
+plant. A photo that isn't in storage, or isn't an image, asks a person (`image_unavailable`, docs part). So does an
+image Jev still couldn't answer for on the check's last try, while the other images' checks are sent; when Jev was
+busy or down for an image before that, the check is tried again (`JevUnavailable`), asking only what wasn't answered.
 """
 
 import json
@@ -31,7 +33,12 @@ SEVERITY = {("real", "fail"): "high", ("real", "review"): "recheck",
             ("verra", "fail"): "recheck", ("verra", "review"): "info"}
 RANK = {"high": 0, "recheck": 1, "info": 2}
 KIND = {"fail": "problem found", "review": "please check"}
+JEV_COULDNT = "couldn't be read by Jev"  # why an image is unavailable when Jev didn't answer for it
 MAX_MESSAGE = 2000  # the contract's limit
+
+
+class JevUnavailable(Exception):
+    """Jev was busy or down for some of the disposal's images: worth trying again."""
 
 
 @dataclass
@@ -97,9 +104,13 @@ def unavailable_check(kind: str, found: list[tuple[str, str]], none_left: bool) 
     """The images of one kind the request lists that can't be checked, as (s3Key, why). When no image of the kind
     is left, it shares the missing kind's cause, so it leads one flag with the checks that leaves unsure."""
     detail = " ".join(f"The {WORDS[kind]} {key} {why}." for key, why in found)
-    them = "it" if len(found) == 1 else "them"
+    stored = [key for key, why in found if why != JEV_COULDNT]
+    them = "it" if len(stored) == 1 else "them"
+    unread = "it" if len(found) - len(stored) == 1 else "them"
+    tail = (f" Find {them} in gw_sales and add {them} again." if stored else "") + \
+        (f" Look at {unread} yourself." if len(stored) < len(found) else "")
     return proof_check.check(kind, "image_unavailable", f"{WORDS[kind].capitalize()}s available", "review",
-                             f"{detail} Find {them} in gw_sales and add {them} again.", images=[key for key, _ in found],
+                             detail + tail, images=[key for key, _ in found],
                              cause=MISSING_KEY[kind] if none_left else None)
 
 
@@ -156,14 +167,20 @@ def extractions(trip: dict, unavailable: list[str]) -> dict:
 
 
 def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeClient,
-          verra_project: str | None = None, others: list[compare_disposals.Other] = ()) -> Checked:
+          verra_project: str | None = None, others: list[compare_disposals.Other] = (), cache=None,
+          last_try: bool = False) -> Checked:
     """Check one request's disposal, and compare it with `others`: the same vehicle's other disposals within a day
-    of its date (`store.others`). Jev or S3 failing raises, so the job retries."""
+    of its date (`database.others`). `cache` holds the request's Jev answers from earlier tries. S3 failing raises,
+    and so does Jev being busy or down for an image (`JevUnavailable`), so the job retries; on the `last_try` such an
+    image is flagged and the rest sent, unless Jev answered for none."""
     d = disposal(request, verra_project)
     std = standards.for_day(d.day)
     uploads, unavailable = {kind: [] for kind in WORDS}, []  # (kind, s3Key, why)
     for kind, keys in d.evidence.items():
         for key in keys:
+            if not key.startswith(s3_photos.PHOTO_PREFIXES):
+                unavailable.append((kind, key, s3_photos.OUTSIDE))
+                continue
             data = fetch(key)
             if why := s3_photos.problem(data):
                 unavailable.append((kind, key, why))
@@ -171,17 +188,26 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
                 uploads[kind].append(Upload(key, data))
     trip, _ = proof_check.analyze_trip(client, uploads, d.vehicle_number, standards.MODEL, d.quantity, std.limits,
                                        plant=d.plant, verra=d.verra, box_model=standards.BOX_MODEL,
-                                       weighbridge=d.weighbridge, place_also=entry_checks.photos_to_place(request))
+                                       weighbridge=d.weighbridge, place_also=entry_checks.photos_to_place(request),
+                                       cache=cache, around=d.day)
+    busy = [u["name"] for u in trip["unanswered"] if u["kind"] == "retry"]
+    if busy and not last_try:
+        raise JevUnavailable(f"Jev didn't answer for {len(busy)} image(s)")
+    if trip["unanswered"] and not any(trip["images"].values()):
+        raise JevUnavailable("Jev answered for none of the images")
+    unavailable += [(u["role"], u["name"], JEV_COULDNT) for u in trip["unanswered"]]
+    # Read the same in gw_sales as a photo missing from storage: unavailable_check below, not image_unanswered.
+    trip["verdict"]["checks"] = [c for c in trip["verdict"]["checks"] if c["key"] != "image_unanswered"]
     # A kind whose every image is unavailable wasn't left out: its missing check would say none were added.
-    gone = {kind for kind, _, _ in unavailable if not uploads[kind]}
+    gone = {kind for kind, _, _ in unavailable if not trip["images"][kind]}
     by_kind = {}
     for kind, key, why in unavailable:
         by_kind.setdefault(kind, []).append((key, why))
     # First, so each leads the flag of the checks its missing images leave unsure.
     checks = [unavailable_check(kind, found, kind in gone) for kind, found in by_kind.items()]
     checks += [c for c in trip["verdict"]["checks"] if c["key"] not in {MISSING_KEY[k] for k in gone}]
-    checks += entry_checks.checks(request, trip["images"], std.collection_radius)
-    checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack)
+    checks += entry_checks.checks(request, trip["images"], std.collection_radius, d.day)
+    checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack, d.day)
     trip["verdict"] = {**trip["verdict"], **proof_check.decide_parts(checks)}
     for kind, key, why in unavailable:
         log.warning("%s: %s %s %s", request["requestId"], WORDS[kind], key, why)

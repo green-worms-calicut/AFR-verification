@@ -5,10 +5,12 @@ A request is answered as soon as it is saved and queued (202, also for a request
 checking and the result come later from the jobs.
 """
 
+import asyncio
 import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -19,12 +21,42 @@ from verifier.settings import Settings
 log = logging.getLogger("verifier")
 EVENT = "disposal_log.verification_requested"
 SCHEMA_VERSION = 1
+MAX_REQUEST = 1024 * 1024  # bytes: a request lists S3 keys, a few KB; anything far bigger is refused unread
+SILENT_AFTER = timedelta(minutes=5)  # the worker's sweep beats every minute; this long without one, it has stopped
+ALERT_EVERY = timedelta(minutes=30)  # while it stays silent, an alert this often
+
+
+async def watch_worker(pool, started: datetime, alerted: datetime | None, now: datetime) -> datetime | None:
+    """One look at the worker's heartbeat (the web process can't be restarted by it, so it watches): an ALERT when
+    there has been none for SILENT_AFTER (counting from `started` before the first), at most every ALERT_EVERY.
+    Returns when it last alerted, None once the worker beats again."""
+    beat = await database.last_beat(pool)
+    if now - (beat or started) <= SILENT_AFTER:
+        return None
+    if alerted and now - alerted < ALERT_EVERY:
+        return alerted
+    log.error("ALERT worker silent since %s: no disposal is being checked or sent", (beat or started).isoformat())
+    return now
+
+
+async def watching(pool) -> None:
+    started, alerted = datetime.now(UTC), None
+    while True:
+        await asyncio.sleep(60)
+        try:
+            alerted = await watch_worker(pool, started, alerted, datetime.now(UTC))
+        except Exception as error:  # the database down is /ready's to report
+            log.warning("couldn't look at the worker's heartbeat: %r", error)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with tasks.running(Settings.from_env()):
-        yield
+    async with tasks.running(Settings.from_env()) as svc:
+        watch = asyncio.create_task(watching(svc.pool))
+        try:
+            yield
+        finally:
+            watch.cancel()
 
 
 app = FastAPI(title="Jev verifier", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -56,9 +88,17 @@ def problem(request: dict, headers, settings: Settings) -> str | None:
 @app.post("/v1/verifications")
 async def receive(request: Request) -> JSONResponse:
     svc = tasks.service()
-    body = await request.body()  # the raw bytes are what was signed
     headers = request.headers
-    if not signatures.verify(body, headers.get("x-gw-timestamp"), headers.get("x-gw-signature"), svc.settings.webhook_secret):
+    too_large = JSONResponse({"error": f"request larger than {MAX_REQUEST} bytes"}, status_code=413)
+    if int(headers.get("content-length") or 0) > MAX_REQUEST:
+        return too_large
+    body = b""  # the raw bytes are what was signed; read no more than MAX_REQUEST of them
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > MAX_REQUEST:
+            return too_large
+    if not any(signatures.verify(body, headers.get("x-gw-timestamp"), headers.get("x-gw-signature"), secret)
+               for secret in svc.settings.webhook_secrets()):
         log.warning("refused a request (%s): bad or expired signature", headers.get("x-gw-delivery"))
         return JSONResponse({"error": "bad or expired signature"}, status_code=401)
     try:
