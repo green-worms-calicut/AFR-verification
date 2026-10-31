@@ -1,3 +1,3 @@
-# The self-hosted runner's label, so actionlint knows it: greenworms-server runs both dev and production.
+# The self-hosted runner's label, so actionlint knows it: greenworms-server runs the deploy.
 self-hosted-runner:
   labels: [greenworms-server]

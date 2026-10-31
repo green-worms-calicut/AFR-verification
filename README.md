@@ -337,40 +337,22 @@ Monitoring:
 
 ### Automatic tests and deploys
 
-Three GitHub Actions workflows run this:
+Two GitHub Actions workflows run this:
 
-- `.github/workflows/test.yml` runs the offline tests on GitHub's machines for every push to a feature branch and every pull request, with a throwaway Postgres so the verifier's tests run too (a skipped one fails the run). It needs no key or secret.
-- `.github/workflows/deploy-dev.yml` runs on every push to `dev`: the same tests, then a deploy to the dev server.
-- `.github/workflows/deploy-prod.yml` runs on every push to `main` (a merged pull request): the same tests, then a deploy to production.
+- `.github/workflows/test.yml` runs the offline tests on GitHub's machines for every push to a branch other than `main` and every pull request, with a throwaway Postgres so the verifier's tests run too (a skipped one fails the run). It needs no key or secret.
+- `.github/workflows/deploy-prod.yml` runs on every push to `main` (a merged pull request): the same tests, then a deploy. Nothing else deploys; a push to `dev` or any other branch is only tested.
 
-Each deploy backs up the database first, then runs `docker compose up -d --build` on its server, and fails if `/ready` doesn't answer within a minute. The two deploy workflows have the same steps; a change to one goes in the other too.
+The deploy runs on greenworms-server through its self-hosted GitHub runner (labels `self-hosted, linux, x64, greenworms-server`), so nothing logs in from outside and the secrets never leave the server. It backs up the database, runs `docker compose up -d --build`, and fails if `/ready` doesn't answer within a minute. It takes over the stack already running there by hand (`jev-verifier`, port 8080, its database), since the names are the same.
 
-So work goes: a feature branch → a pull request into `dev` → it deploys to dev, try it there → a pull request from `dev` into `main` → it deploys to production. A push straight to either branch deploys the same way, with nothing to stop it, so merge into `main` only what was tried on dev.
-
-Both run on one server, greenworms-server, through its self-hosted GitHub runner (labels `self-hosted, linux, x64, greenworms-server`), so nothing logs in from outside and the secrets never leave the server. Dev and production are two separate stacks there, each with its own containers, database and image:
-
-| | Dev | Production |
-|---|---|---|
-| Branch | `dev` | `main` |
-| Compose project and image | `jev-verifier` | `jev-verifier-prod` |
-| Database volume | `jev-verifier_db` | `jev-verifier-prod_db` |
-| Port on the server | `127.0.0.1:8080` | `127.0.0.1:8081` |
-| Settings | `/etc/jev-verifier/dev.env` | `/etc/jev-verifier/prod.env` |
-
-Dev keeps the names the hand-started stack already has, so its first automatic deploy takes over those containers and their database. Production's are set by `deploy-prod.yml` (`COMPOSE_PROJECT_NAME`, `VERIFIER_IMAGE`, `VERIFIER_PORT`); to run a compose command on production by hand, set the same three first.
+So work goes: a branch → a pull request into `main` (the tests run on it) → merge → it deploys.
 
 To set the server up (once):
 
-1. The runner must be registered to this repository (Settings → Actions → Runners shows it); one registered to another repository never picks up these jobs. The user it runs as must be able to use Docker: `sudo usermod -aG docker <runner user>`. Being in the docker group gives as much power as root on that server, so the runner is only for private repositories.
-2. Move dev's env file out of the code folder, where the runner would delete it, and let the runner read it: `sudo mkdir -p /etc/jev-verifier && sudo mv /opt/jev/deploy/dev.env /etc/jev-verifier/dev.env && sudo chown root:<runner group> /etc/jev-verifier/dev.env && sudo chmod 640 /etc/jev-verifier/dev.env`. Make `/etc/jev-verifier/prod.env` the same way from `deploy/dev.env.example`, with its own passwords and production's gw_sales values (`GW_SALES_URL`, the secrets agreed for production).
-3. Back up both databases each night, each to its own folder, in root's crontab:
-   ```
-   10 2 * * * root ENV_FILE=/etc/jev-verifier/dev.env /opt/jev/deploy/backup.sh
-   20 2 * * * root COMPOSE_PROJECT_NAME=jev-verifier-prod BACKUP_DIR=/var/backups/jev-verifier-prod ENV_FILE=/etc/jev-verifier/prod.env /opt/jev/deploy/backup.sh
-   ```
-4. Give production its own URL in the HTTPS proxy: `deploy/Caddyfile.example` has a block for each, dev forwarding to `127.0.0.1:8080` and production to `127.0.0.1:8081`. Give gw_sales the production URL for production.
+1. The runner must be one this repository may use (Settings → Actions → Runners shows it). The user it runs as must be able to use Docker: `sudo usermod -aG docker <runner user>`. Being in the docker group gives as much power as root on that server.
+2. Move the env file out of the code folder, where the runner would delete it, and let the runner read it: `sudo mkdir -p /etc/jev-verifier && sudo mv /opt/jev/deploy/dev.env /etc/jev-verifier/dev.env && sudo chown root:<runner group> /etc/jev-verifier/dev.env && sudo chmod 640 /etc/jev-verifier/dev.env`. Keep its Postgres passwords: the database only accepts the ones it was made with.
+3. Point the nightly backup at it: `10 2 * * * root ENV_FILE=/etc/jev-verifier/dev.env /opt/jev/deploy/backup.sh`.
 
-Copies made just before each deploy are kept 14 days in the runner user's `~/jev-verifier-backups/dev` and `~/jev-verifier-backups/prod`.
+Copies made just before each deploy are kept 14 days in the runner user's `~/jev-verifier-backups`.
 
 ### Tests
 

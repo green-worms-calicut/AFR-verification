@@ -12,16 +12,3 @@ verifier.example.org {
 		respond 404
 	}
 }
-
-# Production, beside dev on the same server (.github/workflows/deploy-prod.yml): its own host name, on 127.0.0.1:8081.
-verifier-prod.example.org {
-	request_body {
-		max_size 1MB
-	}
-	handle /v1/verifications {
-		reverse_proxy 127.0.0.1:8081
-	}
-	handle {
-		respond 404
-	}
-}
