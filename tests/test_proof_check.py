@@ -1,4 +1,4 @@
-"""Offline tests: run check_proof.py, run_trips.py and app.py against a fake Jev API. No API key or network needed.
+"""Offline tests: run proof_check, tools/check_trip_folders.py, tools/measure_accuracy.py and the test page server against a fake Jev API. No API key or network needed.
 
 Run:
     .venv/bin/python -m unittest discover -s tests -v
@@ -16,7 +16,9 @@ import unittest
 import urllib.error
 import urllib.request
 from compression import zstd
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import httpx2
@@ -26,26 +28,26 @@ from PIL import ImageDraw
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import app  # noqa: E402
-import check_proof  # noqa: E402
-import evaluate  # noqa: E402
-import run_trips  # noqa: E402
-from check_proof import Limits, Upload  # noqa: E402
-from typesafe_sdk import Noul, TypeSafeClient  # noqa: E402
+import proof_check  # noqa: E402
+from proof_check import Limits, Upload  # noqa: E402
+from tools import check_trip_folders, measure_accuracy  # noqa: E402
+from tools.test_page import server as test_page_server  # noqa: E402
+from typesafe_sdk import Noul, RetryPolicy, TypeSafeClient  # noqa: E402
 
 NUMBER = "KL05AF9341"
 QUANTITY = "2570"  # the sample bill's net weight in kg
 
 
-def fake_answers(slot: str, picks: dict, body: bytes | None = None) -> dict:
+def fake_answers(slot: str, picks: dict, body: bytes | None = None, drop: set[str] = frozenset()) -> dict:
     """A System One response body for one slot's questions, or only those asked in the request `body`.
 
     `picks` gives a yes probability per yes/no question and a (choice, confidence) per Choice.
     Anything not picked gets an unsure answer: 0.5, or the first option at confidence 0.3.
+    Questions in `drop` are left out, as the SDK leaves out an answer of a type it doesn't know.
     """
     answers = {}
-    for qid, question in check_proof.QUESTIONS[slot].items():
-        if body is not None and f'"{qid}":{{'.encode() not in body:
+    for qid, question in proof_check.QUESTIONS[slot].items():
+        if qid in drop or body is not None and f'"{qid}":{{'.encode() not in body:
             continue
         if isinstance(question, Noul):
             answers[qid] = {"type": "noul", "noul": picks.get(qid, 0.5)}
@@ -64,9 +66,9 @@ def fake_answers(slot: str, picks: dict, body: bytes | None = None) -> dict:
     if body is not None and b'"line":{"type":"box"' in body:
         answers["line"] = {"type": "box", "box": picks.get("line", {"top": 0.3, "bottom": 0.7, "left": 0.2, "right": 0.8}),
                            "confidence": 0.9}
-    for qid in check_proof.PICKS:
+    for qid in proof_check.PICKS:
         if body is not None and f'"{qid}":{{'.encode() in body:
-            choice, conf = picks.get(qid, (check_proof.NOT_SHOWN, 0.3))
+            choice, conf = picks.get(qid, (proof_check.NOT_SHOWN, 0.3))
             answers[qid] = {"type": "choice", "choice": choice, "confidence": conf, "probabilities": {choice: conf, "other": 1 - conf}}
     return {"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 1000, "output_tokens": 30}}
 
@@ -122,7 +124,7 @@ FINAL = {**BILL_CHECKS, **STAMPED, "slip_kind": ("both_weights", 0.92), "net_wei
 FIRST = {**BILL_CHECKS, "slip_kind": ("one_weight", 0.9), "net_weight": ("different", 0.9),
          "gross_vs_tare": ("not_shown", 0.85), **at("tare", "02:00"), **not_printed("gross", "in", "out"),
          "first_weight": ("not_shown", 0.9)}
-TALLY = {"orientation": ("upright", 0.9), "weigh_bill": 0.04, "slip_kind": ("not_shown", 0.9),
+TALLY = {"orientation": ("upright", 0.9), "weigh_bill": 0.04, "screen_photo": 0.05, "slip_kind": ("not_shown", 0.9),
          "bill_number": ("not_shown", 0.9), **not_printed("gross", "tare", "in", "out")}
 # Only Time In and Time Out, with the tare taken at Time In.
 IN_OUT_FINAL = {**FINAL, **not_printed("gross", "tare"), **at("in", "02:00"), **at("out", "03:30"),
@@ -170,8 +172,10 @@ class FakeJev:
     after a turn).
     """
 
-    def __init__(self, photo=(), bill=(), by_colour=None):
+    def __init__(self, photo=(), bill=(), by_colour=None, drop=frozenset()):
         self.responses = {"photo": list(photo), "bill": list(bill)}
+        self.drop = set(drop)
+        self.fail: dict[tuple, int] = {}  # an image's colour -> the HTTP status Jev answers for it
         self.by_colour = {c: list(picks) for c, picks in (by_colour or {}).items()}
         self.requests: list[httpx2.Request] = []
         self.slip = {"top": 0.0, "bottom": 1.0, "left": 0.0, "right": 1.0}
@@ -190,6 +194,8 @@ class FakeJev:
         with self.lock:
             self.requests.append(request)
             body = sent(request)
+            if self.fail and (status := self.fail.get(self.colour_of(body))):
+                return httpx2.Response(status, json={"detail": "fake failure"})
             if b'"slip":{"type":"box"' in body:  # where a bill's slip is: the whole image, unless a test says otherwise
                 return httpx2.Response(200, json={"model": "jev-1.14.0", "usage": {"input_tokens": 1000, "output_tokens": 4},
                                                   "answers": {"slip": {"type": "box", "box": self.slip, "confidence": 0.95}}})
@@ -200,20 +206,22 @@ class FakeJev:
                 picks = queue.pop(0) if len(queue) > 1 else queue[0]
             else:
                 picks = self.responses[slot].pop(0)
-        return httpx2.Response(200, json=fake_answers(slot, picks, body))
+        return httpx2.Response(200, json=fake_answers(slot, picks, body, self.drop))
 
-    def client(self) -> TypeSafeClient:
-        return TypeSafeClient(api_key="test", headers=check_proof.HEADERS, transport=httpx2.MockTransport(self))
+    def client(self, retries: bool = True) -> TypeSafeClient:
+        """A client answered by this fake; without `retries`, the SDK doesn't retry a failure (fast tests)."""
+        return TypeSafeClient(api_key="test", headers=proof_check.HEADERS, transport=httpx2.MockTransport(self),
+                              retry=None if retries else RetryPolicy(max_retries=0))
 
 
 def sample(name: str) -> PILImage.Image:
-    return PILImage.open(ROOT / "samples" / name).convert("RGB")
+    return PILImage.open(ROOT / "examples" / "images" / name).convert("RGB")
 
 
 def analyze(slot: str, *responses: dict, image: str | None = None, number: str = NUMBER, quantity: str | None = QUANTITY):
     jev = FakeJev(**{slot: responses})
     with jev.client() as client:
-        result, sent_img = check_proof.analyze(client, slot, sample(image or f"{slot}.png"), number, "jev-latest", quantity)
+        result, sent_img = proof_check.analyze(client, slot, sample(image or f"{slot}.png"), number, "jev-latest", quantity)
     return result, sent_img, jev
 
 
@@ -241,114 +249,313 @@ def make_trip(loading=(LOADING, LOADING), unloading=(UNLOADING, UNLOADING), bill
     return uploads, FakeJev(by_colour=by_colour)
 
 
-def run_trip(quantity=QUANTITY, limits=Limits(), index=None, trip_id=None, cache=None, plant=None, verra=False, **kw):
+def run_trip(quantity=QUANTITY, limits=Limits(), index=None, trip_id=None, cache=None, plant=None, verra=False,
+             weighbridge=None, **kw):
     uploads, jev = make_trip(**kw)
     with jev.client() as client:
-        trip, _ = check_proof.analyze_trip(client, uploads, NUMBER, "jev-latest", quantity, limits, index, trip_id, cache, plant,
-                                           verra)
+        trip, _ = proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", quantity, limits, index, trip_id, cache, plant,
+                                           verra, weighbridge=weighbridge)
     return trip, jev
 
 
 class ApiKeyTests(unittest.TestCase):
     def setUp(self):
-        check_proof._keyring_key = None
+        proof_check.ask_jev._keyring_key = None
         patcher = mock.patch.dict(os.environ)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.addCleanup(setattr, check_proof, "_keyring_key", None)
+        self.addCleanup(setattr, proof_check.ask_jev, "_keyring_key", None)
         os.environ.pop("TYPESAFE_API_KEY", None)
 
     def test_environment_variable_comes_first(self):
         os.environ["TYPESAFE_API_KEY"] = "from-env"
         with mock.patch("subprocess.run") as run:
-            self.assertEqual(check_proof.api_key(), "from-env")
+            self.assertEqual(proof_check.api_key(), "from-env")
         run.assert_not_called()
 
     def test_reads_the_keyring_once(self):
         found = mock.Mock(stdout="from-keyring\n")
         with mock.patch("subprocess.run", return_value=found) as run:
-            self.assertEqual(check_proof.api_key(), "from-keyring")
-            self.assertEqual(check_proof.api_key(), "from-keyring")
+            self.assertEqual(proof_check.api_key(), "from-keyring")
+            self.assertEqual(proof_check.api_key(), "from-keyring")
         run.assert_called_once()
-        self.assertEqual(run.call_args.args[0], check_proof.KEY_LOOKUP)
+        self.assertEqual(run.call_args.args[0], proof_check.KEY_LOOKUP)
 
     def test_no_key_when_not_stored_or_no_keyring(self):
         with mock.patch("subprocess.run", return_value=mock.Mock(stdout="")):
-            self.assertIsNone(check_proof.api_key())
+            self.assertIsNone(proof_check.api_key())
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):
-            self.assertIsNone(check_proof.api_key())
+            self.assertIsNone(proof_check.api_key())
 
 
 class FitTests(unittest.TestCase):
     def test_sizes_stay_within_api_limits(self):
         for size in [(346, 588), (4000, 3000), (100, 100), (3000, 200)]:
-            w, h = check_proof.fit(PILImage.new("RGB", size)).size
+            w, h = proof_check.fit(PILImage.new("RGB", size)).size
             with self.subTest(size=size):
-                self.assertEqual(max(w, h), check_proof.MAX_SIDE)
-                self.assertGreaterEqual(min(w, h), check_proof.MIN_SIDE)
+                self.assertEqual(max(w, h), proof_check.MAX_SIDE)
+                self.assertGreaterEqual(min(w, h), proof_check.MIN_SIDE)
+
+
+    def test_fit_never_makes_a_zero_side(self):
+        self.assertGreaterEqual(min(proof_check.fit(PILImage.new("RGB", (4000, 1))).size), 1)
+
+
+class JevFailureTests(unittest.TestCase):
+    """Jev failing on some images: the others' answers are kept, and only a failure that can change is retried."""
+
+    def trip(self, fail: dict[int, int]):
+        """A trip whose images by number (0-1 loading, 2-3 unloading, 4-5 bills) Jev answers `fail`'s status for."""
+        uploads, jev = make_trip()
+        jev.fail = {COLOURS[i]: status for i, status in fail.items()}
+        with jev.client(retries=False) as client:
+            return proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", QUANTITY)[0]
+
+    def test_one_image_failing_keeps_the_others(self):
+        trip = self.trip({5: 500})
+        self.assertEqual([(u["role"], u["name"], u["kind"]) for u in trip["unanswered"]], [("bill", "weighbill2.jpg", "retry")])
+        self.assertEqual([r["name"] for r in trip["images"]["bill"]], ["weighbill1.jpg"])
+        checks = by_key(trip["verdict"]["checks"])
+        self.assertEqual(checks["loading_plate"]["status"], "pass")
+        self.assertEqual((checks["image_unanswered"]["status"], checks["image_unanswered"]["images"]), ("review", ["weighbill2.jpg"]))
+        self.assertNotEqual(trip["verdict"]["status"], "pass")
+
+    def test_every_bill_failing_leads_the_flag_and_real_cannot_pass(self):
+        trip = self.trip({4: 503, 5: 503})
+        checks = by_key(trip["verdict"]["checks"])
+        self.assertNotIn("bill_missing", checks, "the bills were added, Jev only couldn't read them")
+        self.assertEqual(checks["image_unanswered"]["cause"], "bill_missing")
+        self.assertNotEqual(trip["verdict"]["parts"]["real"]["status"], "pass")
+
+    def test_an_image_jev_refuses_is_marked_image(self):
+        self.assertEqual([u["kind"] for u in self.trip({0: 422})["unanswered"]], ["image"])
+
+    def test_key_refused_raises(self):
+        with self.assertRaises(proof_check.JevRefused):
+            self.trip({i: 401 for i in range(6)})
+
+    def test_every_image_refused_raises(self):
+        with self.assertRaises(proof_check.JevRefused):
+            self.trip({i: 400 for i in range(6)})
+
+    def test_a_bug_still_raises(self):
+        real = proof_check.ask_jev.analyze
+
+        def broken(client, slot, *args, **kw):
+            if slot == "bill":
+                raise KeyError("weigh_bill")
+            return real(client, slot, *args, **kw)
+
+        with mock.patch.object(proof_check.ask_jev, "analyze", broken), self.assertRaises(KeyError):
+            self.trip({})
+
+    def test_failure_kinds(self):
+        import typesafe_sdk as ts
+        headers = httpx2.Headers()
+        for error, kind in ((ts.TypeSafeInternalServerError(500, None, headers), "retry"),
+                            (ts.TypeSafeAPIError(529, None, headers), "retry"),
+                            (ts.TypeSafeRateLimitError(429, None, headers), "retry"),
+                            (ts.TypeSafeAPITimeoutError(60.0), "retry"),
+                            (ts.TypeSafeAPIResponseValidationError(200, None, headers, "answers"), "retry"),
+                            (ts.TypeSafeBadRequestError(400, None, headers), "image"),
+                            (ts.TypeSafeUnprocessableEntityError(422, None, headers), "image"),
+                            (ts.TypeSafeAuthenticationError(401, None, headers), "fatal"),
+                            (ts.TypeSafeNotFoundError(404, None, headers), "fatal"),
+                            (KeyError("x"), None)):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(proof_check.failure_kind(error), kind)
+
+
+def read(key: str, value: str | None) -> dict:
+    """A reading as readings_for makes it, read surely, or missing when `value` is None."""
+    return {"key": key, "value": value, "missing": value is None, "min_confidence": 0.95}
+
+
+class YearTests(unittest.TestCase):
+    """Stamps carry no year: it is taken from the trip's date, the one that puts each stamp nearest it."""
+
+    def photo(self, name: str, hhmm: str, ddmm: str) -> dict:
+        return {"name": name, "readings": [read("photo_time", hhmm), read("photo_date", ddmm)]}
+
+    def test_a_trip_across_new_year(self):
+        images = {"loading": [self.photo("collection1.jpg", "23:50", "31/12")],
+                  "unloading": [self.photo("unloading1.jpg", "00:20", "01/01")]}
+        start, end = proof_check.busy_time(images, around=date(2027, 1, 1))
+        self.assertEqual(((end - start).total_seconds() / 60, start.year), (30, 2026))
+
+    def test_28_feb_to_1_mar_in_a_common_year(self):
+        times = {"gross_time": "01:00", "gross_date": "01/03", "tare_time": "23:00", "tare_date": "28/02"}
+        readings = [read(k, times.get(k)) for k in ("gross_time", "gross_date", "tare_time", "tare_date", "in_time",
+                                                     "in_date", "out_time", "out_date", "printed_time", "printed_date")]
+        bill = {"name": "weighbill1.jpg", "readings": readings, "answers": {"first_weight": {"choice": "not_shown", "confidence": 0.9}}}
+        w = proof_check.weighings(bill, around=date(2027, 3, 1))
+        self.assertEqual(proof_check.minutes_between(w["tare"], w["gross"]), 120)
+        self.assertEqual(proof_check.minutes_between(*(lambda w: (w["tare"], w["gross"]))(proof_check.weighings(bill))),
+                         24 * 60 + 120, "without a trip date, as before: a leap year")
+
+
+class CutTests(unittest.TestCase):
+    """Boxes from Jev that are inverted, flat or tiny still give an image to read."""
+
+    img = PILImage.new("RGB", (400, 300))
+
+    def test_inverted_box_is_put_right(self):
+        upright = proof_check.cut_slip(self.img, {"top": 0.2, "bottom": 0.8, "left": 0.1, "right": 0.9})
+        inverted = proof_check.cut_slip(self.img, {"top": 0.8, "bottom": 0.2, "left": 0.9, "right": 0.1})
+        self.assertEqual(inverted.size, upright.size)
+
+    def test_tiny_box_falls_back_to_the_whole_image(self):
+        point = {"top": 0.5, "bottom": 0.5, "left": 0.5, "right": 0.5}
+        self.assertEqual(proof_check.cut_slip(self.img, point).size, self.img.size)
+        self.assertEqual(proof_check.cut_line(self.img, SimpleNamespace(**point)).size, self.img.size)
+
+
+def saved(img: PILImage.Image, fmt: str, **kw) -> bytes:
+    buffer = io.BytesIO()
+    img.save(buffer, fmt, **kw)
+    return buffer.getvalue()
+
+
+class ImageLoadTests(unittest.TestCase):
+    """Files a phone or scanner can send that mustn't crash a trip."""
+
+    def test_truncated_jpeg_is_unreadable(self):
+        with self.assertRaises(proof_check.UNREADABLE):
+            proof_check.load_bytes(coloured(COLOURS[0])[:-2000])
+
+    def test_16_bit_scans_are_read_in_every_byte_order(self):
+        for mode in ("I;16", "I;16B", "I;16L"):
+            with self.subTest(mode=mode):
+                img = PILImage.new(mode, (8, 8))
+                img.putpixel((0, 0), 40000)
+                loaded = proof_check.load_bytes(saved(img, "TIFF"))
+                self.assertEqual((loaded.getpixel((0, 0)), loaded.getpixel((1, 1))), ((155, 155, 155), (0, 0, 0)))
+
+    def test_huge_photo_is_read_reduced(self):
+        data = saved(PILImage.new("RGB", (9000, 6000), (120, 80, 40)), "JPEG", quality=50)
+        self.assertEqual(max(proof_check.load_bytes(data).size), proof_check.REDUCED_SIDE)
+
+    def test_a_photo_too_large_to_open_is_skipped_by_the_index(self):
+        data = saved(PILImage.new("RGB", (3000, 2000)), "JPEG", quality=50)
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(PILImage, "MAX_IMAGE_PIXELS", 1_000_000):
+            (Path(root) / "171000").mkdir()
+            (Path(root) / "171000" / "collection1.jpg").write_bytes(data)
+            with self.assertRaises(proof_check.UNREADABLE):
+                proof_check.load_bytes(data)
+            self.assertEqual(proof_check.ImageIndex.of_folders(Path(root)).items, [])
+
+    def test_over_250_megapixels_is_refused_before_decoding(self):
+        import struct
+        import zlib
+
+        def chunk(kind: bytes, data: bytes) -> bytes:
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+        # Only a header saying 20000 x 15000 (300 MP): refused for its size, not for the missing pixels.
+        header = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 20000, 15000, 8, 0, 0, 0, 0)) + chunk(b"IEND", b"")
+        with self.assertRaises(PILImage.DecompressionBombError):
+            proof_check.load_bytes(header)
+
+    def test_16_bit_scan_keeps_its_greys(self):
+        data = saved(PILImage.new("I;16", (20, 20), 32768), "PNG")
+        r, g, b = proof_check.load_bytes(data).getpixel((0, 0))
+        self.assertTrue(all(abs(c - 128) <= 2 for c in (r, g, b)), (r, g, b))
+
+    def test_real_heic_is_read_upright(self):
+        img = PILImage.new("RGB", (200, 100), (200, 30, 30))
+        exif = img.getexif()
+        exif[0x0112] = 6  # turned 90° clockwise to view: saved as the HEIC's own rotation, as an iPhone does
+        data = saved(img, "HEIF", quality=50, exif=exif.tobytes())
+        self.assertEqual(proof_check.load_bytes(data).size, (100, 200))
 
 
 class TypedValueTests(unittest.TestCase):
     def test_normalize_vehicle_number(self):
-        self.assertEqual(check_proof.normalize_vehicle_number(" kl 05 af-9341 "), NUMBER)
-        self.assertEqual(check_proof.normalize_vehicle_number("KL.05.AF.9341"), NUMBER)
-        self.assertIsNone(check_proof.normalize_vehicle_number(""))
-        self.assertIsNone(check_proof.normalize_vehicle_number("KL0"))
-        self.assertIsNone(check_proof.normalize_vehicle_number("KL05AF9341/2"))
+        self.assertEqual(proof_check.normalize_vehicle_number(" kl 05 af-9341 "), NUMBER)
+        self.assertEqual(proof_check.normalize_vehicle_number("KL.05.AF.9341"), NUMBER)
+        self.assertIsNone(proof_check.normalize_vehicle_number(""))
+        self.assertIsNone(proof_check.normalize_vehicle_number("KL0"))
+        self.assertEqual(proof_check.normalize_vehicle_number("KL05AF9341/2"), NUMBER, "a note after the number")
+
+    def test_more_vehicle_numbers_are_cleaned_up(self):
+        for typed, clean in [("KL05AF9341/T", "KL05AF9341"), ("KL05AF9341 (hired)", "KL05AF9341"),
+                             ("KL 5 AF 9341", "KL05AF9341"),
+                             # already clean, or cleaned as before: unchanged, so saved answers keep matching
+                             ("KL05AF9341", "KL05AF9341"), ("TN38BX1234", "TN38BX1234"), ("KL57X7639", "KL57X7639"),
+                             ("kl 05 af-9341", "KL05AF9341"), ("abc", None),
+                             # a note is dropped only after a full number, never cutting a number in two
+                             ("KL05/AF9341", None), ("KL 05 (AF 9341)", None), ("KL07 BX/1234", None), ("TEMP/1234", None)]:
+            with self.subTest(typed=typed):
+                self.assertEqual(proof_check.normalize_vehicle_number(typed), clean)
 
     def test_parse_quantity(self):
         for typed, kg in [("480", "480"), (" 2,570 kg ", "2570"), ("02570", "2570"), ("480.50", "480.5"),
                           ("480.0 KG", "480"), ("0.5", "0.5"), (1630, "1630"), ("", None), (None, None)]:
             with self.subTest(typed=typed):
-                self.assertEqual(check_proof.parse_quantity(typed), kg)
+                self.assertEqual(proof_check.parse_quantity(typed), kg)
         for typed in ("0", "abc", "480 t", "-5", "4 80"):
             with self.subTest(typed=typed), self.assertRaises(ValueError):
-                check_proof.parse_quantity(typed)
+                proof_check.parse_quantity(typed)
 
     def test_parse_switch(self):
         for value, on in [(True, True), ("yes", True), (1, True), ("true", True), (False, False), (None, False), ("", False),
                           ("no", False)]:
             with self.subTest(value=value):
-                self.assertEqual(check_proof.parse_switch(value, "verra"), on)
+                self.assertEqual(proof_check.parse_switch(value, "verra"), on)
         with self.assertRaises(ValueError):
-            check_proof.parse_switch("maybe", "verra")
+            proof_check.parse_switch("maybe", "verra")
 
     def test_parse_limits_keeps_defaults_for_blanks(self):
-        self.assertEqual(check_proof.parse_limits({}), Limits(60, 10, 5, 720, 500))
-        self.assertEqual(check_proof.parse_limits({"plant_radius": "250"}).plant_radius, 250)
-        self.assertEqual(check_proof.parse_limits({"min_gap_tare_first": " 90 ", "clock_slack": "0"}), Limits(90, clock_slack=0))
+        self.assertEqual(proof_check.parse_limits({}), Limits(60, 10, 5, 720, 500))
+        self.assertEqual(proof_check.parse_limits({"plant_radius": "250"}).plant_radius, 250)
+        self.assertEqual(proof_check.parse_limits({"min_gap_tare_first": " 90 ", "clock_slack": "0"}), Limits(90, clock_slack=0))
         for bad in ("five", "-5", "1.5", "99999"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
-                check_proof.parse_limits({"clock_slack": bad})
+                proof_check.parse_limits({"clock_slack": bad})
+
+    def test_a_typed_zero_limit_is_kept(self):
+        self.assertEqual(proof_check.parse_limits({"clock_slack": 0}).clock_slack, 0, "the number 0 from trip.json")
+
+    def test_a_decimal_comma_is_refused(self):
+        self.assertEqual(proof_check.parse_quantity("2,570"), "2570")
+        self.assertEqual(proof_check.parse_quantity("1,25,000 kg"), "125000", "Indian grouping")
+        for typed in ("2570,5", "2570,50"):
+            with self.subTest(typed=typed), self.assertRaises(ValueError):
+                proof_check.parse_quantity(typed)
+
+    def test_a_plant_outside_india_is_refused(self):
+        for typed in ("75.9420, 11.4404", "51.5, 0.12"):  # swapped, or nowhere near
+            with self.subTest(typed=typed), self.assertRaises(ValueError):
+                proof_check.parse_plant(typed)
 
     def test_parse_plant(self):
         for typed, plant in [("11.4404, 75.9420", PLANT), ("11.4404,75.942", PLANT), (" 11.4404 75.942 ", PLANT),
                              ("11.4404°, 75.942°", PLANT), ([11.4404, 75.942], PLANT), ("", None), (None, None)]:
             with self.subTest(typed=typed):
-                self.assertEqual(check_proof.parse_plant(typed), plant)
+                self.assertEqual(proof_check.parse_plant(typed), plant)
         for typed in ("Raroth", "11.4404", "-11.4404, 75.942", "91, 75", "11.44, 181", "11.44 N, 75.94 E"):
             with self.subTest(typed=typed), self.assertRaises(ValueError):
-                check_proof.parse_plant(typed)
+                proof_check.parse_plant(typed)
 
     def test_a_photo_at_the_plant_is_never_away_for_the_cut_off_digits(self):
-        self.assertEqual(check_proof.from_square("11.44, 75.94", PLANT), 0)
+        self.assertEqual(proof_check.from_square("11.44, 75.94", PLANT), 0)
         # A plant just inside its square: a photo 50 m away, across the line, reads as the next square.
-        self.assertLess(check_proof.from_square("11.43, 75.94", (11.4402, 75.942)), 25)
-        self.assertGreater(check_proof.from_square("11.42, 75.92", PLANT), 1500)  # 171493, unloaded 2.9 km away
+        self.assertLess(proof_check.from_square("11.43, 75.94", (11.4402, 75.942)), 25)
+        self.assertGreater(proof_check.from_square("11.42, 75.92", PLANT), 1500)  # 171493, unloaded 2.9 km away
 
     def test_distances(self):
-        self.assertAlmostEqual(check_proof.metres_between((11.4404, 75.942), (11.4414, 75.942)), 111, delta=1)
-        self.assertAlmostEqual(check_proof.metres_between(PLANT, (11.164949, 76.154944)), 38_300, delta=200)
-        self.assertEqual([check_proof.distance(m) for m in (40.4, 500, 1234, 38_210)], ["40 m", "500 m", "1.2 km", "38 km"])
+        self.assertAlmostEqual(proof_check.metres_between((11.4404, 75.942), (11.4414, 75.942)), 111, delta=1)
+        self.assertAlmostEqual(proof_check.metres_between(PLANT, (11.164949, 76.154944)), 38_300, delta=200)
+        self.assertEqual([proof_check.distance(m) for m in (40.4, 500, 1234, 38_210)], ["40 m", "500 m", "1.2 km", "38 km"])
 
     def test_duration(self):
-        self.assertEqual([check_proof.duration(m) for m in (0, 13, 60, 75, 348)], ["0 min", "13 min", "1 h", "1 h 15 min", "5 h 48 min"])
+        self.assertEqual([proof_check.duration(m) for m in (0, 13, 60, 75, 348)], ["0 min", "13 min", "1 h", "1 h 15 min", "5 h 48 min"])
 
     def test_role_of_file_names(self):
         for name, role in [("collection1.jpg", "loading"), ("Loading-2.JPG", "loading"), ("unloading2.jpg", "unloading"),
                            ("weighbill3.heic", "bill"), ("bill.png", "bill"), ("notes.txt", None), ("photo.jpg", None)]:
             with self.subTest(name=name):
-                self.assertEqual(check_proof.role_of(name), role)
+                self.assertEqual(proof_check.role_of(name), role)
 
 
 class AnalyzeTests(unittest.TestCase):
@@ -367,15 +574,15 @@ class AnalyzeTests(unittest.TestCase):
         jev.slip = {"top": 0.25, "bottom": 0.75, "left": 0.0, "right": 1.0}
         img = PILImage.new("RGB", (400, 1200), "white")
         with jev.client() as client:
-            result, sent_img = check_proof.analyze(client, "bill", img, NUMBER, "jev-latest", QUANTITY, cache := {}, "k")
+            result, sent_img = proof_check.analyze(client, "bill", img, NUMBER, "jev-latest", QUANTITY, cache := {}, "k")
         first = sent(jev.requests[0]).replace(b" ", b"")
         self.assertIn(b'"slip":{"type":"box"', first)
-        self.assertIn(f'"model":"{check_proof.BOX_MODEL}"'.encode(), first)
+        self.assertIn(f'"model":"{proof_check.BOX_MODEL}"'.encode(), first)
         self.assertEqual((result["requests"], result["slip"]["top"]), (2, 0.25))
         # Half the photo's height, with a little room: 400 x 636 before scaling, so wider than half as tall as before.
         self.assertAlmostEqual(sent_img.width / sent_img.height, 400 / 636, places=2)
         # Saved answers cut the image the same way, without asking.
-        _, again = check_proof.analyze(None, "bill", img, NUMBER, "jev-latest", QUANTITY, cache, "k")
+        _, again = proof_check.analyze(None, "bill", img, NUMBER, "jev-latest", QUANTITY, cache, "k")
         self.assertEqual(again.size, sent_img.size)
         # Photos aren't cut.
         _, _, jev = analyze("photo", PHOTO)
@@ -435,6 +642,15 @@ class AnalyzeTests(unittest.TestCase):
         for yes, status in [(0.95, "pass"), (0.8, "pass"), (0.5, "review"), (0.2, "fail"), (0.05, "fail")]:
             with self.subTest(yes=yes):
                 self.assertEqual(by_key(analyze("photo", {**PHOTO, "gps_stamp": yes})[0]["checks"])["gps_stamp"]["status"], status)
+
+    def test_screen_photo_limits_by_kind_of_image(self):
+        # Bills: none of the 180 saved bills of 19 and 23 Oct 2026 scored above 0.33, so 0.4 is their "no" limit.
+        for picks, status in [(0.60, "review"), (0.33, "pass")]:
+            with self.subTest(bill=picks):
+                v = run_trip(bill=(FIRST, {**FINAL, "screen_photo": picks}))[0]["verdict"]
+                self.assertEqual(by_key(v["checks"])["bill_direct"]["status"], status)
+        v = run_trip(loading=({**LOADING, "screen_photo": 0.60},) * 2)[0]["verdict"]
+        self.assertEqual(by_key(v["checks"])["loading_direct"]["status"], "pass", "photos keep their measured 0.6")
 
     def test_first_slip_leaves_out_the_final_slip_questions(self):
         checks = by_key(analyze("bill", FIRST)[0]["checks"])
@@ -505,7 +721,8 @@ class TripTests(unittest.TestCase):
         self.assertEqual((c["unloading_timing"]["label"], c["unloading_timing"]["detail"]),
                          ("Unloading photo times", "Unloading 04:09 is between gross 03:30 and tare 04:15"))
         self.assertEqual([e["what"] for e in v["timeline"]], ["Loading photos", "Gross", "Unloading photos", "Tare"])
-        self.assertEqual([t[5:16] for t in v["window"]], ["10-15T03:30", "10-15T04:15"])
+        # The trip's window is its photos', first loading to last unloading, not its weighings.
+        self.assertEqual([t[5:16] for t in v["window"]], ["10-15T02:40", "10-15T04:09"])
 
     def test_gross_first_weighings_too_close_are_a_problem(self):
         v = run_trip(bill=({**FINAL, **at("gross", "04:05"), **at("tare", "04:12")},))[0]["verdict"]
@@ -598,7 +815,7 @@ class TripTests(unittest.TestCase):
         self.assertEqual(by_key(v["checks"])["loading_timing"]["images"], ["collection2.jpg"])
         v = run_trip(unloading=({**UNLOADING, "stamp_minute": ("09", 0.5)},))[0]["verdict"]
         c = by_key(v["checks"])["unloading_timing"]
-        self.assertEqual((c["status"], c["images"], c["cause"]), ("review", ["unloading1.jpg"], None))
+        self.assertEqual((c["status"], c["images"], c["cause"]), ("review", ["unloading1.jpg"], "unloading_stamps"))
         self.assertEqual(c["detail"], "The time on the GPS stamp of unloading1.jpg was read as 04:09, but only 50% sure. "
                                       "Check it was taken after the gross (loaded) weighing at 03:30.")
 
@@ -658,7 +875,7 @@ class TripTests(unittest.TestCase):
         c = by_key(v["checks"])
         self.assertEqual(c["weighbridge_seal"]["detail"], "weighbill2.jpg: The weighbridge's own stamp is on it, with the heading's name")
         bills = [sent(r) for r in jev.requests if b"weigh_bill" in sent(r)]
-        self.assertTrue(bills and all(b"weighbridge_seal" in b and check_proof.OUR_COMPANY.encode() in b for b in bills))
+        self.assertTrue(bills and all(b"weighbridge_seal" in b and proof_check.OUR_COMPANY.encode() in b for b in bills))
         self.assertFalse(any(b"weighbridge_seal" in sent(r) for r in jev.requests if b"weigh_bill" not in sent(r)))
         # The first slip isn't checked for stamps, so its unsure stamp answers don't count.
         self.assertNotIn("weighbridge_seal", by_key(trip["images"]["bill"][0]["checks"]))
@@ -813,10 +1030,15 @@ class TripTests(unittest.TestCase):
         v = run_trip(bill=(FIRST, {**FINAL, "gross_vs_tare": ("tare_heavier", 0.9)}))[0]["verdict"]
         self.assertEqual(by_key(v["checks"])["gross_vs_tare"]["detail"],
                          "weighbill2.jpg: Gross printed lighter than tare: the labels look swapped")
-        # Unsure, or no labels to compare: no check at all, rather than asking a person.
-        for answer in (("tare_heavier", 0.6), ("not_shown", 0.95)):
+        # Leaning towards tare heavier, but unsure: a person checks the weights.
+        v = run_trip(bill=(FIRST, {**FINAL, "gross_vs_tare": ("tare_heavier", 0.65)}))[0]["verdict"]
+        c = by_key(v["checks"])["gross_vs_tare"]
+        self.assertEqual((c["status"], c["images"]), ("review", ["weighbill2.jpg"]))
+        self.assertIn("Only 65% sure", c["detail"])
+        # Barely leaning, unsure the other way, or no labels to compare: no check at all, rather than asking a person.
+        for answer in (("tare_heavier", 0.45), ("gross_heavier", 0.65), ("not_shown", 0.65), ("not_shown", 0.95)):
             v = run_trip(bill=(FIRST, {**FINAL, "gross_vs_tare": answer}))[0]["verdict"]
-            self.assertNotIn("gross_vs_tare", by_key(v["checks"]))
+            self.assertNotIn("gross_vs_tare", by_key(v["checks"]), answer)
             self.assertEqual(v["status"], "pass")
 
     def test_the_same_file_twice_is_asked_about_once(self):
@@ -825,6 +1047,62 @@ class TripTests(unittest.TestCase):
         second = trip["images"]["bill"][1]
         self.assertEqual((second["same_as"], second["requests"], second["input_tokens"]), ("weighbill1.jpg", 0, 0))
         self.assertEqual(trip["verdict"]["status"], "pass")
+
+    def test_missing_answers_ask_a_person(self):
+        for dropped, key in (("plate_number", "loading_plate"), ("screen_photo", "loading_direct")):
+            uploads, jev = make_trip()
+            jev.drop = {dropped}
+            with jev.client() as client:
+                trip, _ = proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", QUANTITY)
+            with self.subTest(dropped=dropped):
+                self.assertEqual(by_key(trip["verdict"]["checks"])[key]["status"], "review")
+
+    def test_answers_with_one_left_out_are_not_saved(self):
+        uploads, jev = make_trip()
+        jev.drop = {"plate_number"}  # a photo question: the bill's answers are whole
+        cache = {}
+        with jev.client() as client:
+            proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", QUANTITY, cache=cache)
+        self.assertEqual(len(cache), 2, "only the two bills'")
+        jev.drop = set()
+        with jev.client() as client:
+            trip, _ = proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", QUANTITY, cache=cache)
+        self.assertEqual(by_key(trip["verdict"]["checks"])["loading_plate"]["status"], "pass", "asked again")
+        self.assertEqual(len(cache), 6)
+
+    def test_a_missing_orientation_keeps_the_image_as_it_is(self):
+        uploads, jev = make_trip()
+        jev.drop = {"orientation"}
+        with jev.client() as client:
+            trip, _ = proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", QUANTITY)
+        self.assertEqual({r["rotated"] for results in trip["images"].values() for r in results}, {0})
+
+    def test_one_photo_as_loading_and_unloading_is_a_problem(self):
+        # Stamped 03:31: between tare 02:00 and gross 03:30 within the clock slack, and after gross, so every
+        # timing check passes; only the file being the same shows it.
+        both = {**LOADING, **stamp("03:31")}
+        trip, _ = run_trip(loading=(both, LOADING), same=[("loading", 0, "unloading", 0)])
+        c = by_key(trip["verdict"]["checks"])["same_file"]
+        self.assertEqual((c["status"], c["images"]), ("fail", ["collection1.jpg", "unloading1.jpg"]))
+        self.assertEqual(c["detail"], "The same file is both a loading (collection) photo and an unloading photo: "
+                                      "collection1.jpg and unloading1.jpg. One photo can't show both the loading and the unloading.")
+        self.assertEqual(trip["verdict"]["parts"]["real"]["status"], "problem")
+        self.assertEqual(by_key(run_trip()[0]["verdict"]["checks"])["same_file"]["status"], "pass")
+
+    def test_a_photo_uploaded_as_a_bill_is_asked_bill_questions(self):
+        trip, _ = run_trip(same=[("loading", 0, "bill", 1)])
+        self.assertIn("weigh_bill", trip["images"]["bill"][1]["answers"])
+        self.assertIn("shows_vehicle", trip["images"]["loading"][0]["answers"])
+        self.assertIsNone(trip["images"]["bill"][1]["same_as"], "asked in its own slot, not a copy of the photo")
+
+    def test_one_file_listed_twice_by_the_same_name_is_asked_once(self):
+        uploads, jev = make_trip()
+        uploads["loading"][1] = uploads["loading"][0]
+        with jev.client() as client:
+            trip, _ = proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", QUANTITY)
+        self.assertEqual(len(jev.requests), 7, "one loading photo, two unloading, two bills each cut to its slip first")
+        second = trip["images"]["loading"][1]
+        self.assertEqual((second["same_as"], second["requests"]), ("collection1.jpg", 0))
 
     def test_missing_images_or_quantity_ask_a_person(self):
         v = run_trip(unloading=())[0]["verdict"]
@@ -854,7 +1132,7 @@ class TripTests(unittest.TestCase):
         self.assertEqual(v["status"], "pass")
         self.assertEqual(by_key(v["checks"])["weigh_order"]["detail"],
                          "Tare first (12:27), then gross (15:06), from the times printed with each weight")
-        self.assertEqual([check_proof.to_24h(t, a) for t, a in [("03:06", "pm"), ("12:30", "am"), ("12:30", "pm"), ("15:06", "pm"), ("07:39", "none")]],
+        self.assertEqual([proof_check.to_24h(t, a) for t, a in [("03:06", "pm"), ("12:30", "am"), ("12:30", "pm"), ("15:06", "pm"), ("07:39", "none")]],
                          ["15:06", "00:30", "12:30", "15:06", "07:39"])
 
     def test_hour_as_printed_and_on_a_24_hour_clock_count_together(self):
@@ -867,8 +1145,8 @@ class TripTests(unittest.TestCase):
                          "Tare first (08:49), then gross (14:45), from Time In and Time Out, tare first")
         # With AM, 02 and 14 are different times, so the hour stays unsure.
         hour = {"choice": "02", "confidence": 0.52, "top": [("02", 0.54), ("14", 0.46)]}
-        self.assertEqual(check_proof.same_hour(hour, "am")["confidence"], 0.52)
-        self.assertAlmostEqual(check_proof.same_hour(hour, "pm")["confidence"], 0.98)
+        self.assertEqual(proof_check.same_hour(hour, "am")["confidence"], 0.52)
+        self.assertAlmostEqual(proof_check.same_hour(hour, "pm")["confidence"], 0.98)
 
     def test_photo_of_a_screen_has_its_own_measured_thresholds(self):
         for yes, status in [(0.43, "pass"), (0.7, "review"), (0.99, "fail")]:
@@ -910,6 +1188,21 @@ class TripTests(unittest.TestCase):
         # Slips with a time beside each weight aren't In/Out slips, so this isn't checked.
         self.assertNotIn("time_in_tare", by_key(run_trip()[0]["verdict"]["checks"]))
 
+    def test_an_unsure_lighter_weight_at_time_in_asks_a_person(self):
+        v = run_trip(bill=({**IN_OUT_FINAL, "first_weight": ("tare", 0.3)},))[0]["verdict"]
+        checks = by_key(v["checks"])
+        self.assertEqual((checks["time_in_tare"]["status"], checks["time_in_tare"]["cause"]), ("review", "weigh_times"))
+        self.assertIn("Only 30% sure", checks["time_in_tare"]["detail"])
+        self.assertEqual(checks["weigh_order"]["cause"], "weigh_times", "one flag with the weighing order")
+
+    def test_an_unsure_unloading_date_asks_a_person(self):
+        unsure = {**UNLOADING, **stamp("04:09", confidence=0.3)}
+        v = run_trip(unloading=(unsure, unsure))[0]["verdict"]
+        checks = by_key(v["checks"])
+        self.assertEqual(checks["unloading_day"]["status"], "review")
+        self.assertEqual(checks["unloading_day"]["cause"], checks["unloading_timing"]["cause"])
+        self.assertIsNotNone(checks["unloading_day"]["cause"])
+
     def test_first_and_second_weights_with_both_times_labelled_gross(self):
         # As Jev read a Kuttiyadi slip on 22 Oct 2026: both times labelled Gross, so the times with each weight
         # were unsure (gross 0.61), but read surely as first and second, and the first weight is the lighter.
@@ -921,20 +1214,66 @@ class TripTests(unittest.TestCase):
                          "Tare first (02:00), then gross (03:30), from Time In and Time Out, tare first")
 
     def test_nothing_is_rejected_and_problems_come_first(self):
-        self.assertNotIn("fail", check_proof.TITLES)
+        self.assertNotIn("fail", proof_check.TITLES)
         v = run_trip(loading=({**LOADING, "shows_vehicle": 0.6, "plate_number": ("different", 0.9)},))[0]["verdict"]
         self.assertEqual([c["status"] for c in v["flags"]], ["fail", "review"])
         self.assertEqual([c["key"] for c in v["flags"]], ["loading_plate", "loading_vehicle"])
 
 
+class WeighbridgeTests(unittest.TestCase):
+    """The final slip is from the weighbridge entered (the verifier sends gw_sales' claims.weighbridge.name)."""
+
+    NAME = "S N Automatic Weigh Bridge"
+
+    def test_asked_only_when_a_weighbridge_is_entered(self):
+        _, jev = run_trip()
+        self.assertFalse(any(b"weighbridge_entered" in sent(r) for r in jev.requests))
+        _, jev = run_trip(weighbridge=self.NAME)
+        bills = [sent(r) for r in jev.requests if b"weigh_bill" in sent(r)]
+        self.assertTrue(bills and all(b"weighbridge_entered" in b and self.NAME.encode() in b for b in bills))
+        photos = [sent(r) for r in jev.requests if b"shows_vehicle" in sent(r)]
+        self.assertFalse(any(b"weighbridge_entered" in b for b in photos), "only bills are asked")
+
+    def test_saved_answers_keep_their_keys_without_a_weighbridge(self):
+        prints = {"md5": "abc"}
+        self.assertEqual(proof_check.question_version("bill"), proof_check.question_version("bill", weighbridge=False))
+        self.assertNotEqual(proof_check.question_version("bill"), proof_check.question_version("bill", weighbridge=True))
+        plain = proof_check.answer_key(prints, "bill", NUMBER, QUANTITY, "jev-latest")
+        self.assertEqual(len(plain.split("|")), 7, "as before the question was added")
+        named = proof_check.answer_key(prints, "bill", NUMBER, QUANTITY, "jev-latest", weighbridge=self.NAME)
+        self.assertTrue(named.endswith("|" + self.NAME))
+        self.assertNotEqual(plain.split("|")[2], named.split("|")[2])
+
+    def outcome(self, answer):
+        trip, _ = run_trip(weighbridge=self.NAME, bill=(FIRST, {**FINAL, "weighbridge_entered": answer}))
+        return by_key(trip["verdict"]["checks"])["weighbridge_matches"]
+
+    def test_same_passes_different_or_unsure_asks(self):
+        same = self.outcome(("same", 0.9))
+        self.assertEqual((same["status"], same["part"], same["detail"]), ("pass", "docs", f"weighbill2.jpg is from {self.NAME}"))
+        different = self.outcome(("different", 0.9))
+        self.assertEqual(different["status"], "review", "even a sure mismatch may only be the wrong weighbridge entered")
+        self.assertIn(f"from another weighbridge than {self.NAME}, the one entered", different["detail"])
+        unsure = self.outcome(("same", 0.6))
+        self.assertEqual(unsure["status"], "review")
+        self.assertEqual(unsure["detail"], f"Only 60% sure: weighbill2.jpg is from {self.NAME}. Compare the slip's heading "
+                                           f"with {self.NAME}.")
+        self.assertEqual(self.outcome(("not_shown", 0.9))["status"], "review")
+
+    def test_no_bills_asks_a_person_with_the_missing_bills(self):
+        trip, _ = run_trip(weighbridge=self.NAME, bill=())
+        c = by_key(trip["verdict"]["checks"])["weighbridge_matches"]
+        self.assertEqual((c["status"], c["cause"]), ("review", "bill_missing"))
+
+
 class PartTests(unittest.TestCase):
     def test_every_check_is_in_a_part(self):
-        self.assertEqual(set(check_proof.PART_OF.values()), set(check_proof.PARTS))
+        self.assertEqual(set(proof_check.PART_OF.values()), set(proof_check.PARTS))
         v = run_trip(verra=True, unloading=({**UNLOADING, **AT_PLANT},), plant=PLANT,
-                     bill=(FIRST, IN_OUT_FINAL), index=check_proof.ImageIndex())[0]["verdict"]
+                     bill=(FIRST, IN_OUT_FINAL), index=proof_check.ImageIndex())[0]["verdict"]
         self.assertEqual(v["status"], "pass", v["flags"])
         self.assertEqual({p: [c["key"] for c in v["parts"][p]["checks"]] for p in v["parts"]}, {
-            "real": ["loading_direct", "loading_plate", "unloading_direct", "unloading_plate", "unloading_plant", "bill_number",
+            "real": ["loading_direct", "loading_plate", "unloading_direct", "unloading_plate", "same_file", "unloading_plant", "bill_number",
                      "bill_direct", "weigh_order", "time_in_tare", "weigh_gap", "weigh_day", "loading_timing", "unloading_timing", "unloading_day", "reused"],
             "docs": ["loading_vehicle", "loading_stamp", "unloading_vehicle", "unloading_stamp", "bill_found", "net_weight",
                      "gross_vs_tare"],
@@ -968,12 +1307,12 @@ class PartTests(unittest.TestCase):
 
     def test_checks_across_trips_are_in_the_real_part(self):
         uploads, _ = make_trip()
-        index = check_proof.ImageIndex()
-        index.add("day/171562", "collection2.jpg", check_proof.fingerprints(uploads["loading"][0].data))
+        index = proof_check.ImageIndex()
+        index.add("day/171562", "collection2.jpg", proof_check.fingerprints(uploads["loading"][0].data))
         trip = run_trip(index=index, trip_id="day/171496")[0]
         self.assertEqual({p: x["status"] for p, x in trip["verdict"]["parts"].items()}, {"real": "problem", "docs": "pass"})
         trip = run_trip()[0]
-        check_proof.add_checks(trip, [check_proof.check("trips", "overlap", "One trip at a time", "fail", "Also on trip 171566")])
+        proof_check.add_checks(trip, [proof_check.check("trips", "overlap", "One trip at a time", "fail", "Also on trip 171566")])
         self.assertEqual({p: x["status"] for p, x in trip["verdict"]["parts"].items()}, {"real": "problem", "docs": "pass"})
         self.assertEqual(trip["verdict"]["status"], "problem")
 
@@ -981,23 +1320,23 @@ class PartTests(unittest.TestCase):
 class CrossTripTests(unittest.TestCase):
     def test_an_image_used_in_another_trip_is_a_problem(self):
         uploads, _ = make_trip()
-        index = check_proof.ImageIndex()
-        index.add("day/171562", "collection2.jpg", check_proof.fingerprints(uploads["loading"][0].data))
+        index = proof_check.ImageIndex()
+        index.add("day/171562", "collection2.jpg", proof_check.fingerprints(uploads["loading"][0].data))
         v = run_trip(index=index, trip_id="day/171496")[0]["verdict"]
         self.assertEqual(v["status"], "problem")
         self.assertEqual(by_key(v["checks"])["reused"]["detail"], "collection1.jpg is also in trip 171562. The same image can't be proof for two trips.")
         self.assertEqual(by_key(run_trip(index=index, trip_id="day/171562")[0]["verdict"]["checks"])["reused"]["status"], "pass")
-        index.add("day/171566", "unloading1.jpg", check_proof.fingerprints(uploads["unloading"][0].data))
-        index.add("day/171531", "unloading1.jpg", check_proof.fingerprints(uploads["unloading"][0].data))
-        index.add("day/171562", "collection1.jpg", check_proof.fingerprints(uploads["loading"][1].data))
+        index.add("day/171566", "unloading1.jpg", proof_check.fingerprints(uploads["unloading"][0].data))
+        index.add("day/171531", "unloading1.jpg", proof_check.fingerprints(uploads["unloading"][0].data))
+        index.add("day/171562", "collection1.jpg", proof_check.fingerprints(uploads["loading"][1].data))
         v = run_trip(index=index, trip_id="day/171496")[0]["verdict"]
         self.assertEqual(by_key(v["checks"])["reused"]["detail"],
                          "collection1.jpg and collection2.jpg are also in trip 171562; unloading1.jpg is also in trips 171531 and 171566. "
                          "The same image can't be proof for two trips.")
 
     def test_a_resaved_copy_looks_alike_and_asks_a_person(self):
-        index = check_proof.ImageIndex()
-        index.add("day/171562", "collection2.jpg", check_proof.fingerprints(coloured(COLOURS[0], quality=60)))
+        index = proof_check.ImageIndex()
+        index.add("day/171562", "collection2.jpg", proof_check.fingerprints(coloured(COLOURS[0], quality=60)))
         trip, _ = run_trip(index=index, trip_id="day/171496")
         self.assertEqual(by_key(trip["verdict"]["checks"])["reused"]["status"], "review")
         self.assertEqual(trip["images"]["loading"][0]["used_in"], [{"trip": "day/171562", "name": "collection2.jpg", "exact": False}])
@@ -1009,9 +1348,9 @@ class CrossTripTests(unittest.TestCase):
             (folder / "collection1.jpg").write_bytes(coloured(COLOURS[0]))
             (folder / "weighbill1.heic").write_bytes(coloured(COLOURS[1]))
             (folder / "notes.txt").write_text("not an image")
-            index = check_proof.ImageIndex.of_folders(Path(tmp))
+            index = proof_check.ImageIndex.of_folders(Path(tmp))
             self.assertEqual(sorted((t, n) for t, n, _, _ in index.items), [("day/171773", "collection1.jpg"), ("day/171773", "weighbill1.heic")])
-            uploads = check_proof.read_trip_folder(folder)
+            uploads = proof_check.read_trip_folder(folder)
             self.assertEqual({r: [u.name for u in us] for r, us in uploads.items()},
                              {"loading": ["collection1.jpg"], "unloading": [], "bill": ["weighbill1.heic"]})
 
@@ -1022,11 +1361,52 @@ class CrossTripTests(unittest.TestCase):
                  "171566": trip(NUMBER, "2024-10-19T08:32", "2024-10-19T10:10"),
                  "171562": trip(NUMBER, "2024-10-19T08:13", "2024-10-19T08:29"),
                  "171773": trip("KL57AB8815", "2024-10-19T08:00", "2024-10-19T11:00")}
-        found = check_proof.overlap_checks(trips)
+        found = proof_check.overlap_checks(trips)
         self.assertEqual(set(found), {"171531", "171566"})
-        self.assertEqual(found["171531"]["detail"], f"{NUMBER} is also on trip 171566 at the same time. A vehicle can't be on two trips at once.")
-        check_proof.add_checks(trips["171531"], [found["171531"]])
+        self.assertEqual(found["171531"]["detail"], f"{NUMBER} is also on trip 171566 at the same time, by the photos' stamps. "
+                                                    "A vehicle can't be on two trips at once.")
+        proof_check.add_checks(trips["171531"], [found["171531"]])
         self.assertEqual(trips["171531"]["verdict"]["status"], "problem")
+
+    def test_trips_touching_within_the_clock_slack_are_not_on_two_trips(self):
+        def trip(start, end):
+            return {"vehicle_number": NUMBER, "verdict": {"window": [start, end], "checks": [], "flags": []}}
+        trips = {"1": trip("2024-10-19T07:52", "2024-10-19T09:35"), "2": trip("2024-10-19T09:31", "2024-10-19T11:00")}
+        self.assertEqual(proof_check.overlap_checks(trips), {}, "4 min apart: within the 5 min clock slack")
+        self.assertEqual(set(proof_check.overlap_checks(trips, slack=3)), {"1", "2"})
+
+    def test_an_overlap_only_by_unsure_stamps_asks_a_person(self):
+        def trip(window, sure):
+            return {"vehicle_number": NUMBER, "verdict": {"window": window, "sure_window": sure, "checks": [], "flags": []}}
+        trips = {"1": trip(["2024-10-19T08:00", "2024-10-19T10:00"], ["2024-10-19T08:00", "2024-10-19T10:00"]),
+                 "2": trip(["2024-10-19T09:00", "2024-10-19T11:00"], ["2024-10-19T10:30", "2024-10-19T11:00"])}
+        found = proof_check.overlap_checks(trips)
+        self.assertEqual({t: c["status"] for t, c in found.items()}, {"1": "review", "2": "review"})
+        self.assertIn("not sure", found["2"]["detail"])
+        trips["2"]["verdict"]["sure_window"] = ["2024-10-19T09:00", "2024-10-19T11:00"]
+        self.assertEqual({t: c["status"] for t, c in proof_check.overlap_checks(trips).items()}, {"1": "fail", "2": "fail"})
+
+    def test_an_unsure_overlap_is_named_beside_a_sure_one(self):
+        def trip(window, sure):
+            return {"vehicle_number": NUMBER, "verdict": {"window": window, "sure_window": sure, "checks": [], "flags": []}}
+        trips = {"1": trip(["2024-10-19T08:00", "2024-10-19T10:00"], ["2024-10-19T08:00", "2024-10-19T10:00"]),
+                 "2": trip(["2024-10-19T09:00", "2024-10-19T11:00"], ["2024-10-19T09:00", "2024-10-19T11:00"]),
+                 "3": trip(["2024-10-19T07:00", "2024-10-19T08:30"], ["2024-10-19T07:00", "2024-10-19T07:30"])}
+        found = proof_check.overlap_checks(trips)
+        self.assertEqual(found["1"]["status"], "fail")
+        self.assertEqual(found["1"]["detail"], f"{NUMBER} is also on trip 2 at the same time, by the photos' stamps. A "
+                                               "vehicle can't be on two trips at once. It may also be on trip 3 then, by "
+                                               "stamps Jev wasn't sure of: check those too.")
+
+    def test_a_morning_tare_on_every_slip_is_no_window(self):
+        # 19 Oct 2026, KL57AD9265: weighed empty at 05:10, that tare printed on slips with gross 07:02 and 09:23.
+        # By the weighings both trips would run from 05:10 and overlap; by the photos they don't.
+        first, _ = run_trip(bill=(FIRST, {**FINAL, **at("tare", "01:00")}))
+        later = {**PHOTO, **stamp("06:40")}
+        second, _ = run_trip(loading=({**PHOTO, **stamp("05:20")},) * 2, unloading=(later, later),
+                             bill=(FIRST, {**FINAL, **at("tare", "01:00"), **at("gross", "06:30")}))
+        trips = {n: {"vehicle_number": NUMBER, "verdict": t["verdict"]} for n, t in (("1", first), ("2", second))}
+        self.assertEqual(proof_check.overlap_checks(trips), {})
 
 
 class SavedAnswerTests(unittest.TestCase):
@@ -1035,18 +1415,18 @@ class SavedAnswerTests(unittest.TestCase):
         first, jev = run_trip(cache=cache)
         self.assertEqual((len(jev.requests), len(cache)), (8, 6))  # each bill's slip is found, then asked about
         uploads, _ = make_trip()
-        again, _ = check_proof.analyze_trip(None, uploads, NUMBER, "jev-latest", QUANTITY, Limits(), cache=cache)
+        again, _ = proof_check.analyze_trip(None, uploads, NUMBER, "jev-latest", QUANTITY, Limits(), cache=cache)
         self.assertEqual(again["verdict"]["checks"], first["verdict"]["checks"])
         # A different quantity changes what the bill was asked, so its saved answers don't apply.
-        prints = check_proof.fingerprints(uploads["bill"][0].data)
-        keys = {check_proof.answer_key(prints, "bill", NUMBER, q, "jev-latest") for q in ("2570", "840")}
+        prints = proof_check.fingerprints(uploads["bill"][0].data)
+        keys = {proof_check.answer_key(prints, "bill", NUMBER, q, "jev-latest") for q in ("2570", "840")}
         self.assertEqual(len(keys), 2)
 
     def test_answers_saved_for_another_company_name_are_not_reused(self):
-        before, plain = check_proof.question_version("bill", verra=True), check_proof.question_version("bill")
-        with mock.patch.object(check_proof, "OUR_COMPANY", "Another Company"):
-            self.assertNotEqual(check_proof.question_version("bill", verra=True), before)
-            self.assertEqual(check_proof.question_version("bill"), plain)
+        before, plain = proof_check.question_version("bill", verra=True), proof_check.question_version("bill")
+        with mock.patch.object(proof_check.questions, "OUR_COMPANY", "Another Company"):
+            self.assertNotEqual(proof_check.question_version("bill", verra=True), before)
+            self.assertEqual(proof_check.question_version("bill"), plain)
 
     def test_reading_the_position_is_saved_apart_and_serves_any_plant(self):
         cache = {}
@@ -1055,75 +1435,75 @@ class SavedAnswerTests(unittest.TestCase):
         _, jev = run_trip(cache=cache, unloading=unloading, plant=PLANT)
         self.assertEqual(len(jev.requests), 6)  # only the unloading photos, asked again with the place questions, found and picked
         uploads, _ = make_trip(unloading=unloading)
-        far, _ = check_proof.analyze_trip(None, uploads, NUMBER, "jev-latest", QUANTITY, cache=cache, plant=(11.1649, 76.1549))
+        far, _ = proof_check.analyze_trip(None, uploads, NUMBER, "jev-latest", QUANTITY, cache=cache, plant=(11.1649, 76.1549))
         self.assertEqual(by_key(far["verdict"]["checks"])["unloading_plant"]["status"], "fail")
 
 
 class QuestionTests(unittest.TestCase):
     def test_time_and_date_questions_state_their_premise_and_allow_not_shown(self):
-        premises = {"stamp": check_proof.STAMP, "gross": check_proof.GROSS, "tare": check_proof.TARE,
-                    "in": check_proof.TIME_IN, "out": check_proof.TIME_OUT, "printed": check_proof.PRINTED}
-        for slot in check_proof.SLOTS:
-            for qid in [q for _, _, qids, _ in check_proof.REPORT[slot] for q in qids]:
-                question = check_proof.QUESTIONS[slot][qid]
+        premises = {"stamp": proof_check.STAMP, "gross": proof_check.GROSS, "tare": proof_check.TARE,
+                    "in": proof_check.TIME_IN, "out": proof_check.TIME_OUT, "printed": proof_check.PRINTED}
+        for slot in proof_check.SLOTS:
+            for qid in [q for _, _, qids, _ in proof_check.REPORT[slot] for q in qids]:
+                question = proof_check.QUESTIONS[slot][qid]
                 with self.subTest(qid=qid):
                     self.assertTrue(question.instructions.startswith(premises[qid.split("_")[0]]))
-                    self.assertIn(check_proof.NOT_SHOWN, question.criteria)
+                    self.assertIn(proof_check.NOT_SHOWN, question.criteria)
 
     def test_number_questions_compare_with_the_typed_value_and_never_lead_with_same(self):
         for slot, qid, typed in (("photo", "plate_number", "vehicle_number"), ("bill", "bill_number", "vehicle_number"),
                                  ("bill", "net_weight", "quantity_kg")):
-            question = check_proof.QUESTIONS[slot][qid]
+            question = proof_check.QUESTIONS[slot][qid]
             with self.subTest(qid=qid):
                 self.assertIn(f"`{typed}`", question.instructions)
                 self.assertNotEqual(next(iter(question.criteria)), "same")
 
     def test_every_check_has_an_outcome_for_every_option(self):
-        for qid, (_, outcomes) in check_proof.CHOICE_CHECKS.items():
-            slot = "bill" if qid in check_proof.QUESTIONS["bill"] else "photo"
-            self.assertEqual(set(outcomes), set(check_proof.QUESTIONS[slot][qid].criteria), qid)
-        for qid in check_proof.NOUL_CHECKS:
-            self.assertTrue(any(qid in qs for qs in check_proof.QUESTIONS.values()), qid)
+        for qid, (_, outcomes) in proof_check.CHOICE_CHECKS.items():
+            slot = "bill" if qid in proof_check.QUESTIONS["bill"] else "photo"
+            self.assertEqual(set(outcomes), set(proof_check.QUESTIONS[slot][qid].criteria), qid)
+        for qid in proof_check.NOUL_CHECKS:
+            self.assertTrue(any(qid in qs for qs in proof_check.QUESTIONS.values()), qid)
 
     def test_place_questions_state_their_premise_and_allow_not_shown(self):
-        for qid in check_proof.PLACE:
-            question = check_proof.QUESTIONS["photo"][qid]
+        for qid in proof_check.PLACE:
+            question = proof_check.QUESTIONS["photo"][qid]
             with self.subTest(qid=qid):
-                self.assertTrue(question.instructions.startswith(check_proof.STAMP))
-                self.assertIn(check_proof.NOT_SHOWN, question.criteria)
+                self.assertTrue(question.instructions.startswith(proof_check.STAMP))
+                self.assertIn(proof_check.NOT_SHOWN, question.criteria)
                 self.assertLessEqual(len(question.criteria), 255)
-        self.assertEqual(set(check_proof.questions_for("photo", None)) | set(check_proof.PLACE),
-                         set(check_proof.questions_for("photo", None, place=True)))
-        self.assertNotEqual(check_proof.question_version("photo"), check_proof.question_version("photo", place=True))
+        self.assertEqual(set(proof_check.questions_for("photo", None)) | set(proof_check.PLACE),
+                         set(proof_check.questions_for("photo", None, place=True)))
+        self.assertNotEqual(proof_check.question_version("photo"), proof_check.question_version("photo", place=True))
 
     def test_verra_questions_only_for_a_verra_project_trip(self):
-        self.assertEqual(set(check_proof.VERRA), {"material", *check_proof.SEAL})
-        self.assertEqual(set(check_proof.questions_for("bill", QUANTITY)) | set(check_proof.VERRA),
-                         set(check_proof.questions_for("bill", QUANTITY, verra=True)))
-        self.assertFalse(set(check_proof.VERRA) & set(check_proof.questions_for("bill", QUANTITY)))
-        self.assertNotEqual(check_proof.question_version("bill"), check_proof.question_version("bill", verra=True))
-        question = check_proof.QUESTIONS["bill"]["weighbridge_name"]
+        self.assertEqual(set(proof_check.VERRA), {"material", *proof_check.SEAL})
+        self.assertEqual(set(proof_check.questions_for("bill", QUANTITY)) | set(proof_check.VERRA),
+                         set(proof_check.questions_for("bill", QUANTITY, verra=True)))
+        self.assertFalse(set(proof_check.VERRA) & set(proof_check.questions_for("bill", QUANTITY)))
+        self.assertNotEqual(proof_check.question_version("bill"), proof_check.question_version("bill", verra=True))
+        question = proof_check.QUESTIONS["bill"]["weighbridge_name"]
         self.assertNotEqual(next(iter(question.criteria)), "same")
-        for qid in check_proof.SEAL:
-            self.assertIn("`our_company`", check_proof.QUESTIONS["bill"][qid].instructions)
+        for qid in proof_check.SEAL:
+            self.assertIn("`our_company`", proof_check.QUESTIONS["bill"][qid].instructions)
 
     def test_question_version_changes_with_the_questions(self):
-        before = check_proof.question_version("photo")
-        with mock.patch.dict(check_proof.QUESTIONS["photo"], {"extra": Noul(instructions="Is `photo` blue?")}):
-            self.assertNotEqual(check_proof.question_version("photo"), before)
+        before = proof_check.question_version("photo")
+        with mock.patch.dict(proof_check.QUESTIONS["photo"], {"extra": Noul(instructions="Is `photo` blue?")}):
+            self.assertNotEqual(proof_check.question_version("photo"), before)
 
 
-class EvaluateTests(unittest.TestCase):
+class MeasureAccuracyTests(unittest.TestCase):
     def test_normalize(self):
-        self.assertEqual(evaluate.normalize("photo_time", "4:09"), "04:09")
-        self.assertEqual(evaluate.normalize("photo_date", "15/10/2026"), "15/10")
-        self.assertEqual(evaluate.normalize("gross_date", "5.1.2026"), "05/01")
-        self.assertEqual(evaluate.normalize("in_time", "7:39"), "07:39")
-        self.assertEqual(evaluate.normalize("photo_time", " Not_Shown "), "not_shown")
-        self.assertEqual(evaluate.normalize("gps_stamp", "Yes"), "yes")
+        self.assertEqual(measure_accuracy.normalize("photo_time", "4:09"), "04:09")
+        self.assertEqual(measure_accuracy.normalize("photo_date", "15/10/2026"), "15/10")
+        self.assertEqual(measure_accuracy.normalize("gross_date", "5.1.2026"), "05/01")
+        self.assertEqual(measure_accuracy.normalize("in_time", "7:39"), "07:39")
+        self.assertEqual(measure_accuracy.normalize("photo_time", " Not_Shown "), "not_shown")
+        self.assertEqual(measure_accuracy.normalize("gps_stamp", "Yes"), "yes")
 
     def test_scores_and_reports_example_labels(self):
-        rows = evaluate.load_labels(ROOT / "labels.example.csv")
+        rows = measure_accuracy.load_labels(ROOT / "examples" / "labels.example.csv")
         rows[2]["in_date"] = "16/10/2026"  # a deliberately wrong label, to see a mistake reported
         wrong_number_photo = {**PHOTO, "plate_number": ("different", 0.85)}
         # The sample slip prints only Time In and Time Out.
@@ -1134,22 +1514,22 @@ class EvaluateTests(unittest.TestCase):
                  "stamp_day": ("not_shown", 0.9), "stamp_month": ("not_shown", 0.9)}
         jev = FakeJev(photo=[PHOTO, wrong_number_photo, clock], bill=[sample_bill, wrong_number_bill, wrong_weight_bill])
         with jev.client() as client:
-            results = evaluate.run(client, rows, "jev-latest")
-        items = evaluate.score(rows, results)
+            results = measure_accuracy.run(client, rows, "jev-latest")
+        items = measure_accuracy.score(rows, results)
 
         by_field = {(i["row"], i["field"]): i for i in items}
         self.assertEqual(len(items), 22)  # 6 + 1 photo, 7 + 1 + 1 bill, 6 for the clock
-        self.assertTrue(by_field[("samples/photo.png | photo | KL05AF9341", "plate_number")]["correct"])
-        self.assertTrue(by_field[("samples/photo.png | photo | KL05AF9314", "plate_number")]["correct"])
-        self.assertTrue(by_field[("samples/bill.png | bill | KL05AF9314 | 2570 kg", "bill_number")]["correct"])
-        self.assertTrue(by_field[("samples/bill.png | bill | KL05AF9341 | 2570 kg", "net_weight")]["correct"])
-        self.assertTrue(by_field[("samples/bill.png | bill | KL05AF9341 | 2750 kg", "net_weight")]["correct"])
-        self.assertTrue(by_field[("samples/bill.png | bill | KL05AF9341 | 2570 kg", "out_time")]["correct"])
-        self.assertFalse(by_field[("samples/bill.png | bill | KL05AF9341 | 2570 kg", "in_date")]["correct"])
-        clock_vehicle = by_field[("samples/analog-1042.jpg | photo | KL05AF9341", "shows_vehicle")]
+        self.assertTrue(by_field[("images/photo.png | photo | KL05AF9341", "plate_number")]["correct"])
+        self.assertTrue(by_field[("images/photo.png | photo | KL05AF9314", "plate_number")]["correct"])
+        self.assertTrue(by_field[("images/bill.png | bill | KL05AF9314 | 2570 kg", "bill_number")]["correct"])
+        self.assertTrue(by_field[("images/bill.png | bill | KL05AF9341 | 2570 kg", "net_weight")]["correct"])
+        self.assertTrue(by_field[("images/bill.png | bill | KL05AF9341 | 2750 kg", "net_weight")]["correct"])
+        self.assertTrue(by_field[("images/bill.png | bill | KL05AF9341 | 2570 kg", "out_time")]["correct"])
+        self.assertFalse(by_field[("images/bill.png | bill | KL05AF9341 | 2570 kg", "in_date")]["correct"])
+        clock_vehicle = by_field[("../experiments/clock_reading/samples/analog-1042.jpg | photo | KL05AF9341", "shows_vehicle")]
         self.assertEqual((clock_vehicle["got"], clock_vehicle["confidence"]), ("no", 0.97))
 
-        text = evaluate.report(items, results, rows, "jev-latest")
+        text = measure_accuracy.report(items, results, rows, "jev-latest")
         self.assertIn("Mistakes (1)", text)
         self.assertIn("16/10", text)
         self.assertIn("vehicle number: what each threshold would do", text)
@@ -1160,7 +1540,7 @@ class EvaluateTests(unittest.TestCase):
         try:
             bad.write_text("file,slot,vehicle_number,plate\nsamples/bill.png,bill,KL05AF9341,readable\n")
             with self.assertRaises(SystemExit) as caught:
-                evaluate.load_labels(bad)
+                measure_accuracy.load_labels(bad)
             self.assertIn("isn't checked on a bill", str(caught.exception))
         finally:
             bad.unlink()
@@ -1170,7 +1550,7 @@ class EvaluateTests(unittest.TestCase):
         try:
             bad.write_text("file,slot,vehicle_number,quantity,net_weight\nsamples/bill.png,bill,KL05AF9341,,same\n")
             with self.assertRaises(SystemExit) as caught:
-                evaluate.load_labels(bad)
+                measure_accuracy.load_labels(bad)
             self.assertIn("net_weight needs the quantity", str(caught.exception))
         finally:
             bad.unlink()
@@ -1186,23 +1566,23 @@ TRUTH = {"trip": "171773", "vehicle_number": NUMBER, "case": "tare_first", "net_
                                       "gross_at": "15/10/2026 03:30"}}}
 
 
-class RunTripsTests(unittest.TestCase):
+class CheckTripFoldersTests(unittest.TestCase):
     def test_typed_values_from_trip_json_or_hand_read(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp, "171773")
             folder.mkdir()
             (folder / "collection1.jpg").write_bytes(coloured(COLOURS[0]))
             (Path(tmp) / "truth.jsonl").write_text(json.dumps(TRUTH) + "\n")
-            truth = run_trips.find_truth(folder)
-            self.assertEqual(run_trips.typed_for(folder, truth.get("171773")),
+            truth = check_trip_folders.find_truth(folder)
+            self.assertEqual(check_trip_folders.typed_for(folder, truth.get("171773")),
                              ({"vehicle_number": NUMBER, "quantity": 2570}, "hand-read"))
             (folder / "trip.json").write_text(json.dumps({"vehicle_number": "KL05AF9314", "quantity": 840}))
-            self.assertEqual(run_trips.typed_for(folder, truth.get("171773"))[1], "trip.json")
-            self.assertEqual(run_trips.find_trips(Path(tmp)), [folder])
+            self.assertEqual(check_trip_folders.typed_for(folder, truth.get("171773"))[1], "trip.json")
+            self.assertEqual(check_trip_folders.find_trips(Path(tmp)), [folder])
 
     def test_compare_with_hand_read_values(self):
         trip, _ = run_trip()
-        items = run_trips.compare(trip, TRUTH, {"vehicle_number": NUMBER})
+        items = check_trip_folders.compare(trip, TRUTH, {"vehicle_number": NUMBER})
         wrong = {(i["field"], i["image"]) for i in items if not i["right"]}
         # collection2 was hand-read as 02:41 and its plate as unreadable; the fake Jev read 02:40 and "same".
         self.assertEqual(wrong, {("photo time", "collection2.jpg"), ("plate matches", "collection2.jpg")})
@@ -1210,24 +1590,24 @@ class RunTripsTests(unittest.TestCase):
         self.assertEqual(fields, {"photo time", "plate matches", "slip kind", "bill number", "tare time", "gross time", "weighing order"})
 
 
-class RunTripsPlaceTests(unittest.TestCase):
+class CheckTripFoldersPlaceTests(unittest.TestCase):
     def test_compare_positions_with_hand_read_values(self):
         unloading = ({**UNLOADING, **AT_PLANT}, {**UNLOADING, **stamped_at("11.440504", "75.941976")})
         trip, _ = run_trip(unloading=unloading, plant=PLANT)
         truth = json.loads(json.dumps(TRUTH))
         for name in ("unloading1.jpg", "unloading2.jpg"):
             truth["photos"][name] |= {"lat": 11.440404, "long": 75.941976}
-        items = [i for i in run_trips.compare(trip, truth, {"vehicle_number": NUMBER}) if i["field"] == "photo position"]
+        items = [i for i in check_trip_folders.compare(trip, truth, {"vehicle_number": NUMBER}) if i["field"] == "photo position"]
         self.assertEqual([(i["image"], i["expected"], i["right"]) for i in items],
                          [("unloading1.jpg", "11.4404, 75.9419", True), ("unloading2.jpg", "11.4404, 75.9419", False)])
 
 
-class AppTests(unittest.TestCase):
+class TestPageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.jev = FakeJev()
-        cls.real_client = app.TypeSafeClient
-        app.TypeSafeClient = lambda **kw: cls.real_client(**{**kw, "api_key": "test"}, transport=httpx2.MockTransport(cls.jev))
+        cls.real_client = test_page_server.TypeSafeClient
+        test_page_server.TypeSafeClient = lambda **kw: cls.real_client(**{**kw, "api_key": "test"}, transport=httpx2.MockTransport(cls.jev))
         cls.old_key = os.environ.get("TYPESAFE_API_KEY")
         os.environ["TYPESAFE_API_KEY"] = "test"
         cls.tmp = tempfile.TemporaryDirectory()
@@ -1236,10 +1616,10 @@ class AppTests(unittest.TestCase):
         for name, colour in (("collection1.jpg", COLOURS[0]), ("unloading1.jpg", COLOURS[1]), ("weighbill1.heic", COLOURS[2])):
             (folder / name).write_bytes(coloured(colour))
         Path(cls.tmp.name, "day", "truth.jsonl").write_text(json.dumps(TRUTH) + "\n")
-        cls.trips = mock.patch.object(app, "TRIPS", Path(cls.tmp.name))
+        cls.trips = mock.patch.object(test_page_server, "TRIPS", Path(cls.tmp.name))
         cls.trips.start()
-        app._index = None
-        cls.server = app.serve(0)  # any free port
+        test_page_server._index = None
+        cls.server = test_page_server.serve(0)  # any free port
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
 
@@ -1247,9 +1627,9 @@ class AppTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
         cls.server.server_close()
-        app.TypeSafeClient = cls.real_client
+        test_page_server.TypeSafeClient = cls.real_client
         cls.trips.stop()
-        app._index = None
+        test_page_server._index = None
         cls.tmp.cleanup()
         if cls.old_key is None:
             os.environ.pop("TYPESAFE_API_KEY", None)
@@ -1276,6 +1656,48 @@ class AppTests(unittest.TestCase):
     @staticmethod
     def image(colour) -> dict:
         return {"name": "x.jpg", "data": "data:image/jpeg;base64," + base64.b64encode(coloured(colour)).decode()}
+
+    def raw(self, body: bytes, headers: dict, method: str = "POST", path: str = "/api/check") -> tuple[int, dict]:
+        """A request with exactly these headers; answers within 10 s or the test fails."""
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=10)
+        try:
+            conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            for name, value in {"Host": f"127.0.0.1:{self.server.server_port}", "Content-Type": "application/json",
+                                "Content-Length": str(len(body)), **headers}.items():
+                conn.putheader(name, value)
+            conn.endheaders(body)
+            response = conn.getresponse()
+            return response.status, json.loads(response.read() or b"{}")
+        finally:
+            conn.close()
+
+    def test_only_json_from_this_machine_is_taken(self):
+        body = json.dumps({"vehicle_number": NUMBER, "images": {"loading": [self.image(COLOURS[0])]}}).encode()
+        self.assertEqual(self.raw(body, {"Content-Type": "text/plain"})[0], 415, "a form another website could post")
+        self.assertEqual(self.raw(body, {"Host": "evil.example"})[0], 403, "DNS rebinding")
+        for path in ("/api/trips", "/api/trips/day/171773", "/api/status"):
+            with self.subTest(path=path):
+                self.assertEqual(self.raw(b"", {"Host": "evil.example"}, "GET", path)[0], 403, "DNS rebinding reads records")
+        unnamed = json.dumps({"images": {}}).encode()  # past the checks of where it came from, refused for what it is
+        self.assertEqual(self.raw(unnamed, {"Host": f"localhost:{self.server.server_port}"})[0], 400)
+
+    def test_bad_requests_get_an_answer(self):
+        cut = {"name": "x.jpg", "data": "data:image/jpeg;base64," + base64.b64encode(coloured(COLOURS[0])[:-2000]).decode()}
+        for body in ({"vehicle_number": NUMBER, "images": {"loading": [cut]}},
+                     {"vehicle_number": NUMBER, "images": {"loading": [{"name": "x.jpg", "data": 5}]}},
+                     {"vehicle_number": NUMBER, "trip_id": "day/\x00", "images": {"loading": [self.image(COLOURS[0])]}}):
+            with self.subTest(body=str(body)[:60]):
+                status, answer = self.raw(json.dumps(body).encode(), {})
+                self.assertEqual(status, 400)
+                self.assertTrue(answer["error"])
+        status, _ = self.raw(b"{}", {"Content-Length": "-1"})
+        self.assertEqual(status, 400)
+        body = {"vehicle_number": NUMBER, "images": {"loading": [self.image(COLOURS[0])]}}
+        with mock.patch.object(proof_check, "load_bytes", side_effect=SyntaxError("broken PNG file")):  # as Pillow says
+            status, answer = self.raw(json.dumps(body).encode(), {})
+        self.assertEqual(status, 400, "a broken PNG")
+        self.assertIn("whole image", answer["error"])
 
     def test_page_and_status(self):
         with urllib.request.urlopen(self.base + "/") as response:
@@ -1311,7 +1733,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual({p: x["title"] for p, x in body["verdict"]["parts"].items()}, {"real": "Accepted", "docs": "Accepted"})
         self.assertEqual(body["images"]["bill"][0]["rotated"], 90)
         self.assertEqual(by_key(body["verdict"]["checks"])["reused"]["status"], "pass")
-        for role in check_proof.ROLES:
+        for role in proof_check.ROLES:
             self.assertTrue(body["images"][role][0]["sent_image"].startswith("data:image/jpeg;base64,"))
 
     def test_images_of_a_known_trip_are_flagged_unless_it_is_that_trip(self):

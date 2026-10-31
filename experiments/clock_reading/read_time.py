@@ -4,7 +4,7 @@ Jev answers questions with probabilities instead of generating text, so the time
 read as separate Choice questions (hour, minute, AM/PM) and assembled here.
 
 Usage:
-    .venv/bin/python read_time.py photo.jpg [more.jpg ...] [--model jev-preview] [--expect 10:42]
+    .venv/bin/python experiments/clock_reading/read_time.py photo.jpg [more.jpg ...] [--model jev-preview] [--expect 10:42]
 """
 
 import argparse

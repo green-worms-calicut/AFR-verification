@@ -1,0 +1,8 @@
+# Only requirements, proof_check/ and verifier/ go into the image. Real trip records, saved answers and secrets never do.
+*
+!requirements.txt
+!requirements-verifier.txt
+!proof_check/
+!verifier/
+**/__pycache__
+**/*.pyc

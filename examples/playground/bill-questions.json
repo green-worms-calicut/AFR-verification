@@ -921,5 +921,14 @@
       "same": "The stamp shows the same name as the heading, even if shortened or only partly legible.",
       "not_shown": "There is no weighbridge stamp, or the name in it can't be made out."
     }
+  },
+  "weighbridge_entered": {
+    "type": "choice",
+    "instructions": "Is `bill` a slip from the weighbridge named in `weighbridge`? A slip prints its weighbridge's name in its heading, sometimes also in an ink stamp. The same weighbridge's name is often written differently: shortened, with or without spaces or 'Electronic', with or without its place.",
+    "criteria": {
+      "different": "The slip's heading names another weighbridge, not the one in `weighbridge`.",
+      "same": "The slip's heading names the weighbridge in `weighbridge`, even if written differently.",
+      "not_shown": "No weighbridge name is printed on the bill, or it can't be read well enough to compare."
+    }
   }
 }

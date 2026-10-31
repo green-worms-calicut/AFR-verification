@@ -1,14 +1,14 @@
 """Measure how accurate Jev is on your own labeled images, and choose confidence thresholds from it.
 
-1. Copy labels.example.csv to labels.csv. Add one row per image check: the file (relative to the
+1. Copy examples/labels.example.csv to labels.csv. Add one row per image check: the file (relative to the
    CSV), its slot (photo or bill), the vehicle number typed in, for a bill the quantity typed in
    (kg), and the correct answers. Leave a cell blank to skip it. Add rows with a wrong vehicle
    number or quantity too (labeled `different`), to measure how well Jev catches a mismatch: one
    character or digit off is the hardest case.
 2. Ask Jev about every row. This costs tokens, and saves the answers to eval/<model>.jsonl:
-       .venv/bin/python evaluate.py labels.csv
+       .venv/bin/python -m tools.measure_accuracy labels.csv
 3. Re-score the saved answers for free, for example after editing labels:
-       .venv/bin/python evaluate.py labels.csv --cached
+       .venv/bin/python -m tools.measure_accuracy labels.csv --cached
 
 Label columns:
     shows_vehicle, gps_stamp, screen_photo, weigh_bill   yes or no
@@ -27,7 +27,7 @@ Label columns:
 The report shows accuracy per field, accuracy at each confidence level, and for each candidate
 threshold how many answers would be accepted automatically and how many of those would be wrong.
 For a yes/no answer, the confidence is how far it leans: the probability of yes for a yes, of no
-for a no. So a threshold of 0.8 here matches check_proof.YES and NO at 0.8 and 0.2.
+for a no. So a threshold of 0.8 here matches proof_check.YES and NO at 0.8 and 0.2.
 """
 
 import argparse
@@ -38,7 +38,7 @@ from pathlib import Path
 
 from typesafe_sdk import Noul, TypeSafeClient
 
-import check_proof
+import proof_check
 
 FIELDS = {  # label column -> group
     "shows_vehicle": "image", "gps_stamp": "image", "screen_photo": "image", "weigh_bill": "image",
@@ -53,7 +53,7 @@ FIELDS = {  # label column -> group
 BUCKETS = [(0.0, 0.5), (0.5, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 0.95), (0.95, 1.01)]
 THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
 SMALL_SAMPLE = 30  # below this many answers, accuracy figures are rough
-READING_FIELDS = {key for readings in check_proof.REPORT.values() for key, *_ in readings}
+READING_FIELDS = {key for readings in proof_check.REPORT.values() for key, *_ in readings}
 
 
 def row_id(row: dict) -> str:
@@ -64,7 +64,7 @@ def row_id(row: dict) -> str:
 def normalize(field: str, value: str) -> str:
     """Write labels and answers the same way: 3:09 -> 03:09, 15/10/2026 -> 15/10, Yes -> yes."""
     value = value.strip().lower()
-    if value in ("", check_proof.NOT_SHOWN) or field not in READING_FIELDS:
+    if value in ("", proof_check.NOT_SHOWN) or field not in READING_FIELDS:
         return value
     sep = ":" if "time" in field else "/"
     return sep.join(part.zfill(2) for part in value.replace(".", sep).split(sep)[:2])
@@ -72,12 +72,12 @@ def normalize(field: str, value: str) -> str:
 
 def allowed(slot: str, field: str) -> set[str] | None:
     """The values a label may take for this slot and field, or None if the field isn't asked about this slot."""
-    question = check_proof.QUESTIONS[slot].get(field)
+    question = proof_check.QUESTIONS[slot].get(field)
     if isinstance(question, Noul):
         return {"yes", "no"}
     if question is not None:
         return set(question.criteria)
-    return set() if any(field == key for key, *_ in check_proof.REPORT[slot]) else None
+    return set() if any(field == key for key, *_ in proof_check.REPORT[slot]) else None
 
 
 def load_labels(path: Path) -> list[dict]:
@@ -86,14 +86,14 @@ def load_labels(path: Path) -> list[dict]:
     for n, row in enumerate(rows, 2):
         where = f"{path}, line {n}"
         row["slot"] = row.get("slot", "").strip().lower()
-        if row["slot"] not in check_proof.SLOTS:
+        if row["slot"] not in proof_check.SLOTS:
             sys.exit(f"{where}: slot must be photo or bill, not {row.get('slot')!r}.")
-        number = check_proof.normalize_vehicle_number(row.get("vehicle_number", ""))
+        number = proof_check.normalize_vehicle_number(row.get("vehicle_number", ""))
         if not number:
             sys.exit(f"{where}: vehicle_number {row.get('vehicle_number')!r} isn't 4 to 12 letters and digits.")
         row["vehicle_number"] = number
         try:
-            row["quantity"] = check_proof.parse_quantity(row.get("quantity"))
+            row["quantity"] = proof_check.parse_quantity(row.get("quantity"))
         except ValueError:
             sys.exit(f"{where}: quantity {row.get('quantity')!r} isn't a number of kilograms.")
         if (row.get("net_weight") or "").strip() and not row["quantity"]:
@@ -116,8 +116,8 @@ def run(client: TypeSafeClient, rows: list[dict], model: str) -> dict[str, dict]
     for i, row in enumerate(rows, 1):
         print(f"[{i}/{len(rows)}] {row_id(row)}", file=sys.stderr)
         try:
-            img = check_proof.load(row["path"])
-            results[row_id(row)], _ = check_proof.analyze(client, row["slot"], img, row["vehicle_number"], model,
+            img = proof_check.load(row["path"])
+            results[row_id(row)], _ = proof_check.analyze(client, row["slot"], img, row["vehicle_number"], model,
                                                           row["quantity"])
         except Exception as error:  # keep going; the report lists what failed
             print(f"    failed: {type(error).__name__}: {error}", file=sys.stderr)
@@ -139,7 +139,7 @@ def score(rows: list[dict], results: dict[str, dict]) -> list[dict]:
                 continue
             if field in readings:
                 r = readings[field]
-                got, confidence = (check_proof.NOT_SHOWN if r["missing"] else r["value"]), r["min_confidence"]
+                got, confidence = (proof_check.NOT_SHOWN if r["missing"] else r["value"]), r["min_confidence"]
                 detail = [(p["id"], p["choice"], round(p["confidence"], 2)) for p in r["parts"]]
             elif answers[field]["type"] == "noul":
                 yes = answers[field]["yes"]
@@ -218,15 +218,15 @@ def main() -> None:
     args = parser.parse_args()
 
     rows = load_labels(args.labels)
-    cache = Path(__file__).parent / "eval" / f"{args.model}.jsonl"
+    cache = Path(__file__).resolve().parents[1] / "eval" / f"{args.model}.jsonl"
     if args.cached:
         if not cache.is_file():
             sys.exit(f"No saved answers at {cache}. Run without --cached first.")
         results = {r["check"]: r["result"] for r in map(json.loads, cache.read_text().splitlines())}
     else:
-        if not (key := check_proof.api_key()):
-            sys.exit(check_proof.NO_KEY)
-        with TypeSafeClient(api_key=key, headers=check_proof.HEADERS, timeout=check_proof.TIMEOUT) as client:
+        if not (key := proof_check.api_key()):
+            sys.exit(proof_check.NO_KEY)
+        with TypeSafeClient(api_key=key, headers=proof_check.HEADERS, timeout=proof_check.TIMEOUT) as client:
             results = run(client, rows, args.model)
         cache.parent.mkdir(exist_ok=True)
         cache.write_text("".join(json.dumps({"check": c, "result": r}) + "\n" for c, r in results.items()))

@@ -316,7 +316,7 @@ const ROLE = {
 const GROUPS = [["loading", "Loading photos"], ["unloading", "Unloading photos"], ["bill", "Weigh bills"], ["times", "Times"], ["trips", "Other trips"]];
 const LIMITS = ["min_gap_tare_first", "min_gap_gross_first", "clock_slack"];
 const FLAGGED = new Set(["problem", "review"]);
-// The three parts of a trip's check, as in check_proof.PARTS: each is decided, and accepted or rejected, on its own.
+// The three parts of a trip's check, as in proof_check.PARTS: each is decided, and accepted or rejected, on its own.
 const PARTS = [["real", "Trip is real"], ["docs", "Documentation"], ["verra", "Verra"]];
 const TITLES = { pass: "Accepted", problem: "Flagged: problem found", review: "Flagged: please check" };
 const ICON = { pass: "✓", fail: "✕", review: "?" };
@@ -334,13 +334,13 @@ const pct = (x) => Math.round(x * 100) + "%";
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const vehicleNumber = () => $("vehicle").value.replace(/[\s.\-]/g, "").toUpperCase();
 const validNumber = () => /^[A-Z0-9]{4,12}$/.test(vehicleNumber());
-// Kilograms, like check_proof.parse_quantity: blank, or a number above 0 with an optional "kg".
+// Kilograms, like proof_check.parse_quantity: blank, or a number above 0 with an optional "kg".
 const quantity = () => $("quantity").value.replace(/,/g, "").trim();
 const validQuantity = () => !quantity() || (/^\d+(\.\d+)?\s*(kgs?)?\.?$/i.test(quantity()) && parseFloat(quantity()) > 0);
-// Whole minutes, like check_proof.parse_limits: blank keeps the default.
+// Whole minutes, like proof_check.parse_limits: blank keeps the default.
 const validLimit = (id) => /^\s*\d{0,4}\s*$/.test($(id).value);
 const validLimits = () => LIMITS.every(validLimit);
-// Decimal degrees north and east, like check_proof.parse_plant: blank, or "latitude, longitude".
+// Decimal degrees north and east, like proof_check.parse_plant: blank, or "latitude, longitude".
 const plant = () => $("plant").value.trim();
 const validPlant = () => {
   const m = plant().replace(/°/g, "").match(/^(\d{1,2}(?:\.\d+)?)\s*[,\s]\s*(\d{1,3}(?:\.\d+)?)$/);
@@ -453,7 +453,7 @@ async function check() {
     }
   } catch (error) {
     state.status = "error";
-    state.error = error.message === "Failed to fetch" ? "Couldn't reach app.py. Check that it's still running." : error.message;
+    state.error = error.message === "Failed to fetch" ? "Couldn't reach the test page server. Check that it's still running." : error.message;
   }
   render();
 }
@@ -513,7 +513,7 @@ function looksHTML(checks) {
   return buttons ? `<div class="looks">Look at ${buttons}</div>` : "";
 }
 
-// One reason a part is flagged: a check, and any others flagged for the same cause (check_proof.check's `cause`),
+// One reason a part is flagged: a check, and any others flagged for the same cause (proof_check.check's `cause`),
 // such as an unsure reading of the weighing times that also leaves the gap and the photo times unsure.
 function reasonHTML([c, ...also], { look = true } = {}) {
   const status = [c, ...also].some((x) => x.status === "fail") ? "fail" : "review";

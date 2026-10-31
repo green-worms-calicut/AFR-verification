@@ -2,19 +2,21 @@
 
 A trip folder holds collection*/loading* photos, unloading* photos and weighbill* images, as in the
 inward log export. What was typed for the trip comes from trip.json in its folder:
-    {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10, "plant": "11.4404, 75.9420", "verra": true}
+    {"vehicle_number": "KL57AB8815", "quantity": 1630, "clock_slack": 10, "plant": "11.4404, 75.9420", "verra": true,
+     "weighbridge": "G W Electronic Weigh Bridge"}
 Without one, the hand-read vehicle number and final-slip net weight from truth.jsonl (in the folder
 given or a parent) stand in for it, so the run checks Jev against the images themselves. The plant's
 location comes from --plant for every trip, unless a trip.json gives its own. "verra": true marks a Verra
-project trip, whose final slip must have a material entered and carry the weighbridge's stamp.
+project trip, whose final slip must have a material entered and carry the weighbridge's stamp. "weighbridge" is the
+weighbridge entered, whose name the final slip must show.
 
-Each trip is reported by part (real, docs, verra: see check_proof.PARTS) and as a whole.
+Each trip is reported by part (real, docs, verra: see proof_check.PARTS) and as a whole.
 
 Usage:
-    .venv/bin/python run_trips.py trips/inward-2026-10-19              # asks Jev, saves answers in eval/
-    .venv/bin/python run_trips.py trips/inward-2026-10-19 --plant "11.4404, 75.9420"   # and checks unloading at the plant
-    .venv/bin/python run_trips.py trips/inward-2026-10-19 --cached     # re-checks saved answers, no requests
-    .venv/bin/python run_trips.py trips/inward-2026-10-19 --only 171773 171496 --model jev-preview
+    .venv/bin/python -m tools.check_trip_folders trips/inward-2026-10-19              # asks Jev, saves answers in eval/
+    .venv/bin/python -m tools.check_trip_folders trips/inward-2026-10-19 --plant "11.4404, 75.9420"   # and checks unloading at the plant
+    .venv/bin/python -m tools.check_trip_folders trips/inward-2026-10-19 --cached     # re-checks saved answers, no requests
+    .venv/bin/python -m tools.check_trip_folders trips/inward-2026-10-19 --only 171773 171496 --model jev-preview
 
 Saved answers are reused whenever the image, questions, typed values and model are the same, so a
 second run only pays for what changed. Images already used in another trip, and a vehicle on two
@@ -23,23 +25,24 @@ trips at once, are flagged across the whole folder.
 
 import argparse
 import json
+import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient
 
-import check_proof
-from check_proof import ROLES
+import proof_check
 
-HERE = Path(__file__).parent
+ROOT = Path(__file__).resolve().parents[1]  # the project folder: eval/ is kept there
 SHORT = {"pass": "Accepted", "problem": "PROBLEM", "review": "check"}
 
 
 def find_trips(root: Path) -> list[Path]:
     """Folders under `root` that hold trip images, in name order."""
-    return sorted({p.parent for p in root.rglob("*") if p.is_file() and check_proof.role_of(p.name)})
+    return sorted({p.parent for p in root.rglob("*") if p.is_file() and proof_check.role_of(p.name)})
 
 
 def find_truth(root: Path) -> dict[str, dict]:
@@ -96,7 +99,7 @@ def compare(trip: dict, truth: dict, typed: dict) -> list[dict]:
         t = truth["bills"].get(r["name"])
         if not t:
             continue
-        kind = {"final": "both_weights", "first": "one_weight", "other": check_proof.NOT_SHOWN}[t["slip"]]
+        kind = {"final": "both_weights", "first": "one_weight", "other": proof_check.NOT_SHOWN}[t["slip"]]
         add("slip kind", r["name"], kind, r["answers"]["slip_kind"]["choice"])
         if t["slip"] != "other":
             add("bill number", r["name"], "same" if t.get("vehicle_number") == number else "different",
@@ -108,6 +111,12 @@ def compare(trip: dict, truth: dict, typed: dict) -> list[dict]:
     got_case = next((c.get("order", "unclear") for c in trip["verdict"]["checks"] if c["key"] == "weigh_order"), "unclear")
     add("weighing order", "trip", truth["case"], got_case)
     return items
+
+
+def trip_date(folder: Path) -> date:
+    """The trip's date, for the stamps' year: the date in its folder's path (trips/inward-2026-10-19/...), or today."""
+    found = re.search(r"(\d{4})-(\d{2})-(\d{2})", folder.as_posix())
+    return date(*map(int, found.groups())) if found else date.today()
 
 
 def main() -> None:
@@ -123,23 +132,23 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        plant = check_proof.parse_plant(args.plant)
+        plant = proof_check.parse_plant(args.plant)
     except ValueError as error:
         parser.error(str(error))
     folders = [f for f in find_trips(args.root) if not args.only or f.name in args.only]
     truth = find_truth(args.root)
-    index = check_proof.ImageIndex.of_folders(args.root)
-    cache_path = HERE / "eval" / f"answers-{args.model}.json"
+    index = proof_check.ImageIndex.of_folders(args.root)
+    cache_path = ROOT / "eval" / f"answers-{args.model}.json"
     cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
     lock = threading.Lock()
     print(f"{len(folders)} trips, {len(index.items)} images in the folder. {len(cache)} saved answers in "
-          f"{cache_path.relative_to(HERE)}.", file=sys.stderr)
+          f"{cache_path.relative_to(ROOT)}.", file=sys.stderr)
 
     client = None
     if not args.cached:
-        if not (key := check_proof.api_key()):
-            sys.exit(check_proof.NO_KEY)
-        client = TypeSafeClient(api_key=key, headers=check_proof.HEADERS, timeout=check_proof.TIMEOUT)
+        if not (key := proof_check.api_key()):
+            sys.exit(proof_check.NO_KEY)
+        client = TypeSafeClient(api_key=key, headers=proof_check.HEADERS, timeout=proof_check.TIMEOUT)
 
     class Saved(dict):
         """Saved answers; in --cached mode a missing one stops that trip instead of asking Jev."""
@@ -163,19 +172,20 @@ def main() -> None:
         if not typed:
             skipped[folder.name] = "no trip.json and no hand-read vehicle number"
             return
-        number = check_proof.normalize_vehicle_number(typed["vehicle_number"])
-        quantity = check_proof.parse_quantity(typed.get("quantity"))
+        number = proof_check.normalize_vehicle_number(typed["vehicle_number"])
+        quantity = proof_check.parse_quantity(typed.get("quantity"))
         try:
-            limits = check_proof.parse_limits(typed)
-            trip_plant = check_proof.parse_plant(typed["plant"]) if typed.get("plant") else plant
-            verra = check_proof.parse_switch(typed.get("verra"), "verra")
-            trip, _ = check_proof.analyze_trip(client, check_proof.read_trip_folder(folder), number, args.model,
-                                               quantity, limits, index, trip_id, saved, trip_plant, verra)
+            limits = proof_check.parse_limits(typed)
+            trip_plant = proof_check.parse_plant(typed["plant"]) if typed.get("plant") else plant
+            verra = proof_check.parse_switch(typed.get("verra"), "verra")
+            trip, _ = proof_check.analyze_trip(client, proof_check.read_trip_folder(folder), number, args.model,
+                                               quantity, limits, index, trip_id, saved, trip_plant, verra,
+                                               weighbridge=typed.get("weighbridge") or None, around=trip_date(folder))
         except Exception as error:
             skipped[folder.name] = f"{type(error).__name__}: {error}"
             return
         results[folder.name] = {**trip, "vehicle_number": number, "quantity": quantity, "plant": trip_plant, "verra": verra,
-                                "typed_from": source}
+                                "typed_from": source, "clock_slack": limits.clock_slack}
         with lock:
             cache_path.parent.mkdir(exist_ok=True)
             cache_path.write_text(json.dumps(dict(saved)))
@@ -189,29 +199,34 @@ def main() -> None:
         if client:
             client.close()
 
-    for trip, c in check_proof.overlap_checks(results).items():
-        check_proof.add_checks(results[trip], [c])
+    # Each trip may have its own limits (trip.json): the largest clock slack, so no pair is flagged for a few minutes
+    # one of its trips allows.
+    slack = max((r["clock_slack"] for r in results.values()), default=proof_check.Limits().clock_slack)
+    for trip, c in proof_check.overlap_checks(results, slack).items():
+        proof_check.add_checks(results[trip], [c])
 
-    parts = " ".join(f"{p:9}" for p in check_proof.PARTS)
+    parts = " ".join(f"{p:9}" for p in proof_check.PARTS)
     print(f"\n{'trip':8} {'vehicle':11} {'verdict':9} {parts} first flags")
     for name in sorted(results):
         r = results[name]
         flags = "; ".join(f"{'✕' if c['status'] == 'fail' else '?'} {c['label']}: {c['detail']}" for c in r["verdict"]["flags"][:3])
         by_part = " ".join(f"{SHORT[r['verdict']['parts'][p]['status']] if p in r['verdict']['parts'] else '-':9}"
-                           for p in check_proof.PARTS)
+                           for p in proof_check.PARTS)
         print(f"{name:8} {r['vehicle_number']:11} {SHORT[r['verdict']['status']]:9} {by_part} {flags[:150]}")
     for name, why in sorted(skipped.items()):
         print(f"{name:8} {'':11} {'skipped':9} {why}")
 
-    for part, title in check_proof.PARTS.items():
+    for part, title in proof_check.PARTS.items():
         decided = [r["verdict"]["parts"][part]["status"] for r in results.values() if part in r["verdict"]["parts"]]
         if decided:
             print(f"{title}: {decided.count('pass')} accepted, {decided.count('problem')} with a problem, "
                   f"{decided.count('review')} to check")
     counts = {s: sum(r["verdict"]["status"] == s for r in results.values()) for s in SHORT}
     tokens = sum(i["input_tokens"] for r in results.values() for rs in r["images"].values() for i in rs if not i.get("saved"))
-    print(f"\n{counts['pass']} accepted, {counts['problem']} with a problem, {counts['review']} to check, {len(skipped)} skipped. "
-          f"{tokens:,} new input tokens ≈ ${tokens * check_proof.PRICE_PER_INPUT_TOKEN:.4f} (saved answers cost nothing)")
+    unanswered = sum(len(r.get("unanswered", [])) for r in results.values())
+    not_read = f" {unanswered} images Jev couldn't answer for." if unanswered else ""
+    print(f"\n{counts['pass']} accepted, {counts['problem']} with a problem, {counts['review']} to check, {len(skipped)} skipped.{not_read} "
+          f"{tokens:,} new input tokens ≈ ${tokens * proof_check.PRICE_PER_INPUT_TOKEN:.4f} (saved answers cost nothing)")
 
     items = [dict(i, trip=name) for name, r in results.items() if name in truth for i in compare(r, truth[name], r)]
     if items:
