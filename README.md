@@ -324,7 +324,7 @@ The verifier runs on one Linux server with Docker, from `deploy/docker-compose.y
 
 1. Copy `deploy/dev.env.example` to `deploy/dev.env` on the server, fill it in, and make it root-only (`chmod 600`). It holds the secrets, so it is never committed (`deploy/*.env` is ignored) and never pasted anywhere. Make the passwords and secrets with `openssl rand -hex 32`.
 2. `cd deploy && sudo docker compose --env-file dev.env up -d --build`. On a new database volume Postgres runs `deploy/db-init/01-app-role.sh`, which makes the app's own login, `verifier_app`, owner of the `verifier` database; the web receiver and the worker connect as it, not as the superuser. A server set up before this has its database made the old way: since the dev database holds no real data yet, recreate it with `sudo docker compose --env-file dev.env down -v` (this deletes the database volume and everything in it) and step 2 again.
-3. Put an HTTPS proxy at the verifier's URL that forwards only `/v1/verifications` to `127.0.0.1:8080`, with a 1 MB request limit: `deploy/Caddyfile.example` does that with Caddy. Give gw_sales that URL.
+3. Put an HTTPS proxy at the verifier's URL that forwards only `/v1/verifications` to `127.0.0.1:8080` (or the port set as `VERIFIER_PORT` in the env file), with a 1 MB request limit: `deploy/Caddyfile.example` does that with Caddy. Give gw_sales that URL.
 4. Back up the database each night: add `deploy/backup.sh` to root's crontab (the line is at its top). It keeps 14 days of copies in `/var/backups/jev-verifier`, and its top also says how to restore one. The copies stay on the server, so copy them somewhere else too.
 
 The photos are read from S3 with a read-only access key for `disposal/*` and `collection-logs/*`, because the server isn't on AWS.
@@ -342,7 +342,7 @@ Two GitHub Actions workflows run this:
 - `.github/workflows/test.yml` runs the offline tests on GitHub's machines for every push to a branch other than `main` and every pull request, with a throwaway Postgres so the verifier's tests run too (a skipped one fails the run). It needs no key or secret.
 - `.github/workflows/deploy-prod.yml` runs on every push to `main` (a merged pull request): the same tests, then a deploy. Nothing else deploys; a push to `dev` or any other branch is only tested.
 
-The deploy runs on greenworms-server through its self-hosted GitHub runner (labels `self-hosted, linux, x64, greenworms-server`), so nothing logs in from outside and the secrets never leave the server. It backs up the database, runs `docker compose up -d --build`, and fails if `/ready` doesn't answer within a minute. It takes over the stack already running there by hand (`jev-verifier`, port 8080, its database), since the names are the same.
+The deploy runs on greenworms-server through its self-hosted GitHub runner (labels `self-hosted, linux, x64, greenworms-server`), so nothing logs in from outside and the secrets never leave the server. It backs up the database, runs `docker compose up -d --build`, and fails if `/ready` doesn't answer within a minute. It takes over the stack already running there by hand (`jev-verifier` and its database), since the names are the same. It listens on `127.0.0.1:8080`, or on the port set as `VERIFIER_PORT` in the env file; change the proxy's port with it.
 
 So work goes: a branch → a pull request into `main` (the tests run on it) → merge → it deploys.
 
