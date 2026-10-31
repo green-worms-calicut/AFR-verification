@@ -79,7 +79,7 @@ def load_bytes(data: bytes) -> PILImage.Image:
         img = ImageOps.exif_transpose(original)
         if img.mode in ("I;16", "I;16B", "I;16L", "I"):  # convert("RGB") would clip every value above 255 to white
             top = 65535 if img.mode.startswith("I;16") else max(img.getextrema()[1], 1)
-            img = img.point(lambda v: v * 255 / top).convert("L")
+            img = img.convert("I").point(lambda v: v * 255 / top).convert("L")  # point() can't take I;16B or I;16L
         return img.convert("RGB")
 
 

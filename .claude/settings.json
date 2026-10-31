@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./deploy/.env)",
+      "Read(./deploy/*.env)",
+      "Read(~/.aws/**)",
+      "Bash(secret-tool *)"
+    ]
+  }
+}

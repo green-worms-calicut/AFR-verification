@@ -48,6 +48,7 @@ class Disposal:
     vehicle_number: str
     quantity: str | None  # net kg, as entered; None when entered in bags
     plant: tuple[float, float] | None  # the facility's location
+    bad_plant: tuple[float, float] | None  # the facility's location when it isn't in India: not checked against
     verra: bool
     day: date  # the trip's date in IST, which picks the standard
     evidence: dict[str, list[str]]  # s3Keys by kind of image
@@ -80,6 +81,7 @@ def disposal(request: dict, verra_project: str | None = None) -> Disposal:
             log.warning("%s: quantity %r not checked", request["requestId"], claims["quantity"])
     location = (reference.get("facility") or {}).get("location") or {}
     plant = (location["lat"], location["lng"]) if location.get("lat") is not None and location.get("lng") is not None else None
+    bad_plant = plant if plant and not proof_check.in_india(*plant) else None
     # Verra when any attached log's client is on the Verra project (a mix shouldn't happen; if it does, check it too).
     projects = {((entry.get("client") or {}).get("defaultProject") or {}).get("code")
                 for entry in reference.get("collectionLogs") or []}
@@ -95,9 +97,17 @@ def disposal(request: dict, verra_project: str | None = None) -> Disposal:
            or datetime.now(standards.IST).date())
     vehicle = proof_check.normalize_vehicle_number(typed)
     weighbridge = str((claims.get("weighbridge") or {}).get("name") or "").strip() or None
-    return Disposal(vehicle or typed.strip() or "(not entered)", quantity, plant,
+    return Disposal(vehicle or typed.strip() or "(not entered)", quantity, None if bad_plant else plant, bad_plant,
                     bool(verra_project) and verra_project in projects, day, evidence, vehicle, weighbridge,
                     f"{quantity} kg" if quantity else quantity_key)
+
+
+def bad_plant_check(plant: tuple[float, float], unloading: list[dict]) -> dict:
+    """The facility's location entered isn't in India, so no unloading photo could be checked against it."""
+    return proof_check.check("unloading", "unloading_plant", "At the plant", "review",
+                             f"The facility's location in gw_sales, {plant[0]}, {plant[1]}, isn't in India (latitude and "
+                             "longitude may be swapped), so the unloading photos weren't checked against it: fix it in "
+                             "gw_sales and check the photos' GPS stamps.", images=[r["name"] for r in unloading])
 
 
 def unavailable_check(kind: str, found: list[tuple[str, str]], none_left: bool) -> dict:
@@ -206,6 +216,8 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
     # First, so each leads the flag of the checks its missing images leave unsure.
     checks = [unavailable_check(kind, found, kind in gone) for kind, found in by_kind.items()]
     checks += [c for c in trip["verdict"]["checks"] if c["key"] not in {MISSING_KEY[k] for k in gone}]
+    if d.bad_plant:
+        checks.append(bad_plant_check(d.bad_plant, trip["images"]["unloading"]))
     checks += entry_checks.checks(request, trip["images"], std.collection_radius, d.day)
     checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack, d.day)
     trip["verdict"] = {**trip["verdict"], **proof_check.decide_parts(checks)}

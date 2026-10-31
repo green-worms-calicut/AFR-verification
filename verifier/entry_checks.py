@@ -142,14 +142,20 @@ def after_collections(request: dict) -> dict | None:
 
 
 def point_of(entry: dict) -> tuple[float, float] | None:
-    """A collection log's collection point, as (latitude, longitude), if gw_sales knows it."""
+    """A collection log's collection point, as (latitude, longitude), if gw_sales knows it (in India or not)."""
     where = (entry.get("collectionPoint") or {}).get("location") or {}
     return (where["lat"], where["lng"]) if where.get("lat") is not None and where.get("lng") is not None else None
 
 
+def known_point(entry: dict) -> tuple[float, float] | None:
+    """The collection point, if it is known and in India: one outside (latitude and longitude swapped) isn't used."""
+    point = point_of(entry)
+    return point if point and proof_check.in_india(*point) else None
+
+
 def photos_to_place(request: dict) -> set[str]:
     """The collection photos whose GPS position Jev should read: those of logs whose collection point is known."""
-    known = {e["id"] for e in logs(request) if point_of(e)}
+    known = {e["id"] for e in logs(request) if known_point(e)}
     return {key for key, log_id in owners(request).items() if log_id in known}
 
 
@@ -163,9 +169,15 @@ def collection_points(request: dict, images: dict[str, list[dict]], radius: floa
         if not photos:  # no point known, or no photo of it to check (has_photos asks for one)
             continue
         name = (e.get("collectionPoint") or {}).get("name")
-        c = proof_check.near_check("collection", "collection_point", "At the collection point", photos, point, radius,
-                                   f"the collection point of {log_name(e)}" if not name else
-                                   f"{name}, the collection point of collection log {e['id']}", "collection")
+        where = f"the collection point of {log_name(e)}" if not name else f"{name}, the collection point of collection log {e['id']}"
+        if known_point(e):
+            c = proof_check.near_check("collection", "collection_point", "At the collection point", photos, point,
+                                       radius, where, "collection")
+        else:
+            c = check("collection", "collection_point", "At the collection point", "review",
+                      f"The location in gw_sales of {where}, {point[0]}, {point[1]}, isn't in India (latitude and "
+                      "longitude may be swapped), so its collection photos weren't checked against it: fix it in "
+                      "gw_sales and check the photos' GPS stamps.", images=[r["name"] for r in photos])
         c["target"] = {"type": "collection_log", "id": e["id"]}
         made.append(c)
     return made

@@ -93,7 +93,7 @@ from proof_check.trip_rules import (
     overlap_minutes, photo_window,
     photo_timing, same_day, trip_checks, short_trip, and_list, reuse_check, overlap_checks
 )
-from proof_check.inputs import normalize_vehicle_number, parse_limits, parse_quantity, parse_plant, parse_switch
+from proof_check.inputs import in_india, normalize_vehicle_number, parse_limits, parse_quantity, parse_plant, parse_switch
 from proof_check.verdict import TITLES, timeline, decide, decide_parts, verdict, add_checks
 from proof_check.ask_jev import (
     PRICE_PER_INPUT_TOKEN, HEADERS, TIMEOUT, ROTATE, SIDEWAYS, KEY_LOOKUP, KEY_STORE_COMMAND, NO_KEY, api_key, ask,

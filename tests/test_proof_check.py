@@ -356,6 +356,7 @@ class JevFailureTests(unittest.TestCase):
                             (ts.TypeSafeAPIError(529, None, headers), "retry"),
                             (ts.TypeSafeRateLimitError(429, None, headers), "retry"),
                             (ts.TypeSafeAPITimeoutError(60.0), "retry"),
+                            (ts.TypeSafeAPIResponseValidationError(200, None, headers, "answers"), "retry"),
                             (ts.TypeSafeBadRequestError(400, None, headers), "image"),
                             (ts.TypeSafeUnprocessableEntityError(422, None, headers), "image"),
                             (ts.TypeSafeAuthenticationError(401, None, headers), "fatal"),
@@ -421,6 +422,14 @@ class ImageLoadTests(unittest.TestCase):
     def test_truncated_jpeg_is_unreadable(self):
         with self.assertRaises(proof_check.UNREADABLE):
             proof_check.load_bytes(coloured(COLOURS[0])[:-2000])
+
+    def test_16_bit_scans_are_read_in_every_byte_order(self):
+        for mode in ("I;16", "I;16B", "I;16L"):
+            with self.subTest(mode=mode):
+                img = PILImage.new(mode, (8, 8))
+                img.putpixel((0, 0), 40000)
+                loaded = proof_check.load_bytes(saved(img, "TIFF"))
+                self.assertEqual((loaded.getpixel((0, 0)), loaded.getpixel((1, 1))), ((155, 155, 155), (0, 0, 0)))
 
     def test_huge_photo_is_read_reduced(self):
         data = saved(PILImage.new("RGB", (9000, 6000), (120, 80, 40)), "JPEG", quality=50)
@@ -1048,6 +1057,19 @@ class TripTests(unittest.TestCase):
             with self.subTest(dropped=dropped):
                 self.assertEqual(by_key(trip["verdict"]["checks"])[key]["status"], "review")
 
+    def test_answers_with_one_left_out_are_not_saved(self):
+        uploads, jev = make_trip()
+        jev.drop = {"plate_number"}  # a photo question: the bill's answers are whole
+        cache = {}
+        with jev.client() as client:
+            proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", QUANTITY, cache=cache)
+        self.assertEqual(len(cache), 2, "only the two bills'")
+        jev.drop = set()
+        with jev.client() as client:
+            trip, _ = proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", QUANTITY, cache=cache)
+        self.assertEqual(by_key(trip["verdict"]["checks"])["loading_plate"]["status"], "pass", "asked again")
+        self.assertEqual(len(cache), 6)
+
     def test_a_missing_orientation_keeps_the_image_as_it_is(self):
         uploads, jev = make_trip()
         jev.drop = {"orientation"}
@@ -1364,6 +1386,18 @@ class CrossTripTests(unittest.TestCase):
         trips["2"]["verdict"]["sure_window"] = ["2024-10-19T09:00", "2024-10-19T11:00"]
         self.assertEqual({t: c["status"] for t, c in proof_check.overlap_checks(trips).items()}, {"1": "fail", "2": "fail"})
 
+    def test_an_unsure_overlap_is_named_beside_a_sure_one(self):
+        def trip(window, sure):
+            return {"vehicle_number": NUMBER, "verdict": {"window": window, "sure_window": sure, "checks": [], "flags": []}}
+        trips = {"1": trip(["2024-10-19T08:00", "2024-10-19T10:00"], ["2024-10-19T08:00", "2024-10-19T10:00"]),
+                 "2": trip(["2024-10-19T09:00", "2024-10-19T11:00"], ["2024-10-19T09:00", "2024-10-19T11:00"]),
+                 "3": trip(["2024-10-19T07:00", "2024-10-19T08:30"], ["2024-10-19T07:00", "2024-10-19T07:30"])}
+        found = proof_check.overlap_checks(trips)
+        self.assertEqual(found["1"]["status"], "fail")
+        self.assertEqual(found["1"]["detail"], f"{NUMBER} is also on trip 2 at the same time, by the photos' stamps. A "
+                                               "vehicle can't be on two trips at once. It may also be on trip 3 then, by "
+                                               "stamps Jev wasn't sure of: check those too.")
+
     def test_a_morning_tare_on_every_slip_is_no_window(self):
         # 19 Oct 2026, KL57AD9265: weighed empty at 05:10, that tare printed on slips with gross 07:02 and 09:23.
         # By the weighings both trips would run from 05:10 and overlap; by the photos they don't.
@@ -1623,12 +1657,12 @@ class TestPageTests(unittest.TestCase):
     def image(colour) -> dict:
         return {"name": "x.jpg", "data": "data:image/jpeg;base64," + base64.b64encode(coloured(colour)).decode()}
 
-    def raw(self, body: bytes, headers: dict) -> tuple[int, dict]:
-        """POST /api/check with exactly these headers; answers within 10 s or the test fails."""
+    def raw(self, body: bytes, headers: dict, method: str = "POST", path: str = "/api/check") -> tuple[int, dict]:
+        """A request with exactly these headers; answers within 10 s or the test fails."""
         import http.client
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=10)
         try:
-            conn.putrequest("POST", "/api/check", skip_host=True, skip_accept_encoding=True)
+            conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
             for name, value in {"Host": f"127.0.0.1:{self.server.server_port}", "Content-Type": "application/json",
                                 "Content-Length": str(len(body)), **headers}.items():
                 conn.putheader(name, value)
@@ -1642,6 +1676,9 @@ class TestPageTests(unittest.TestCase):
         body = json.dumps({"vehicle_number": NUMBER, "images": {"loading": [self.image(COLOURS[0])]}}).encode()
         self.assertEqual(self.raw(body, {"Content-Type": "text/plain"})[0], 415, "a form another website could post")
         self.assertEqual(self.raw(body, {"Host": "evil.example"})[0], 403, "DNS rebinding")
+        for path in ("/api/trips", "/api/trips/day/171773", "/api/status"):
+            with self.subTest(path=path):
+                self.assertEqual(self.raw(b"", {"Host": "evil.example"}, "GET", path)[0], 403, "DNS rebinding reads records")
         unnamed = json.dumps({"images": {}}).encode()  # past the checks of where it came from, refused for what it is
         self.assertEqual(self.raw(unnamed, {"Host": f"localhost:{self.server.server_port}"})[0], 400)
 
@@ -1656,6 +1693,11 @@ class TestPageTests(unittest.TestCase):
                 self.assertTrue(answer["error"])
         status, _ = self.raw(b"{}", {"Content-Length": "-1"})
         self.assertEqual(status, 400)
+        body = {"vehicle_number": NUMBER, "images": {"loading": [self.image(COLOURS[0])]}}
+        with mock.patch.object(proof_check, "load_bytes", side_effect=SyntaxError("broken PNG file")):  # as Pillow says
+            status, answer = self.raw(json.dumps(body).encode(), {})
+        self.assertEqual(status, 400, "a broken PNG")
+        self.assertIn("whole image", answer["error"])
 
     def test_page_and_status(self):
         with urllib.request.urlopen(self.base + "/") as response:

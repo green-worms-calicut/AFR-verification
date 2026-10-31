@@ -1056,10 +1056,13 @@ def overlap_checks(trips: dict[str, dict], slack: int = Limits().clock_slack) ->
     made = {}
     for trip, others in found.items():
         number, sure = trips[trip]["vehicle_number"], sorted(o for o, s in others.items() if s)
+        doubtful = sorted(o for o, s in others.items() if not s)
         if sure:
+            also = (f" It may also be on trip {and_list(doubtful)} then, by stamps Jev wasn't sure of: check those too."
+                    if doubtful else "")
             made[trip] = check("trips", "overlap", "One trip at a time", "fail",
                                f"{number} is also on trip {and_list(sure)} at the same time, by the photos' stamps. "
-                               "A vehicle can't be on two trips at once.")
+                               f"A vehicle can't be on two trips at once.{also}")
         else:
             made[trip] = check("trips", "overlap", "One trip at a time", "review",
                                f"{number} may also be on trip {and_list(sorted(others))} at the same time, but Jev was "

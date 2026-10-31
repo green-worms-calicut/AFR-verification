@@ -489,6 +489,26 @@ class EntryCheckTests(unittest.TestCase):
         self.assertIn("from Main Kitchen, the collection point of collection log 45001, but collection must be within "
                       "500 m of it", flag["message"])
 
+    def test_a_collection_point_outside_india_asks_a_person(self):
+        uploads, self.jev = make_trip(loading=({**LOADING, **AT_PLANT}, {**LOADING, **AT_PLANT}))
+        swapped = log(collectionPoint={"name": "Main Kitchen", "location": {"lat": PLANT[1], "lng": PLANT[0]}})
+        checked = self.checked(disposal(uploads, logs=[swapped]), uploads)
+        [flag] = [f for f in checked.flags if f["code"] == "collection_point"]
+        self.assertEqual((flag["kind"], flag["target"]), ("please check", {"type": "collection_log", "id": 45001}))
+        self.assertIn(f"The location in gw_sales of Main Kitchen, the collection point of collection log 45001, "
+                      f"{PLANT[1]}, {PLANT[0]}, isn't in India", flag["message"])
+        self.assertFalse(any(b'"line":{"type":"box"' in sent(r) for r in self.jev.requests), "nothing to compare with")
+
+    def test_a_facility_outside_india_asks_a_person(self):
+        uploads, self.jev = make_trip()
+        checked = self.checked(disposal(uploads, facility={"id": 3, "location": {"lat": PLANT[1], "lng": PLANT[0]}}),
+                               uploads)
+        [flag] = [f for f in checked.flags if f["code"] == "unloading_plant"]
+        self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
+        self.assertIn(f"The facility's location in gw_sales, {PLANT[1]}, {PLANT[0]}, isn't in India", flag["message"])
+        self.assertFalse(any(b'"line":{"type":"box"' in sent(r) for r in self.jev.requests), "nothing to compare with")
+        self.assertFalse(checked.standard["plant"])
+
     def test_without_a_known_collection_point_no_position_is_read(self):
         checked = self.checked(logs=[log()])
         self.assertIsNone(self.check_of(checked, "collection_point"))
@@ -570,6 +590,19 @@ class CompareTests(unittest.TestCase):
         self.assertIn("KL05AF9341's photos for this disposal were taken 02:40-04:09 on 15/10, overlapping disposal "
                       "1000's 02:40-04:09 on 15/10", flag["message"])
         self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
+
+    def test_an_unsure_overlap_is_named_beside_a_sure_one(self):
+        # Disposal 1001 ran 05:20-06:40 by its sure stamps; an unloading stamp read as 03:00, 30% sure, would put it
+        # on this trip (02:40-04:09), which surely overlaps disposal 1000's.
+        unsure = {**UNLOADING, **stamp("03:00", confidence=0.3)}
+        uploads, jev = other_trip("c-", 0, loading={**LOADING, **stamp("05:20")}, quality=60,
+                                  unloading=({**UNLOADING, **stamp("06:40")}, unsure), bill=(FIRST, {**FINAL, **at("gross", "05:00")}))
+        doubtful = compare_disposals.Other(1001, self.checked(uploads, jev, disposal_id=1001).analysis)
+        uploads, jev = other_trip()
+        flag = self.flag(self.checked(uploads, jev, [self.first(), doubtful], quantity=999), "overlap")
+        self.assertEqual(flag["kind"], "problem found")
+        self.assertIn("It may also overlap disposal 1001, by stamps Jev wasn't sure of", flag["message"])
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}, {"type": "disposal_log", "id": 1001}])
 
     def test_a_pair_is_flagged_once_by_the_most_specific_check(self):
         uploads, jev = other_trip()  # the same moments too, but overlap already names disposal 1000

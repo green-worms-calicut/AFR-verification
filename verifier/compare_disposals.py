@@ -126,10 +126,12 @@ def overlap(vehicle: str, images: dict[str, list[dict]], others: list[Other], fl
         return check("trips", "overlap", label, "pass", "No other disposal of this vehicle while its photos were taken")
     at = "; ".join(f"disposal {i}'s {w[0]:%H:%M}-{w[1]:%H:%M} on {w[0]:%d/%m}" for i, w in found)
     here = here_sure
+    also = (f" It may also overlap {disposals(o.disposal_id for o in doubtful)}, by stamps Jev wasn't sure of: check "
+            "those too.") if doubtful else ""
     made = check("trips", "overlap", label, "fail",
                  f"{vehicle}'s photos for this disposal were taken {here[0]:%H:%M}-{here[1]:%H:%M} on {here[0]:%d/%m}, "
-                 f"overlapping {at}. A vehicle can't be on two trips at once: check which trip is real.")
-    made["related"] = related(i for i, _ in found)
+                 f"overlapping {at}. A vehicle can't be on two trips at once: check which trip is real.{also}")
+    made["related"] = related([*(i for i, _ in found), *(o.disposal_id for o in doubtful)])
     return made
 
 

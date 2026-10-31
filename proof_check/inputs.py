@@ -11,6 +11,12 @@ from proof_check.trip_rules import LIMIT_NAMES, LIMIT_UNITS, Limits
 INDIA = ((6.0, 37.5), (68.0, 97.5))  # latitude and longitude ranges a plant can be in (catches them swapped)
 
 
+def in_india(lat: float, lng: float) -> bool:
+    """Whether (lat, lng) can be a place we work: latitude and longitude swapped, or a sign lost, fall outside."""
+    (south, north), (west, east) = INDIA
+    return south <= lat <= north and west <= lng <= east
+
+
 FULL_NUMBER = r"[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{1,4}"  # state, district, series and number, as KL05AF9341
 
 
@@ -75,8 +81,7 @@ def parse_plant(value) -> tuple[float, float] | None:
     if not found or float(found[1]) > 90 or float(found[2]) > 180:
         raise ValueError("Type the plant's location as latitude, longitude in decimal degrees north and east, "
                          "such as 11.4404, 75.9420.")
-    (south, north), (west, east) = INDIA
-    if not (south <= float(found[1]) <= north and west <= float(found[2]) <= east):
+    if not in_india(float(found[1]), float(found[2])):
         raise ValueError("That location isn't in India: type the latitude first, then the longitude, such as "
                          "11.4404, 75.9420.")
     return float(found[1]), float(found[2])

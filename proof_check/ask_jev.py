@@ -10,8 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from PIL import Image as PILImage
-from typesafe_sdk import (Image, Noul, NoulAnswer, TypeSafeAPIConnectionError, TypeSafeAPIError, TypeSafeBadRequestError,
-                          TypeSafeClient, TypeSafeError, TypeSafeRateLimitError, TypeSafeUnprocessableEntityError)
+from typesafe_sdk import (Image, Noul, NoulAnswer, TypeSafeAPIConnectionError, TypeSafeAPIError,
+                          TypeSafeAPIResponseValidationError, TypeSafeBadRequestError, TypeSafeClient, TypeSafeError,
+                          TypeSafeRateLimitError, TypeSafeUnprocessableEntityError)
 
 from proof_check.questions import (
     BOX_MODEL, LINE, NOT_SHOWN, OUR_COMPANY, ROTATION, SLIP, pick, question_version, questions_for, starts_of
@@ -219,7 +220,9 @@ def analyze(client: TypeSafeClient | None, slot: str, img: PILImage.Image, vehic
            **({"slip": slip} if slip else {})}
     if place:
         raw = read_line(client, img, raw, model, box_model)
-    if cache is not None and key:
+    # Not saved when Jev's response left a question out: the unsure answer filled in would stand for good, and asking
+    # again (another run, an SDK that knows the answer's type) may get the real one.
+    if cache is not None and key and set(asked) <= set(response.answers):
         cache[key] = raw
     return result_from(slot, raw, vehicle_number, quantity), fit(img)
 
@@ -239,11 +242,11 @@ class Unanswered:
 
 def failure_kind(error: Exception) -> str | None:
     """How a failed Jev request is handled: "retry" when Jev was busy or down (5xx, 429, 529, a timeout or no
-    connection), "image" when it refused that image (400, 422), "fatal" for any other TypeSafe error (our key,
+    connection) or its answer came back garbled, "image" when it refused that image (400, 422), "fatal" for any other TypeSafe error (our key,
     a model it doesn't know, an answer it couldn't give), and None for anything else, our own bug, which is raised."""
     if not isinstance(error, TypeSafeError):
         return None
-    if isinstance(error, (TypeSafeRateLimitError, TypeSafeAPIConnectionError)):
+    if isinstance(error, (TypeSafeRateLimitError, TypeSafeAPIConnectionError, TypeSafeAPIResponseValidationError)):
         return "retry"
     if isinstance(error, (TypeSafeBadRequestError, TypeSafeUnprocessableEntityError)):
         return "image"

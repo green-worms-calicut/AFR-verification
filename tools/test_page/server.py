@@ -93,7 +93,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def from_here(self) -> bool:
+        """Whether the request names this machine. Another website open in the browser can reach this port through a
+        name of its own (DNS rebinding), and would read the trips' records or check trips on your key; it's refused."""
+        port = self.server.server_port
+        if self.headers.get("Host") in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            return True
+        self.send_json(403, {"error": "Open the page at http://127.0.0.1:%d/." % port})
+        return False
+
     def do_GET(self) -> None:
+        if not self.from_here():
+            return
         if self.path == "/api/status":
             self.send_json(200, {"key_set": bool(proof_check.api_key()), "key_help": proof_check.NO_KEY, "models": MODELS,
                                  "limits": asdict(proof_check.Limits())})
@@ -127,14 +138,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/api/check":
             self.send_error(404)
             return
-        # Only JSON, and only from a page served here: another website open in the browser can post a plain form,
-        # or reach this port through a name of its own (DNS rebinding), and would check trips on your key.
+        # Only JSON, and only from a page served here: another website open in the browser can post a plain form.
         if self.headers.get_content_type() != "application/json":
             self.send_json(415, {"error": "Send the check as JSON."})
             return
-        port = self.server.server_port
-        if self.headers.get("Host") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
-            self.send_json(403, {"error": "Open the page at http://127.0.0.1:%d/." % port})
+        if not self.from_here():
             return
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -176,7 +184,8 @@ class Handler(BaseHTTPRequestHandler):
             trip_id = body.get("trip_id") or None
             if trip_id is not None and (not isinstance(trip_id, str) or "\x00" in trip_id):
                 raise ValueError("the trip id isn't a folder name")
-        except (OSError, PILImage.DecompressionBombError):  # not an image, cut off, or too large (not ValueError: ours)
+        except (OSError, PILImage.DecompressionBombError, SyntaxError):  # not an image, broken, cut off or too large
+            # (UNREADABLE less ValueError, which our own checks raise for a bad request)
             self.send_json(400, {"error": "A file couldn't be opened as a whole image. Use JPEG or PNG (or HEIC)."})
             return
         except (ValueError, KeyError, TypeError, AttributeError) as error:
