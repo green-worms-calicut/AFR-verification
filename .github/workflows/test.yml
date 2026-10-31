@@ -1,11 +1,11 @@
-# The offline tests on GitHub's machines: on every push and pull request, and before each deploy (deploy-dev.yml and
-# deploy-prod.yml run them themselves for dev and main). They use the fake Jev API and a throwaway Postgres for the
-# verifier's tests, so no key or secret is needed.
+# The offline tests on GitHub's machines: on every push and pull request, and before each deploy (deploy-prod.yml runs
+# them itself for main). They use the fake Jev API and a throwaway Postgres for the verifier's tests, so no key or
+# secret is needed.
 name: Tests
 
 on:
   push:
-    branches-ignore: [main, dev]
+    branches-ignore: [main]
   pull_request:
   workflow_call:
 

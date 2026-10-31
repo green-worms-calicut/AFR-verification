@@ -1,15 +1,13 @@
 # The verifier on one server: Postgres, the migrations, the web receiver and the worker, restarted if they stop.
 # Settings and secrets come from an env file beside this one (dev.env, from dev.env.example; root-only, never in git).
 #   cd deploy && sudo docker compose --env-file dev.env up -d --build
-# An HTTPS proxy (Caddy or nginx) at the verifier's URL forwards to 127.0.0.1:8080.
-# Production runs beside dev on the same server as its own stack (own containers, database and image), set from the
-# shell: COMPOSE_PROJECT_NAME=jev-verifier-prod VERIFIER_IMAGE=jev-verifier-prod VERIFIER_PORT=8081
-# (.github/workflows/deploy-prod.yml does this).
+# An HTTPS proxy (Caddy or nginx) at the verifier's URL forwards to 127.0.0.1:8080, or to VERIFIER_PORT when the env
+# file sets one (the container itself always listens on 8080).
 name: jev-verifier
 
 x-verifier: &verifier
   build: ..
-  image: ${VERIFIER_IMAGE:-jev-verifier}
+  image: jev-verifier
   env_file: ${VERIFIER_ENV_FILE:-dev.env}
   environment:
     # The app's own login (db-init/01-app-role.sh), not the superuser.
