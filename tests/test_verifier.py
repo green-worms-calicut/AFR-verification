@@ -259,16 +259,17 @@ class PhotoProblemTests(unittest.TestCase):
 
 class StandardTests(unittest.TestCase):
     def test_the_standard_of_the_trips_day(self):
-        later = standards.Standard("2", date(2026, 12, 1), proof_check.Limits(clock_slack=10))
+        later = standards.Standard("3", date(2026, 12, 1), proof_check.Limits(clock_slack=10))
         with mock.patch.object(standards, "STANDARDS", [*standards.STANDARDS, later]):
-            self.assertEqual(standards.for_day(date(2026, 11, 30)).version, "1")
-            self.assertEqual(standards.for_day(date(2026, 12, 1)).version, "2")
-            self.assertEqual(standards.for_day(date(2020, 1, 1)).version, "1")
+            self.assertEqual(standards.for_day(date(2026, 11, 30)).version, "2")
+            self.assertEqual(standards.for_day(date(2026, 12, 1)).version, "3")
+            self.assertEqual(standards.for_day(date(2020, 1, 1)).version, "2")
 
     def test_models_are_pinned(self):
         described = standards.STANDARDS[0].describe()
         self.assertEqual(described["models"], {"questions": "jev-1.14.0", "box": "jev-1.14.0"})
         self.assertEqual(described["limits"]["min_gap_tare_first"], 60)
+        self.assertEqual((described["limits"]["plant_radius"], described["limits"]["collection_radius"]), (2000, 4000))
 
 
 class CheckTests(unittest.TestCase):
@@ -283,7 +284,7 @@ class CheckTests(unittest.TestCase):
         uploads, jev = make_trip()
         checked = self.check(uploads, jev)
         self.assertEqual((checked.outcome, checked.flags), ("passed", []))
-        self.assertEqual(checked.standard["version"], "1")
+        self.assertEqual(checked.standard["version"], "2")
         self.assertEqual(checked.standard["models"]["questions"], "jev-1.14.0")
         self.assertTrue(jev.requests)
         self.assertTrue(all(b'"model":"jev-1.14.0"' in sent(r) for r in jev.requests), "pinned models only")
@@ -487,7 +488,7 @@ class EntryCheckTests(unittest.TestCase):
         self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
         self.assertEqual(flag["target"], {"type": "collection_log", "id": 45001})
         self.assertIn("from Main Kitchen, the collection point of collection log 45001, but collection must be within "
-                      "500 m of it", flag["message"])
+                      "4 km of it", flag["message"])
 
     def test_a_collection_point_outside_india_asks_a_person(self):
         uploads, self.jev = make_trip(loading=({**LOADING, **AT_PLANT}, {**LOADING, **AT_PLANT}))

@@ -214,6 +214,7 @@ async def send_result(context, request_id: str) -> None:
         status, answer = None, f"no answer ({type(error).__name__})"
     else:
         status, answer = response.status_code, response.text[:500]
+    log.info("%s: posted the result to %s: %s", request_id, row["callback_url"], status or answer)
     if status is not None and 200 <= status < 300:  # the contract says 200; any success is delivered
         await database.note_attempt(svc.pool, request_id, status, sent=True)
         log.info("%s: result stored by gw_sales: %s", request_id, answer)
