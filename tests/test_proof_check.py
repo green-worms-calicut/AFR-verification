@@ -546,7 +546,8 @@ class TypedValueTests(unittest.TestCase):
     def test_distances(self):
         self.assertAlmostEqual(proof_check.metres_between((11.4404, 75.942), (11.4414, 75.942)), 111, delta=1)
         self.assertAlmostEqual(proof_check.metres_between(PLANT, (11.164949, 76.154944)), 38_300, delta=200)
-        self.assertEqual([proof_check.distance(m) for m in (40.4, 500, 1234, 38_210)], ["40 m", "500 m", "1.2 km", "38 km"])
+        self.assertEqual([proof_check.distance(m) for m in (40.4, 500, 1234, 4000, 38_210)],
+                         ["40 m", "500 m", "1.2 km", "4 km", "38 km"])
 
     def test_duration(self):
         self.assertEqual([proof_check.duration(m) for m in (0, 13, 60, 75, 348)], ["0 min", "13 min", "1 h", "1 h 15 min", "5 h 48 min"])
