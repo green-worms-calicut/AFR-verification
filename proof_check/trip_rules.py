@@ -450,8 +450,9 @@ def metres_between(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 def distance(metres: float) -> str:
-    """40 -> '40 m', 1234 -> '1.2 km', 38210 -> '38 km'."""
-    return f"{round(metres)} m" if metres < 1000 else f"{metres / 1000:.1f} km" if metres < 10_000 else f"{metres / 1000:.0f} km"
+    """40 -> '40 m', 1234 -> '1.2 km', 4000 -> '4 km', 38210 -> '38 km'."""
+    return f"{round(metres)} m" if metres < 1000 else f"{metres / 1000:.1f}".removesuffix(".0") + " km" if metres < 10_000 \
+        else f"{metres / 1000:.0f} km"
 
 
 def from_square(value: str, plant: tuple[float, float]) -> float:
