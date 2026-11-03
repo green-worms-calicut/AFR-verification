@@ -407,11 +407,25 @@ class EntryCheckTests(unittest.TestCase):
         checked = self.checked(logs=[log(45001, materials=MATERIALS)], other_logs=[(1000, other)])
         self.assertNotIn("log_repeated", {f["code"] for f in checked.flags})
 
-    def test_a_log_without_materials_or_pickup_is_not_matched(self):
-        bare = log(46001, collectionDate=None)
-        checked = self.checked(logs=[log(45001), bare], other_logs=[(1000, log(46002))])
+    def test_a_log_without_a_pickup_date_is_not_matched(self):
+        bare = log(46001, collectionDate=None, materials=MATERIALS)
+        checked = self.checked(logs=[log(45001, materials=MATERIALS)], other_logs=[(1000, bare)])
+        self.assertNotIn("log_repeated", {f["code"] for f in checked.flags})
+
+    def test_a_log_without_materials_is_not_matched(self):
+        checked = self.checked(logs=[log(45001)], other_logs=[(1000, log(46002))])
         self.assertNotIn("log_repeated", {f["code"] for f in checked.flags})
         self.assertNotIn("log_reused", {f["code"] for f in checked.flags})
+
+    def test_a_reused_log_does_not_hide_another_logs_repeat_on_the_same_disposal(self):
+        hdpe = [{"materialName": "HDPE", "quantity": 40, "unit": "kg"}]
+        checked = self.checked(logs=[log(45001, materials=MATERIALS), log(45002, materials=hdpe)],
+                               other_logs=[(1000, log(45001, materials=MATERIALS)), (1000, log(46002, materials=hdpe))])
+        codes = [f["code"] for f in checked.flags]
+        self.assertEqual(codes.count("log_reused"), 1)
+        repeated = next(f for f in checked.flags if f["code"] == "log_repeated")
+        self.assertIn("Collection log 45002", repeated["message"])
+        self.assertIn("collection log 46002 (on disposal 1000)", repeated["message"])
 
     def test_pickup_in_utc_is_compared_as_ist(self):
         checked = self.checked(logs=[log()])  # 14 Oct 21:00 UTC = 15 Oct IST, the photos' day

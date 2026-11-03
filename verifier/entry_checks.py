@@ -283,7 +283,7 @@ def pickup_key(entry: dict) -> tuple | None:
 def log_repeated(request: dict, other_logs: list[tuple[int, dict]]) -> list[dict]:
     """The same pickup entered twice under different ids (same client, collection point, IST day and materials with
     quantities): one check per pair, this disposal's logs pairwise and against `other_logs`, asking a person. A pair
-    with a log already on that disposal is `log_reused`'s."""
+    with a log that `log_reused` flagged for that disposal is its, not this one's."""
     entries = [e for e in logs(request) if pickup_key(e)]
     label = "No collection log repeats another pickup"
     shared = {i: {o["id"] for j, o in other_logs if j == i} & {e["id"] for e in logs(request)} for i, _ in other_logs}
@@ -291,7 +291,7 @@ def log_repeated(request: dict, other_logs: list[tuple[int, dict]]) -> list[dict
     pairs += [(a, b, i) for a in entries for i, b in other_logs if pickup_key(b)]
     made = []
     for a, b, i in pairs:
-        if a["id"] == b["id"] or pickup_key(a) != pickup_key(b) or (i is not None and shared[i]):
+        if a["id"] == b["id"] or pickup_key(a) != pickup_key(b) or (i is not None and {a["id"], b["id"]} & shared[i]):
             continue
         name = log_name(a)
         where = "on this disposal" if i is None else f"on disposal {i}"
