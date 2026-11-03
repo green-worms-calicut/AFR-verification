@@ -546,7 +546,8 @@ class TypedValueTests(unittest.TestCase):
     def test_distances(self):
         self.assertAlmostEqual(proof_check.metres_between((11.4404, 75.942), (11.4414, 75.942)), 111, delta=1)
         self.assertAlmostEqual(proof_check.metres_between(PLANT, (11.164949, 76.154944)), 38_300, delta=200)
-        self.assertEqual([proof_check.distance(m) for m in (40.4, 500, 1234, 38_210)], ["40 m", "500 m", "1.2 km", "38 km"])
+        self.assertEqual([proof_check.distance(m) for m in (40.4, 500, 1234, 4000, 38_210)],
+                         ["40 m", "500 m", "1.2 km", "4 km", "38 km"])
 
     def test_duration(self):
         self.assertEqual([proof_check.duration(m) for m in (0, 13, 60, 75, 348)], ["0 min", "13 min", "1 h", "1 h 15 min", "5 h 48 min"])
@@ -1588,6 +1589,16 @@ class CheckTripFoldersTests(unittest.TestCase):
         self.assertEqual(wrong, {("photo time", "collection2.jpg"), ("plate matches", "collection2.jpg")})
         fields = {i["field"] for i in items}
         self.assertEqual(fields, {"photo time", "plate matches", "slip kind", "bill number", "tare time", "gross time", "weighing order"})
+
+
+class MeasureLookAlikesTests(unittest.TestCase):
+    def test_look_alike_pairs_outside_the_window(self):
+        from tools import measure_look_alikes as m
+        base = 0x0F0F0F0F0F0F0F0F  # 32 bits set: not featureless
+        items = [("a", "1.jpg", "x", base), ("b", "2.jpg", "y", base ^ 0b11), ("c", "3.jpg", "x", base),
+                 ("d", "4.jpg", "z", 0)]
+        found = m.pairs(items, window=lambda g, h: {g, h} == {"a", "c"})
+        self.assertEqual([(p[0], p[1]) for p in found], [("1.jpg", "2.jpg")])
 
 
 class CheckTripFoldersPlaceTests(unittest.TestCase):

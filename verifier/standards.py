@@ -32,7 +32,8 @@ class Standard:
                 "models": {"questions": MODEL, "box": BOX_MODEL}}
 
 
-STANDARDS = [Standard("1", date(2026, 10, 1), Limits())]  # oldest first
+# "2" replaced "1" (500 m and 500 m) for every trip on 2 Nov 2026, as the user decided, so all are checked again by it.
+STANDARDS = [Standard("2", date(2026, 10, 1), Limits(plant_radius=2000), collection_radius=4000)]  # oldest first
 
 
 def for_day(day: date) -> Standard:

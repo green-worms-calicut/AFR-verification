@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 import proof_check
 from proof_check import and_list, check, photo_moments
-from verifier import standards
+from verifier import compare_disposals, standards
 
 LATE_AFTER_END = timedelta(hours=1, minutes=30)  # how long after the end time entered an unloading photo may be
 MANUAL = "MANUAL_TRIP_ENTRY"  # entered after the fact: its times can be hours or days off, so only its dates count
@@ -21,13 +21,16 @@ def logs(request: dict) -> list[dict]:
     return (request.get("reference") or {}).get("collectionLogs") or []
 
 
-def owners(request: dict) -> dict[str, int | None]:
-    """Each collection photo's s3Key and its collection log's id, or None for a photo of the disposal itself."""
-    found = {}
+def owners(request: dict) -> dict[str, list[int | None]]:
+    """Each collection photo's s3Key and every collection log's id it is listed under (distinct, in order), with
+    None for a photo of the disposal itself."""
+    found: dict[str, list[int | None]] = {}
     for item in request.get("evidence") or []:
         if item.get("category") == "collection" and item.get("s3Key"):
             owner = item.get("owner") or {}
-            found[item["s3Key"]] = owner.get("id") if owner.get("type") == "collection_log" else None
+            log_id = owner.get("id") if owner.get("type") == "collection_log" else None
+            if log_id not in found.setdefault(item["s3Key"], []):
+                found[item["s3Key"]].append(log_id)
     return found
 
 
@@ -36,9 +39,12 @@ def pickup(entry: dict) -> datetime | None:
     return standards.ist_time(entry.get("collectionDate"))
 
 
-def log_name(entry: dict) -> str:
-    """'collection log 45001 (ABC Hotel, Main Kitchen)'."""
+def log_name(entry: dict, picked_up: bool = False) -> str:
+    """'collection log 45001 (ABC Hotel, Main Kitchen)', with ', picked up 30/10' inside the brackets if `picked_up`
+    and the pickup is known."""
     where = [x for x in ((entry.get("client") or {}).get("name"), (entry.get("collectionPoint") or {}).get("name")) if x]
+    if picked_up and (at := pickup(entry)):
+        where.append(f"picked up {at:%d/%m}")
     return f"collection log {entry['id']}" + (f" ({', '.join(where)})" if where else "")
 
 
@@ -47,7 +53,7 @@ def has_photos(request: dict) -> list[dict]:
     entries = logs(request)
     if not entries:
         return []
-    taken = {i for i in owners(request).values() if i is not None}
+    taken = {i for ids in owners(request).values() for i in ids if i is not None}
     label = "Every collection log has a photo"
     missing = [e for e in entries if e["id"] not in taken]
     if not missing:
@@ -57,6 +63,75 @@ def has_photos(request: dict) -> list[dict]:
         c = check("collection", "collection_has_photos", label, "review",
                   f"{log_name(e)[0].upper()}{log_name(e)[1:]} has no collection photo: ask for the photo taken at the pickup.")
         c["target"] = {"type": "collection_log", "id": e["id"]}
+        made.append(c)
+    return made
+
+
+def log_same_photo(request: dict, images: dict[str, list[dict]]) -> list[dict]:
+    """Each collection log has a photo of its own: one photo listed under two logs, the same file under two keys in
+    different logs, or a look-alike in different logs, is not one pickup's photo of its own place. The same file
+    twice in one log only asks a person. One pass check, or one check per finding; none without logs."""
+    entries = {e["id"]: e for e in logs(request)}
+    if not entries:
+        return []
+    label = "Each collection log has its own photo"
+    named = lambda i: log_name(entries[i]) if i in entries else f"collection log {i}"
+    short = lambda i: named(i).removeprefix("collection log ")
+    owner_of = {k: [i for i in ids if i is not None] for k, ids in owners(request).items()}
+    prints = {r["name"]: r["prints"] for r in images.get("loading", []) if r["name"] in owner_of and r.get("prints")}
+    findings, seen = [], []
+
+    def found(status: str, detail: str, keys: list[str], target: int | None = None) -> None:
+        findings.append((status, detail, keys, target))
+
+    for key, ids in owner_of.items():
+        if len(ids) > 1:
+            found("fail", f"{key} is the photo of both {named(ids[0])} and {' and '.join(short(i) for i in ids[1:])}. "
+                  "Each pickup needs its own photo.", [key])
+    by_md5: dict[str, list[str]] = {}
+    for key, p in prints.items():
+        by_md5.setdefault(p["md5"], []).append(key)
+    for keys in by_md5.values():
+        for n, a in enumerate(keys):
+            for b in keys[n + 1:]:
+                seen.append(frozenset((a, b)))
+                apart = [(x, y) for x in owner_of[a] for y in owner_of[b] if x != y]
+                if apart:
+                    x, y = apart[0]
+                    found("fail", f"{a} and {b} are the same file, the photo of {named(x)} and of {short(y)}. "
+                          "Each pickup needs its own photo.", [a, b])
+                elif set(owner_of[a]) & set(owner_of[b]):
+                    x = next(i for i in owner_of[a] if i in owner_of[b])
+                    found("review", f"{a} and {b} are the same file, both under {named(x)}. Check the log has a photo of "
+                          "its own pickup.", [a, b], x)
+    index = proof_check.ImageIndex()
+    for key, p in prints.items():
+        for i in owner_of[key]:
+            index.add(str(i), key, p)
+    for key, p in prints.items():
+        for i in owner_of[key]:
+            for m in index.matches(p, str(i)):
+                pair = frozenset((key, m["name"]))
+                if m["exact"] or m["name"] == key or pair in seen:
+                    continue
+                seen.append(pair)
+                found("review", f"{key} ({named(i)}) and {m['name']} ({named(int(m['trip']))}) look the same. Compare them.",
+                      [key, m["name"]])
+    if not findings:
+        return [check("collection", "log_same_photo", label, "pass", f"Each of the {len(entries)} logs has its own photo")]
+    # One check per shared photo file: findings that name a common file are one, a problem if any part is.
+    groups: list[list[tuple]] = []
+    for finding in findings:
+        joined = [g for g in groups if any(set(finding[2]) & set(f[2]) for f in g)]
+        merged = [finding] + [f for g in joined for f in g]
+        groups = [g for g in groups if g not in joined] + [sorted(merged, key=findings.index)]
+    made = []
+    for group in sorted(groups, key=lambda g: findings.index(g[0])):
+        status = "fail" if any(f[0] == "fail" for f in group) else "review"
+        c = check("collection", "log_same_photo", label, status, " ".join(f[1] for f in group),
+                  images=list(dict.fromkeys(k for f in group for k in f[2])))
+        if len(group) == 1 and group[0][3] is not None:
+            c["target"] = {"type": "collection_log", "id": group[0][3]}
         made.append(c)
     return made
 
@@ -72,18 +147,18 @@ def photo_date(request: dict, images: dict[str, list[dict]], around=None) -> dic
     for r, m in photo_moments(images.get("loading", []), around):
         if m is None or r["name"] not in owner_of:  # an unreadable stamp is the GPS stamp check's to ask about
             continue
-        log_id = owner_of[r["name"]]
-        if log_id is None:
-            days = sorted({f"{at:%d/%m}" for _, at in pickups.values()})
-            why = f"the disposal's logs were picked up on {and_list(days)}"
-        elif log_id in pickups:
-            entry, at = pickups[log_id]
-            days, why = [f"{at:%d/%m}"], f"{log_name(entry)} was picked up on {at:%d/%m}"
-        else:
-            continue
-        checked += 1
-        if m["date"] not in days:
-            wrong.append((r["name"], m, why))
+        for log_id in owner_of[r["name"]]:  # a photo listed under two logs must fit each
+            if log_id is None:
+                days = sorted({f"{at:%d/%m}" for _, at in pickups.values()})
+                why = f"the disposal's logs were picked up on {and_list(days)}"
+            elif log_id in pickups:
+                entry, at = pickups[log_id]
+                days, why = [f"{at:%d/%m}"], f"{log_name(entry)} was picked up on {at:%d/%m}"
+            else:
+                continue
+            checked += 1
+            if m["date"] not in days:
+                wrong.append((r["name"], m, why))
     if not checked:
         return None
     label = "Collection photos taken on the pickup day"
@@ -93,7 +168,7 @@ def photo_date(request: dict, images: dict[str, list[dict]], around=None) -> dic
     detail = "; ".join(f"{name} was stamped {m['date']}, but {why}" for name, m, why in wrong)
     return check("collection", "collection_photo_date", label, "review",
                  f"{detail}. Every collection photo must be taken on its pickup day: check the photo, or the pickup date "
-                 "entered.", min(m["certainty"] for _, m, _ in wrong), images=[name for name, _, _ in wrong])
+                 "entered.", min(m["certainty"] for _, m, _ in wrong), images=list(dict.fromkeys(name for name, _, _ in wrong)))
 
 
 def too_late(request: dict, images: dict[str, list[dict]], around=None) -> dict | None:
@@ -156,7 +231,7 @@ def known_point(entry: dict) -> tuple[float, float] | None:
 def photos_to_place(request: dict) -> set[str]:
     """The collection photos whose GPS position Jev should read: those of logs whose collection point is known."""
     known = {e["id"] for e in logs(request) if known_point(e)}
-    return {key for key, log_id in owners(request).items() if log_id in known}
+    return {key for key, ids in owners(request).items() if known & set(ids)}
 
 
 def collection_points(request: dict, images: dict[str, list[dict]], radius: float) -> list[dict]:
@@ -165,7 +240,7 @@ def collection_points(request: dict, images: dict[str, list[dict]], radius: floa
     owner_of, made = owners(request), []
     for e in logs(request):
         point = point_of(e)
-        photos = [r for r in images.get("loading", []) if point and owner_of.get(r["name"]) == e["id"]]
+        photos = [r for r in images.get("loading", []) if point and e["id"] in owner_of.get(r["name"], [])]
         if not photos:  # no point known, or no photo of it to check (has_photos asks for one)
             continue
         name = (e.get("collectionPoint") or {}).get("name")
@@ -183,10 +258,87 @@ def collection_points(request: dict, images: dict[str, list[dict]], radius: floa
     return made
 
 
-def checks(request: dict, images: dict[str, list[dict]], radius: float = 500, around=None) -> list[dict]:
+def log_reused(request: dict, other_logs: list[tuple[int, dict]]) -> list[dict]:
+    """A collection log is one pickup, never split over two disposals: one problem per other disposal that holds any
+    of this one's log ids, naming every shared log. Aimed at the log when only one is shared. `other_logs` is
+    (disposal id, log) as `database.other_logs` finds them."""
+    label = "No collection log is on another disposal"
+    made = []
+    for i in sorted({i for i, _ in other_logs}):
+        ids = {other.get("id") for j, other in other_logs if j == i}
+        shared = [e for e in logs(request) if e["id"] in ids]
+        if not shared:
+            continue
+        names = [log_name(e, True) for e in shared]
+        if len(shared) == 1:
+            who, verb = names[0], "is"
+        else:
+            who, verb = f"collection logs {and_list([n.removeprefix('collection log ') for n in names])}", "are"
+        c = check("collection", "log_reused", label, "fail",
+                  f"{who[0].upper()}{who[1:]} {verb} also on disposal {i}. One pickup can't be counted in two disposals.",
+                  images=[k for k, owned in owners(request).items() if {e["id"] for e in shared} & set(owned)])
+        if len(shared) == 1:
+            c["target"] = {"type": "collection_log", "id": shared[0]["id"]}
+        c["related"] = compare_disposals.related([i])
+        made.append(c)
+    return made
+
+
+def pickup_key(entry: dict) -> tuple | None:
+    """What makes two collection logs one pickup: client, collection point, IST day and every material with its
+    quantity and unit. None if any is missing, so a log isn't matched on blanks."""
+    client = ((entry.get("client") or {}).get("name") or "").strip().lower()
+    point = ((entry.get("collectionPoint") or {}).get("name") or "").strip().lower()
+    day = standards.ist_day(entry.get("collectionDate"))
+    try:
+        materials = frozenset((m["materialName"].strip().lower(), float(m["quantity"]), m["unit"].strip().lower())
+                              for m in entry.get("materials") or [])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    return (client, point, day, materials) if client and point and day and materials else None
+
+
+def log_repeated(request: dict, other_logs: list[tuple[int, dict]]) -> list[dict]:
+    """The same pickup entered twice under different ids (same client, collection point, IST day and materials with
+    quantities): one check per pair, this disposal's logs pairwise and against `other_logs`, asking a person. A pair
+    with a log that `log_reused` flagged for that disposal is its, not this one's."""
+    entries = [e for e in logs(request) if pickup_key(e)]
+    label = "No collection log repeats another pickup"
+    shared = {i: {o["id"] for j, o in other_logs if j == i} & {e["id"] for e in logs(request)} for i, _ in other_logs}
+    pairs = [(a, b, None) for n, a in enumerate(entries) for b in entries[n + 1:]]
+    pairs += [(a, b, i) for a in entries for i, b in other_logs if pickup_key(b)]
+    found: dict[int | None, list[tuple[dict, dict]]] = {}
+    for a, b, i in pairs:
+        if a["id"] == b["id"] or pickup_key(a) != pickup_key(b) or (i is not None and {a["id"], b["id"]} & shared[i]):
+            continue
+        found.setdefault(i, []).append((a, b))
+    made = []
+    for i, matched in found.items():
+        where = "on this disposal" if i is None else f"on disposal {i}"
+        said = []
+        for a, b in matched:
+            name = log_name(a)
+            said.append(f"{name[0].upper()}{name[1:]} and collection log {b['id']} ({where}) are the same pickup: same "
+                        f"client, collection point, day {pickup(a):%d/%m} and weights.")
+        ours = {a["id"] for a, _ in matched}
+        c = check("collection", "log_repeated", label, "review",
+                  f"{' '.join(said)} Check {'it wasn' if len(matched) == 1 else 'they weren'}'t entered twice.",
+                  images=[k for k, owned in owners(request).items() if ours & set(owned)])
+        if len(matched) == 1:
+            c["target"] = {"type": "collection_log", "id": matched[0][0]["id"]}
+        if i is not None:
+            c["related"] = compare_disposals.related([i])
+        made.append(c)
+    return made
+
+
+def checks(request: dict, images: dict[str, list[dict]], radius: float = 500, around=None,
+           other_logs: list[tuple[int, dict]] = ()) -> list[dict]:
     """Every check of what was entered, for one disposal's request and its checked images; `radius` is how far from
-    its collection point a collection photo may be, and `around` the trip's date."""
-    return [*has_photos(request),
+    its collection point a collection photo may be, `around` the trip's date, and `other_logs` the collection logs of
+    other disposals (`database.other_logs`)."""
+    return [*has_photos(request), *log_same_photo(request, images), *log_reused(request, other_logs),
+            *log_repeated(request, other_logs),
             *(c for c in (photo_date(request, images, around), too_late(request, images, around),
                           after_collections(request)) if c),
             *collection_points(request, images, radius)]

@@ -249,6 +249,14 @@ Changing the number, the quantity, a limit or an image clears the result, so a v
 
 Prints each image's answers and readings, then the verdict, timeline and limits, and each part's verdict and flags.
 
+### Count look-alike images: tools/measure_look_alikes.py
+
+```bash
+.venv/bin/python -m tools.measure_look_alikes --trips trips/ --db postgresql://verifier@127.0.0.1:5433/verifier
+```
+
+Counts pairs of images that only look alike (not the same file) across all saved images, inside and outside today's window (the same vehicle, a day apart; for `trips/`, the same date folder and vehicle), and writes the pairs outside it to `eval/look-alikes-YYYY-MM-DD.html` for a person to mark which are real copies. Read-only; no Jev, no S3. It changes nothing in the verifier.
+
 ### Check a whole day: tools/check_trip_folders.py
 
 ```bash
@@ -278,35 +286,51 @@ The report shows accuracy per field, accuracy at each confidence level per group
 
 Each disposal is checked as one trip with `proof_check`. Its weigh bills, collection photos (as loading photos) and unloading photos are read from S3 by `s3Key`, and checked against the vehicle number and net quantity entered, with the facility's location as the plant. A disposal is a Verra project trip when one of its collection logs' clients has the Verra project as its default project. A photo that isn't in S3, or isn't an image, or whose `s3Key` isn't under `disposal/` or `collection-logs/` (it isn't read at all), asks a person (`image_unavailable`, docs part), and the rest are still checked. The read-only S3 key should allow only those two folders: `deploy/s3-read-policy.example.json` is the policy to compare the real one with. A check is tried again only when trying again can change it: Jev busy or down for an image (5xx, 429, a timeout), or S3 or the database not reached, 6 tries over about 25 minutes. Jev's answers are saved in Postgres as each image is answered (`jev_answer`), so a retry asks only the images not answered yet. If one image still isn't answered on the last try, it is flagged like a missing photo (`image_unavailable`) and the other checks are sent. If Jev answered for none, or refused every image, or refused our key or model, or the check hit our own bug, the disposal is sent at once as `outcome: error` with an alert. Checks flagged for the same reason become one flag, whose `code` is the check's key. Severity follows from the check's part: a problem with the trip being real is `high`, an unsure Verra check is `info`, everything else `recheck`. The result also carries `extractions` (each part's status, the weighing timeline, each image's readings) and the `standard` it was checked against. proof_check's whole result and what Jev cost are kept in our database.
 
-Each disposal is also compared with what was kept for other disposals (`verifier/compare_disposals.py`). It only looks at its vehicle's other disposals with a trip within a day of its own date, each as last checked, and never at its own earlier requests (those are edits).
-- An image also in such a disposal is a problem if it's an exact copy, and asks a person if it's a look-alike (`reused`). This applies whatever the quantity entered: photos borrowed from another trip come with a different quantity. On 23 Oct, 173186's collection photos were 172929's unloading photos (1870 against 1990 kg).
-- A collection or unloading photo stamped within 5 minutes of one in another disposal asks a person (`same_moment`). Each other disposal is flagged once, by the first check that finds it, in the order reused, overlap, same moment, so `same_moment` is left for photos close in time whose trips don't overlap.
+Each disposal is also compared with what was kept for other disposals (`verifier/compare_disposals.py`), each as last edited, and never with its own earlier requests (those are edits). Exact copies are looked up over all history: every image's fingerprint is saved (`image_print`) before Jev is asked, so a disposal still being checked, or whose check ended in an error, counts too. The other comparisons only look at its vehicle's other disposals with a trip within a day of its own date.
+- An image also in any other disposal of any vehicle is a problem if it's an exact copy (`reused`); at most 5 other disposals are named (the latest by trip day), with the rest counted. In a disposal of the same vehicle within a day it also asks a person if it's a look-alike. This applies whatever the quantity entered: photos borrowed from another trip come with a different quantity. On 23 Oct, 173186's collection photos were 172929's unloading photos (1870 against 1990 kg).
+- A collection or unloading photo stamped within 5 minutes of one in another disposal asks a person (`same_moment`). Each other disposal is flagged once, by the first check that finds it, in the order reused, same weighing, overlap, same moment, so `same_moment` is left for photos close in time whose trips don't overlap.
+- The same gross weighing (within 2 minutes, on the date) on the final slips of two disposals of one vehicle is a problem when Jev was sure of both times, else it asks a person (`same_weighing`): one weighing can't be proof for two disposals, even from new photos of the slip. It names the same net weight when both quantities and both net-weight answers match. The tare isn't compared, as one morning tare is printed on every slip of the day.
 - A trip whose photos (first collection photo to last unloading photo) overlap another disposal's by more than the clock slack is a problem, whatever its quantity (`overlap`). The weighings aren't used: one morning tare is often printed on every slip of the day, which made normal second and third trips look like overlaps (about 40 wrong flags on 19 and 23 Oct).
 - Within the disposal itself, one file used as both a collection and an unloading photo is a problem (`same_file`). This one is part of every trip's checks, so the command line, the folder runner and the test page catch it too.
 
 What was entered in gw_sales is also checked against the photos (`verifier/entry_checks.py`). gw_sales sends every time in UTC, and a photo's GPS stamp shows the phone's time (IST), so each time is turned into IST first. Stamps are read without a year, so dates are compared by day and month. Each of these asks a person when it fails:
 - Every collection log has a photo of its own. This flag is aimed at the log (`target`) (`collection_has_photos`, docs).
+- Each collection log has its own photo (one flag per shared photo file): one photo listed under two logs, or the same file under two keys in different logs, is a problem; a look-alike in different logs, or the same file twice in one log, asks a person (`log_same_photo`, real).
+- A collection log id on another disposal is a problem, one flag per other disposal naming every shared log: one pickup is never counted in two disposals, whatever the date (`log_reused`, real). The same pickup under a different id, with the same client, collection point, IST day and materials with quantities, in this disposal or in any other disposal with a trip within a day, asks a person, one flag per other disposal (`log_repeated`, real).
 - Every collection photo is stamped on its log's pickup day (`collectionDate`). A collection photo of the disposal itself, linked to no log, must be stamped on the pickup day of one of the disposal's logs (`collection_photo_date`, real).
 - No unloading photo is stamped more than 1 h 30 min after the end time entered. This is skipped without an end time (`unloading_too_late`, real).
 - Every pickup is before the arrival entered. For a manual trip entry, the disposal's or the log's, only the dates are compared (`disposal_after_collections`, docs).
-- For a log whose collection point's location gw_sales knows, at least one of its photos must be stamped within 500 m of it (`collection_point`, real; `collection_radius` in the standard). A clearly farther photo is a problem. Its photos' positions are read to four decimals, the same way as unloading photos at the plant: the plant check and this one share `proof_check.near_check`. This costs about $0.0005 more per collection photo, and only for logs with a known point.
+- For a log whose collection point's location gw_sales knows, at least one of its photos must be stamped within 4 km of it (`collection_point`, real; `collection_radius` in the standard). A clearly farther photo is a problem. Its photos' positions are read to four decimals, the same way as unloading photos at the plant: the plant check and this one share `proof_check.near_check`. This costs about $0.0005 more per collection photo, and only for logs with a known point.
 - The final slip is from the weighbridge entered (`claims.weighbridge.name`). Bills are asked whether their heading names it, allowing for the name written differently (`weighbridge_matches`, docs). Another weighbridge asks a person, even when Jev is sure, since it may only be the wrong weighbridge entered; so does unsure. The question (`weighbridge_entered`) is only asked when a weighbridge is entered, so saved answers without one stay valid. `trip.json` can give one as `"weighbridge"`.
 
 What the logs weighed by hand scale (kg, with bags counted apart) is recorded against the net weight entered, in `extractions.collectedVsWeighed`. It isn't flagged, so a tolerance can be chosen from real numbers.
 
-These flags name the other disposals in `related`. Checks of one vehicle's disposals run one at a time, so two copies arriving together still see each other. An earlier disposal isn't flagged again when a later copy arrives: how to show it there is still to agree with gw_sales.
+These flags name the other disposals in `related`. Checks of one vehicle's disposals run one at a time, and each request's fingerprints are saved before the lookup, so copies across vehicles checked at once find each other too. An earlier disposal isn't flagged again when a later copy arrives: how to show it there is still to agree with gw_sales.
 
-The limits a trip is checked by are those of its own day (`verifier/standards.py`, `STANDARDS`). To change a limit, add an entry from the day it applies rather than editing one. The Jev versions are pinned there too (`MODEL`, `BOX_MODEL`, `jev-1.14.0`), so answers don't change when an alias moves. Only upgrade them after testing.
+The limits a trip is checked by are those of its own day (`verifier/standards.py`, `STANDARDS`). To change a limit, add an entry from the day it applies rather than editing one, unless every trip is to be checked again by it: standard "2" (plant 2 km, collection points 4 km) replaced "1" (500 m each) for all trips on 2 Nov 2026. The Jev versions are pinned there too (`MODEL`, `BOX_MODEL`, `jev-1.14.0`), so answers don't change when an alias moves. Only upgrade them after testing.
 
-A dev Postgres for it runs in Docker, on port 5433:
+A dev Postgres for it runs in Docker, on port 5433, with a password. Make the password and keep it in `~/.pgpass` (read by `psql` and the tests) and in `deploy/.env` (git-ignored; read by the verifier), without it ever being printed:
 
 ```bash
+pw=$(openssl rand -hex 32)
+echo "127.0.0.1:5433:*:verifier:$pw" >> ~/.pgpass && chmod 600 ~/.pgpass
 docker run -d --name jev-verifier-db --restart unless-stopped -p 127.0.0.1:5433:5432 \
   -v jev-verifier-pg:/var/lib/postgresql -e POSTGRES_USER=verifier -e POSTGRES_DB=verifier \
-  -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18
+  -e POSTGRES_PASSWORD="$pw" postgres:18
+echo "VERIFIER_DATABASE_URL=postgresql://verifier:$pw@127.0.0.1:5433/verifier" >> deploy/.env && chmod 600 deploy/.env
+unset pw
 ```
 
-Settings come from the environment: `VERIFIER_DATABASE_URL` (`postgresql://verifier@127.0.0.1:5433/verifier` for the dev one), `VERIFIER_WEBHOOK_SECRET` (gw_sales signs its requests with it), `VERIFIER_CALLBACK_SECRET` (we sign our results with it), `VERIFIER_API_KEY` (sent as `X-API-Key` with our results), `GW_SALES_URL` (results are only posted under it), `VERIFIER_S3_BUCKET` (the photos; AWS credentials and region come the usual AWS ways), the TypeSafe key (`TYPESAFE_API_KEY`, or on a laptop the keyring, as above), optionally `VERIFIER_VERRA_PROJECT` (the project code that makes a disposal a Verra project trip; unset, no Verra checks), and while changing the webhook secret `VERIFIER_WEBHOOK_SECRET_NEXT` (the new one, accepted as well as the old until gw_sales has switched; then make it the only one). The secrets must be at least 32 characters (`openssl rand -hex 32`) and `GW_SALES_URL` must be `https://` (`http://localhost` or `http://127.0.0.1` only for tests), or the service won't start. Before deploying this, check the dev server's secrets: if one is shorter, agree a new one with gw_sales first. A request over 1 MB is refused (413) before its signature is checked.
+A dev Postgres started the older way, with `POSTGRES_HOST_AUTH_METHOD=trust`, lets anyone on the laptop in without a password. To give it one, keep the existing volume: set the password (`ALTER ROLE verifier PASSWORD '…'`, with the same one in `~/.pgpass` and `deploy/.env` as above), then make its network logins ask for it and reload:
+
+```bash
+sudo docker exec jev-verifier-db sed -i -E '/^host/ s/trust$/scram-sha-256/' /var/lib/postgresql/18/docker/pg_hba.conf
+psql -h 127.0.0.1 -p 5433 -U verifier -d verifier -c 'select pg_reload_conf()'
+```
+
+Logins from inside the container stay password-free, so `sudo docker exec jev-verifier-db psql -U verifier` still gets in if the password is lost.
+
+Settings come from the environment: `VERIFIER_DATABASE_URL` (`postgresql://verifier:<password>@127.0.0.1:5433/verifier` for the dev one, kept in `deploy/.env`; load it with `set -a; source deploy/.env; set +a`), `VERIFIER_WEBHOOK_SECRET` (gw_sales signs its requests with it), `VERIFIER_CALLBACK_SECRET` (we sign our results with it), `VERIFIER_API_KEY` (sent as `X-API-Key` with our results), `GW_SALES_URL` (results are only posted under it), `VERIFIER_S3_BUCKET` (the photos; AWS credentials and region come the usual AWS ways), the TypeSafe key (`TYPESAFE_API_KEY`, or on a laptop the keyring, as above), optionally `VERIFIER_VERRA_PROJECT` (the project code that makes a disposal a Verra project trip; unset, no Verra checks), and while changing the webhook secret `VERIFIER_WEBHOOK_SECRET_NEXT` (the new one, accepted as well as the old until gw_sales has switched; then make it the only one). The secrets must be at least 32 characters (`openssl rand -hex 32`) and `GW_SALES_URL` must be `https://` (`http://localhost` or `http://127.0.0.1` only for tests), or the service won't start. Before deploying this, check the dev server's secrets: if one is shorter, agree a new one with gw_sales first. A request over 1 MB is refused (413) before its signature is checked.
 
 ```bash
 .venv/bin/python -m verifier migrate      # apply the queue's and our migrations not applied yet
@@ -441,8 +465,8 @@ trips/ eval/ mockups/   real trips, saved answers and reports, design mockups: n
 | `verifier/api.py` | Receives gw_sales' requests (`POST /v1/verifications`) and answers `GET /health`. |
 | `verifier/tasks.py` | The queue's jobs: check a request, post its result, recover stalled or lost jobs. |
 | `verifier/disposal_check.py` | Checks a disposal with `proof_check` and turns its checks into gw_sales flags. |
-| `verifier/compare_disposals.py` | Compares a disposal with the same vehicle's other disposals: reused images, overlapping trips (by photo times), the same moment. |
-| `verifier/entry_checks.py` | Checks what was entered in gw_sales against the photos: a photo for every collection log, pickup days, the end time, the arrival after the pickups, and collected vs weighed (recorded only). |
+| `verifier/compare_disposals.py` | Compares a disposal with other disposals: exact copies of images in any disposal, and in the same vehicle's disposals a day either side look-alikes, the same gross weighing, overlapping trips (by photo times), the same moment. |
+| `verifier/entry_checks.py` | Checks what was entered in gw_sales against the photos: a photo for every collection log, the three collection-log checks (own photo, log on another disposal, same pickup twice), pickup days, the end time, the arrival after the pickups, and collected vs weighed (recorded only). |
 | `verifier/database.py` | Requests, the outbox of results, and what disposals are compared by. |
 | `verifier/migrate.py`, `verifier/migrations/` | Applies the database changes (ours and the queue's), each once, in order. |
 | `verifier/s3_photos.py` | Reads the photos from S3. |

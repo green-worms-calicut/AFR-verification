@@ -8,11 +8,16 @@ job last queued for it, so the sweep can tell when one went missing.
 import asyncio
 import json
 from collections.abc import MutableMapping
+from dataclasses import dataclass
 from datetime import date, datetime
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+
+from proof_check import FEATURELESS
+
+ImagePrint = tuple[str, str, str, str]  # (kind, name, md5, dhash): proof_check's role, the s3Key, its fingerprints
 
 def dumps(value) -> str:
     """JSON for proof_check's results, which hold the odd date."""
@@ -150,15 +155,16 @@ async def note_disposal(pool: AsyncConnectionPool, request_id: str, vehicle: str
                            "WHERE request_id = %s", (vehicle, quantity, day, request_id))
 
 
-async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str, day: date) -> list[tuple[int, dict]]:
+async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str,
+                 day: date) -> list[tuple[int, dict, str | None]]:
     """The other disposals of `vehicle` with a trip within a day of `day`, each as last edited: (disposal id,
-    proof_check's result). A disposal's earlier requests are its own edits, never others. One whose latest request
-    isn't analysed (still being checked, or it ended in an error) is left out: its earlier photos may have been
+    proof_check's result, the quantity entered). A disposal's earlier requests are its own edits, never others. One
+    whose latest request isn't analysed (still being checked, or it ended in an error) is left out: its earlier photos may have been
     changed, and one still being checked compares itself with this one when it runs (one vehicle at a time)."""
     async with pool.connection() as conn:
         cur = await conn.execute(
-            """SELECT disposal_id, analysis FROM (
-                   SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.vehicle_number, q.trip_day, r.analysis
+            """SELECT disposal_id, analysis, quantity FROM (
+                   SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.vehicle_number, q.trip_day, q.quantity, r.analysis
                    FROM verification_request q LEFT JOIN verification_result r USING (request_id)
                    WHERE q.disposal_id <> %(disposal)s AND q.disposal_id IN (
                        SELECT disposal_id FROM verification_request
@@ -167,6 +173,88 @@ async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str, day:
                WHERE vehicle_number = %(vehicle)s AND trip_day BETWEEN %(day)s::date - 1 AND %(day)s::date + 1
                  AND analysis IS NOT NULL""", {"disposal": disposal_id, "vehicle": vehicle, "day": day})
         return await cur.fetchall()
+
+
+async def other_logs(pool: AsyncConnectionPool, disposal_id: int, log_ids: list[int],
+                     day: date) -> list[tuple[int, dict]]:
+    """The collection logs, as sent, of other disposals' latest requests (analysed or not, errored or still being
+    checked) that either hold one of `log_ids` (any date; that log alone) or have a trip within a day of `day` (every
+    log): (disposal id, log). Never `disposal_id`'s own."""
+    ids = [json.dumps({"reference": {"collectionLogs": [{"id": i}]}}) for i in log_ids]
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """SELECT disposal_id, trip_day, logs FROM (
+                   SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.trip_day,
+                          q.body->'reference'->'collectionLogs' AS logs
+                   FROM verification_request q
+                   WHERE q.disposal_id <> %(disposal)s AND q.disposal_id IN (
+                       SELECT disposal_id FROM verification_request
+                       WHERE trip_day BETWEEN %(day)s::date - 1 AND %(day)s::date + 1
+                          OR body @> ANY(%(ids)s::jsonb[]))
+                   ORDER BY q.disposal_id, q.received_at DESC) latest
+               ORDER BY disposal_id""", {"disposal": disposal_id, "day": day, "ids": ids})
+        found = []
+        for other, trip_day, entries in await cur.fetchall():
+            near = trip_day is not None and abs((trip_day - day).days) <= 1
+            entries = entries or []
+            found += [(other, e) for e in entries if near or e.get("id") in log_ids]
+        return found
+
+
+@dataclass
+class Copy:
+    """An image of another disposal with the same md5 as one checked now."""
+    name: str
+    kind: str
+    md5: str
+    disposal_id: int
+    vehicle: str | None
+    day: date | None
+
+
+async def save_prints(pool: AsyncConnectionPool, request_id: str, prints: list[ImagePrint]) -> None:
+    """Keep a request's image fingerprints (migrations/008). Safe to call again on a retry."""
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany("INSERT INTO image_print (request_id, kind, name, md5, dhash) "
+                                  "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                                  [(request_id, *p) for p in prints])
+
+
+async def copies(pool: AsyncConnectionPool, disposal_id: int, md5s: list[str]) -> list[Copy]:
+    """The images of other disposals, each as last edited (analysed, errored or still being checked), whose md5 is in
+    `md5s`: any vehicle, any date, never `disposal_id`'s own."""
+    if not md5s:
+        return []
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """SELECT p.name, p.kind, p.md5, q.disposal_id, q.vehicle_number, q.trip_day
+               FROM image_print p JOIN (
+                   SELECT DISTINCT ON (disposal_id) request_id, disposal_id, vehicle_number, trip_day
+                   FROM verification_request
+                   WHERE disposal_id <> %(disposal)s AND disposal_id IN (
+                       SELECT x.disposal_id FROM image_print m JOIN verification_request x USING (request_id)
+                       WHERE m.md5 = ANY(%(md5s)s))
+                   ORDER BY disposal_id, received_at DESC) q USING (request_id)
+               WHERE p.md5 = ANY(%(md5s)s) ORDER BY q.disposal_id, p.name""", {"disposal": disposal_id, "md5s": md5s})
+        return [Copy(*row) for row in await cur.fetchall()]
+
+
+class PrintHistory:
+    """The worker thread's way to compare a request's image fingerprints with every other disposal's: saves them,
+    and only then (the save commits first) looks for exact copies, on `loop`, the worker's."""
+
+    def __init__(self, pool: AsyncConnectionPool, loop: asyncio.AbstractEventLoop, request_id: str, disposal_id: int):
+        self.pool, self.loop, self.request_id, self.disposal_id = pool, loop, request_id, disposal_id
+
+    def __call__(self, prints: list[ImagePrint]) -> list[Copy]:
+        return asyncio.run_coroutine_threadsafe(self.find(prints), self.loop).result()
+
+    async def find(self, prints: list[ImagePrint]) -> list[Copy]:
+        await save_prints(self.pool, self.request_id, prints)
+        # A plain image says nothing (as for look-alikes): saved, but not looked up.
+        return await copies(self.pool, self.disposal_id,
+                            [p[2] for p in prints if FEATURELESS < bin(int(p[3], 16)).count("1") < 64 - FEATURELESS])
 
 
 async def beat(pool: AsyncConnectionPool) -> None:

@@ -117,7 +117,7 @@ PART_OF = {
     "weigh_order": "real", "weigh_gap": "real", "weigh_day": "real", "time_in_tare": "real",
     "loading_timing": "real", "unloading_timing": "real", "unloading_day": "real",
     "loading_direct": "real", "unloading_direct": "real", "bill_direct": "real", "unloading_plant": "real",
-    "reused": "real", "overlap": "real",
+    "reused": "real", "overlap": "real", "same_weighing": "real",
     "loading_missing": "docs", "unloading_missing": "docs", "bill_missing": "docs",
     "loading_vehicle": "docs", "unloading_vehicle": "docs", "loading_stamp": "docs", "unloading_stamp": "docs",
     "bill_found": "docs", "net_weight": "docs", "gross_vs_tare": "docs",
@@ -131,6 +131,7 @@ PART_OF = {
     # taken on its pickup day, no unloading photo long after the end time, and the collections before the arrival.
     "collection_has_photos": "docs", "collection_photo_date": "real", "unloading_too_late": "real",
     "disposal_after_collections": "docs", "weighbridge_matches": "docs", "collection_point": "real",
+    "log_same_photo": "real", "log_reused": "real", "log_repeated": "real",
 }
 
 
@@ -345,6 +346,13 @@ def weighings(bill: dict, first_slip: dict | None = None, around=None) -> dict |
     return max(found, key=lambda w: w["certainty"], default=None)
 
 
+def trip_weighings(images: dict[str, list[dict]], around=None) -> dict | None:
+    """The weighings of a trip from its final and first slips (`weighings`); None without a final slip."""
+    bills = images.get("bill", [])
+    final = final_slip(bills)
+    return weighings(final, first_slip(bills), around) if final else None
+
+
 def first_slip(bills: list[dict]) -> dict | None:
     """The slip from the first weighing, with one weight: the surest one."""
     slips = [b for b in bills if b["answers"]["weigh_bill"]["yes"] >= 0.5 and b["answers"]["slip_kind"]["choice"] == "one_weight"]
@@ -450,8 +458,9 @@ def metres_between(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 def distance(metres: float) -> str:
-    """40 -> '40 m', 1234 -> '1.2 km', 38210 -> '38 km'."""
-    return f"{round(metres)} m" if metres < 1000 else f"{metres / 1000:.1f} km" if metres < 10_000 else f"{metres / 1000:.0f} km"
+    """40 -> '40 m', 1234 -> '1.2 km', 4000 -> '4 km', 38210 -> '38 km'."""
+    return f"{round(metres)} m" if metres < 1000 else f"{metres / 1000:.1f}".removesuffix(".0") + " km" if metres < 10_000 \
+        else f"{metres / 1000:.0f} km"
 
 
 def from_square(value: str, plant: tuple[float, float]) -> float:
@@ -902,7 +911,7 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     checks += bill_checks(bills, vehicle_number, quantity, verra, weighbridge)
 
     final = final_slip(bills)
-    w = weighings(final, first_slip(bills), around) if final else None
+    w = trip_weighings(images, around)
     gap = minutes_between(w["tare"], w["gross"]) if w else None  # positive when the tare was taken first
     not_checked = "so the weighing order and photo times weren't checked"
     if not w:
