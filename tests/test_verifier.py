@@ -655,6 +655,16 @@ class CompareTests(unittest.TestCase):
         flag = self.flag(self.checked(uploads, jev, [first]), "same_weighing")
         self.assertIn(f"and the same net weight, {QUANTITY} kg", flag["message"])
 
+    def test_a_quantity_not_in_kg_still_finds_the_same_weighing_without_a_net_weight(self):
+        # net_weight is only asked of a quantity in kg, so these slips have no answer for it
+        first = compare_disposals.Other(1000, self.first().analysis, "2.5 tonnes")
+        uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")})
+        checked = self.checked(uploads, jev, [first], quantity=2.5, unit="tonnes")
+        self.assertEqual(checked.outcome, "flagged")
+        flag = self.flag(checked, "same_weighing")
+        self.assertEqual(flag["kind"], "problem found")
+        self.assertNotIn("net weight", flag["message"])
+
     def test_an_unsure_gross_time_asks_a_person(self):
         unsure = (FIRST, {**FINAL, **at("gross", "03:31", confidence=0.4)})
         uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")}, bill=unsure)

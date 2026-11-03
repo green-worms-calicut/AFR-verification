@@ -122,8 +122,9 @@ def same_weighing(images: dict[str, list[dict]], quantity: str | None, others: l
     for o, t in found:
         part = f"{ours} shows the gross weighing at {here['time']} on {here['date']}, the same as {disposals([o.disposal_id])}'s slip {t['slips'][-1]}"
         theirs_final = proof_check.final_slip(o.analysis["images"]["bill"])
-        if (quantity and quantity == o.quantity and final["answers"]["net_weight"]["choice"] == "same"
-                and theirs_final["answers"]["net_weight"]["choice"] == "same"):
+        net = lambda slip: slip["answers"].get("net_weight", {}).get("choice")  # asked only of a quantity in kg
+        if (quantity and quantity.endswith(" kg") and quantity == o.quantity and net(final) == "same"
+                and net(theirs_final) == "same"):
             part += f", and the same net weight, {quantity.split()[0]} kg"
         parts.append(part)
     detail = "; ".join(parts)
