@@ -700,9 +700,52 @@ class CompareTests(unittest.TestCase):
         checked = self.checked(uploads, jev, [self.first()], vehicle={"vehicleNumber": ""})
         keys = {c["key"] for c in checked.analysis["verdict"]["checks"]}
         self.assertIn("same_file", keys)
-        self.assertFalse(keys & {"reused", "same_moment", "overlap"})
+        self.assertFalse(keys & {"same_moment", "overlap", "same_weighing"})
         c = next(c for c in checked.analysis["verdict"]["checks"] if c["key"] == "not_compared")
         self.assertEqual((c["status"], c["part"]), ("review", "real"))
+
+    def copy(self, name="collection-logs/2026/10/15/collection1.jpg", disposal_id=900, vehicle="KL07BC1234", day=date(2026, 9, 1)):
+        uploads, _ = make_trip()
+        md5 = proof_check.fingerprints(files(uploads)[name])["md5"]
+        return database.Copy(name, "loading", md5, disposal_id, vehicle, day)
+
+    def test_a_copy_from_an_older_disposal_of_another_vehicle_is_a_problem(self):
+        uploads, jev = make_trip()
+        with jev.client() as client:
+            checked = disposal_check.check(disposal(uploads), files(uploads).get, client, history=lambda rows: [self.copy()])
+        flag = self.flag(checked, "reused")
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
+        self.assertIn("is the same file as collection-logs/2026/10/15/collection1.jpg in disposal 900 (KL07BC1234, 01/09)",
+                      flag["message"])
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 900}])
+
+    def test_prints_are_handed_over_before_jev_is_asked(self):
+        uploads, jev = make_trip()
+        seen = []
+
+        def history(rows):
+            seen.append((len(jev.requests), sorted(name for _, name, _, _ in rows)))
+            return []
+        with jev.client() as client:
+            disposal_check.check(disposal(uploads), files(uploads).get, client, history=history)
+        self.assertEqual(seen, [(0, sorted(files(uploads)))])
+
+    def test_an_unavailable_image_has_no_print(self):
+        uploads, jev = make_trip()
+        stored = files(uploads)
+        del stored["disposal/2026/10/15/unloading2.jpg"]
+        rows = []
+        with jev.client() as client:
+            disposal_check.check(disposal(uploads), stored.get, client, history=lambda r: rows.extend(r) or [])
+        self.assertNotIn("disposal/2026/10/15/unloading2.jpg", {name for _, name, _, _ in rows})
+
+    def test_without_a_vehicle_number_copies_are_still_found(self):
+        uploads, jev = make_trip()
+        with jev.client() as client:
+            checked = disposal_check.check(disposal(uploads, vehicle={"vehicleNumber": ""}), files(uploads).get, client,
+                                           history=lambda rows: [self.copy()])
+        keys = {c["key"]: c["status"] for c in checked.analysis["verdict"]["checks"]}
+        self.assertEqual((keys["reused"], keys["not_compared"]), ("fail", "review"))
 
 
 class FlagTests(unittest.TestCase):

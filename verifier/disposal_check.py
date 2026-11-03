@@ -18,6 +18,7 @@ from typesafe_sdk import TypeSafeClient
 import proof_check
 from proof_check import Upload
 from verifier import compare_disposals, entry_checks, s3_photos, standards
+from verifier.database import Copy, ImagePrint
 
 log = logging.getLogger("verifier")
 
@@ -178,11 +179,12 @@ def extractions(trip: dict, unavailable: list[str]) -> dict:
 
 def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeClient,
           verra_project: str | None = None, others: list[compare_disposals.Other] = (), cache=None,
-          last_try: bool = False) -> Checked:
+          last_try: bool = False, history: Callable[[list[ImagePrint]], list[Copy]] | None = None) -> Checked:
     """Check one request's disposal, and compare it with `others`: the same vehicle's other disposals within a day
     of its date (`database.others`). `cache` holds the request's Jev answers from earlier tries. S3 failing raises,
     and so does Jev being busy or down for an image (`JevUnavailable`), so the job retries; on the `last_try` such an
-    image is flagged and the rest sent, unless Jev answered for none."""
+    image is flagged and the rest sent, unless Jev answered for none. `history`, if given, is handed a fingerprint of
+    every image fetched (before Jev is asked) and returns the copies of them in any disposal."""
     d = disposal(request, verra_project)
     std = standards.for_day(d.day)
     uploads, unavailable = {kind: [] for kind in WORDS}, []  # (kind, s3Key, why)
@@ -196,6 +198,17 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
                 unavailable.append((kind, key, why))
             else:
                 uploads[kind].append(Upload(key, data))
+    copies = []
+    if history:
+        prints = []
+        for kind, ups in uploads.items():
+            for u in ups:
+                try:
+                    found = proof_check.fingerprints(u.data)
+                except proof_check.UNREADABLE:
+                    continue  # analyze_trip says why it can't be read
+                prints.append((kind, u.name, found["md5"], found["dhash"]))
+        copies = history(prints)
     trip, _ = proof_check.analyze_trip(client, uploads, d.vehicle_number, standards.MODEL, d.quantity, std.limits,
                                        plant=d.plant, verra=d.verra, box_model=standards.BOX_MODEL,
                                        weighbridge=d.weighbridge, place_also=entry_checks.photos_to_place(request),
@@ -219,7 +232,8 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
     if d.bad_plant:
         checks.append(bad_plant_check(d.bad_plant, trip["images"]["unloading"]))
     checks += entry_checks.checks(request, trip["images"], std.collection_radius, d.day)
-    checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack, d.day, d.quantity_key)
+    checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack, d.day, d.quantity_key,
+                                       copies)
     trip["verdict"] = {**trip["verdict"], **proof_check.decide_parts(checks)}
     for kind, key, why in unavailable:
         log.warning("%s: %s %s %s", request["requestId"], WORDS[kind], key, why)
