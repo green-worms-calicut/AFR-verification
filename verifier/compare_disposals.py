@@ -6,7 +6,9 @@ one (23 Oct 2026: 173186's collection photos were 172929's unloading photos). An
 problem if an exact copy and asks a person if a look-alike (`reused`). The trip's time out, from its first
 collection photo to its last unloading photo, overlapping another disposal's by more than the clock slack is a
 problem (`overlap`): not the weighings, as one morning tare is often printed on every slip of the day. A photo
-stamped within SAME_MOMENT minutes of one in another disposal asks a person (`same_moment`).
+stamped within SAME_MOMENT minutes of one in another disposal asks a person (`same_moment`). The same gross
+weighing, within SAME_WEIGHING minutes, on the final slips of two disposals is a problem (`same_weighing`): one
+weighing can't be proof for two disposals.
 Each other disposal is flagged once, by the first of these that finds it. Every flag names the other disposals in
 `related`. (One file as both a collection and an unloading photo of the disposal itself is proof_check's `same_file`.)
 """
@@ -14,8 +16,9 @@ Each other disposal is flagged once, by the first of these that finds it. Every 
 from dataclasses import dataclass
 
 import proof_check
-from proof_check import Limits, and_list, busy_time, check, overlap_minutes, unsure_stamps
+from proof_check import CONFIDENT, Limits, and_list, busy_time, check, overlap_minutes, trip_weighings, unsure_stamps
 
+SAME_WEIGHING = 2  # minutes between the gross weighings on two disposals' slips that make them one weighing
 SAME_MOMENT = 5  # minutes between photo stamps in two disposals that make them look like one moment
 PHOTOS = ("loading", "unloading")
 
@@ -26,6 +29,7 @@ class Other:
 
     disposal_id: int
     analysis: dict  # proof_check's result: {"images": {kind: [result]}, "verdict": ...}
+    quantity: str | None = None  # the quantity entered, as kept with its request, e.g. "2570 kg"
 
 
 def related(ids) -> list[dict]:
@@ -92,6 +96,51 @@ def same_moment(images: dict[str, list[dict]], others: list[Other], flagged: set
     return made
 
 
+def same_weighing(images: dict[str, list[dict]], quantity: str | None, others: list[Other], flagged: set[int],
+                  around=None) -> dict | None:
+    """The same gross weighing, within SAME_WEIGHING minutes, on this trip's final slip and another disposal's, one not
+    already `flagged` by `reused`: a problem when Jev was sure of both times, else it asks a person. The tare isn't
+    compared, as one morning tare is printed on every slip of the day. None without a gross weighing to compare."""
+    w = trip_weighings(images, around)
+    if not w:
+        return None
+    here = w["gross"]
+    found = []
+    for o in others:
+        if o.disposal_id in flagged or not (theirs := trip_weighings(o.analysis["images"], around)):
+            continue
+        there = theirs["gross"]
+        if here["date"] == there["date"] and abs((here["at"] - there["at"]).total_seconds()) <= SAME_WEIGHING * 60:
+            found.append((o, theirs))
+    label = "Weighing not in another disposal"
+    if not found:
+        return check("trips", "same_weighing", label, "pass", "No other disposal of this vehicle with the same gross weighing")
+    sure = all(here["certainty"] >= CONFIDENT and t["gross"]["certainty"] >= CONFIDENT for _, t in found)
+    ours = w["slips"][-1]
+    final = proof_check.final_slip(images["bill"])
+    parts = []
+    for o, t in found:
+        part = f"{ours} shows the gross weighing at {here['time']} on {here['date']}, the same as {disposals([o.disposal_id])}'s slip {t['slips'][-1]}"
+        theirs_final = proof_check.final_slip(o.analysis["images"]["bill"])
+        if (quantity and quantity == o.quantity and final["answers"]["net_weight"]["choice"] == "same"
+                and theirs_final["answers"]["net_weight"]["choice"] == "same"):
+            part += f", and the same net weight, {quantity.split()[0]} kg"
+        parts.append(part)
+    detail = "; ".join(parts)
+    if sure:
+        made = check("trips", "same_weighing", label, "fail", f"{detail}. One weighing can't be proof for two disposals.",
+                     images=list(dict.fromkeys([ours, *(t["slips"][-1] for _, t in found)])))
+    else:
+        unclear = [(ours, here)] + [(t["slips"][-1], t["gross"]) for _, t in found]
+        read = "; ".join(f"{name} was read as {m['time']} on {m['date']}, but only {m['certainty']:.0%} sure"
+                         for name, m in unclear if m["certainty"] < CONFIDENT)
+        made = check("trips", "same_weighing", label, "review",
+                     f"{detail}, but Jev wasn't sure of every time: {read}. Check the gross time on both slips.",
+                     min(m["certainty"] for _, m in unclear), images=[ours])
+    made["related"] = related(o.disposal_id for o, _ in found)
+    return made
+
+
 def overlap(vehicle: str, images: dict[str, list[dict]], others: list[Other], flagged: set[int], slack: int,
             around=None) -> dict | None:
     """The vehicle can't be on two trips at once: this trip's time out (`busy_time`) overlapping another disposal's by
@@ -136,7 +185,7 @@ def overlap(vehicle: str, images: dict[str, list[dict]], others: list[Other], fl
 
 
 def checks(vehicle: str | None, analysis: dict, others: list[Other], slack: int = Limits().clock_slack,
-           around=None) -> list[dict]:
+           around=None, quantity: str | None = None) -> list[dict]:
     """Every check across disposals for one checked disposal, `slack` the minutes cameras' clocks may differ.
     Without a vehicle number, only one saying it wasn't compared. Each other disposal is flagged by the first check
     that finds it."""
@@ -149,6 +198,9 @@ def checks(vehicle: str | None, analysis: dict, others: list[Other], slack: int 
     reuse = reused(images, others)
     made.append(reuse)
     flagged = {r["id"] for r in reuse.get("related", [])}
+    if c := same_weighing(images, quantity, others, flagged, around):
+        made.append(c)
+        flagged |= {r["id"] for r in c.get("related", [])}
     if c := overlap(vehicle, images, others, flagged, slack, around):
         made.append(c)
         flagged |= {r["id"] for r in c.get("related", [])}

@@ -219,7 +219,7 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
     if d.bad_plant:
         checks.append(bad_plant_check(d.bad_plant, trip["images"]["unloading"]))
     checks += entry_checks.checks(request, trip["images"], std.collection_radius, d.day)
-    checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack, d.day)
+    checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack, d.day, d.quantity_key)
     trip["verdict"] = {**trip["verdict"], **proof_check.decide_parts(checks)}
     for kind, key, why in unavailable:
         log.warning("%s: %s %s %s", request["requestId"], WORDS[kind], key, why)

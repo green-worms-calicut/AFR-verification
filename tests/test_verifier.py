@@ -584,7 +584,7 @@ class CompareTests(unittest.TestCase):
         self.assertIsNone(self.flag(checked, "overlap"))
 
     def test_another_trip_at_the_same_time_is_a_problem_whatever_the_quantity(self):
-        uploads, jev = other_trip()  # other photos, stamped 02:40-04:09 as disposal 1000's
+        uploads, jev = other_trip(bill=(FIRST, {**FINAL, **at("gross", "03:40")}))  # other photos, stamped 02:40-04:09 as disposal 1000's
         checked = self.checked(uploads, jev, [self.first()], quantity=999)
         flag = self.flag(checked, "overlap")
         self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
@@ -599,14 +599,14 @@ class CompareTests(unittest.TestCase):
         uploads, jev = other_trip("c-", 0, loading={**LOADING, **stamp("05:20")}, quality=60,
                                   unloading=({**UNLOADING, **stamp("06:40")}, unsure), bill=(FIRST, {**FINAL, **at("gross", "05:00")}))
         doubtful = compare_disposals.Other(1001, self.checked(uploads, jev, disposal_id=1001).analysis)
-        uploads, jev = other_trip()
+        uploads, jev = other_trip(bill=(FIRST, {**FINAL, **at("gross", "03:40")}))
         flag = self.flag(self.checked(uploads, jev, [self.first(), doubtful], quantity=999), "overlap")
         self.assertEqual(flag["kind"], "problem found")
         self.assertIn("It may also overlap disposal 1001, by stamps Jev wasn't sure of", flag["message"])
         self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}, {"type": "disposal_log", "id": 1001}])
 
     def test_a_pair_is_flagged_once_by_the_most_specific_check(self):
-        uploads, jev = other_trip()  # the same moments too, but overlap already names disposal 1000
+        uploads, jev = other_trip(bill=(FIRST, {**FINAL, **at("gross", "03:40")}))  # the same moments too, but overlap already names disposal 1000
         checked = self.checked(uploads, jev, [self.first()])
         self.assertIsNotNone(self.flag(checked, "overlap"))
         self.assertIsNone(self.flag(checked, "same_moment"))
@@ -639,11 +639,45 @@ class CompareTests(unittest.TestCase):
         checked = self.checked(uploads, jev, [self.first()], quantity=999)
         self.assertNotIn("overlap", {c["key"] for c in checked.analysis["verdict"]["checks"]})
 
+    def test_a_new_photo_of_the_same_slip_is_the_same_weighing(self):
+        uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")})
+        # other photos, the same bill readings as disposal 1000: gross 03:30 on 15/10
+        flag = self.flag(self.checked(uploads, jev, [self.first()]), "same_weighing")
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
+        self.assertIn("disposal/2026/10/15/b-weighbill2.jpg shows the gross weighing at 03:30 on 15/10, the same as "
+                      "disposal 1000's slip disposal/2026/10/15/weighbill2.jpg", flag["message"])
+        self.assertIn("One weighing can't be proof for two disposals.", flag["message"])
+
+    def test_the_same_net_weight_is_named_when_both_quantities_match(self):
+        first = compare_disposals.Other(1000, self.first().analysis, f"{QUANTITY} kg")
+        uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")})
+        flag = self.flag(self.checked(uploads, jev, [first]), "same_weighing")
+        self.assertIn(f"and the same net weight, {QUANTITY} kg", flag["message"])
+
+    def test_an_unsure_gross_time_asks_a_person(self):
+        unsure = (FIRST, {**FINAL, **at("gross", "03:31", confidence=0.4)})
+        uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")}, bill=unsure)
+        flag = self.flag(self.checked(uploads, jev, [self.first()]), "same_weighing")
+        self.assertEqual(flag["kind"], "please check")
+        self.assertIn("40% sure", flag["message"])
+
+    def test_three_minutes_apart_is_another_weighing(self):
+        uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")},
+                                  bill=(FIRST, {**FINAL, **at("gross", "03:33")}))
+        checked = self.checked(uploads, jev, [self.first()])
+        self.assertEqual(next(c for c in checked.analysis["verdict"]["checks"] if c["key"] == "same_weighing")["status"], "pass")
+
+    def test_one_morning_tare_is_not_the_same_weighing(self):
+        morning = (FIRST, {**FINAL, **at("gross", "06:30")})  # tare 02:00 as disposal 1000's, another gross
+        uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")}, bill=morning)
+        self.assertIsNone(self.flag(self.checked(uploads, jev, [self.first()]), "same_weighing"))
+
     def test_alone_every_comparison_passes(self):
         uploads, jev = make_trip()
         checks = {c["key"]: c["status"] for c in self.checked(uploads, jev).analysis["verdict"]["checks"]}
-        self.assertEqual({k: checks[k] for k in ("same_file", "reused", "same_moment", "overlap")},
-                         dict.fromkeys(("same_file", "reused", "same_moment", "overlap"), "pass"))
+        self.assertEqual({k: checks[k] for k in ("same_file", "reused", "same_weighing", "same_moment", "overlap")},
+                         dict.fromkeys(("same_file", "reused", "same_weighing", "same_moment", "overlap"), "pass"))
 
     def test_one_file_as_collection_and_unloading_photo_is_a_problem(self):
         uploads, jev = make_trip(same=(("loading", 0, "unloading", 0),))
@@ -1262,6 +1296,12 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                                                             data_version="sha256:bbb"))
         self.assertEqual(await database.others(self.svc.pool, 1001, NUMBER, date(2026, 10, 15)), [],
                          "its earlier photos may have been changed")
+
+    async def test_others_carry_the_quantity(self):
+        await self.post(disposal(self.store_trip(), disposal_id=1000))
+        await self.work()
+        rows = await database.others(self.svc.pool, 1001, NUMBER, date(2026, 10, 15))
+        self.assertEqual([(i, q) for i, _, q in rows], [(1000, f"{QUANTITY} kg")])
 
     async def test_only_disposals_within_a_day_are_compared(self):
         uploads = self.store_trip()

@@ -280,7 +280,8 @@ Each disposal is checked as one trip with `proof_check`. Its weigh bills, collec
 
 Each disposal is also compared with what was kept for other disposals (`verifier/compare_disposals.py`). It only looks at its vehicle's other disposals with a trip within a day of its own date, each as last checked, and never at its own earlier requests (those are edits).
 - An image also in such a disposal is a problem if it's an exact copy, and asks a person if it's a look-alike (`reused`). This applies whatever the quantity entered: photos borrowed from another trip come with a different quantity. On 23 Oct, 173186's collection photos were 172929's unloading photos (1870 against 1990 kg).
-- A collection or unloading photo stamped within 5 minutes of one in another disposal asks a person (`same_moment`). Each other disposal is flagged once, by the first check that finds it, in the order reused, overlap, same moment, so `same_moment` is left for photos close in time whose trips don't overlap.
+- A collection or unloading photo stamped within 5 minutes of one in another disposal asks a person (`same_moment`). Each other disposal is flagged once, by the first check that finds it, in the order reused, same weighing, overlap, same moment, so `same_moment` is left for photos close in time whose trips don't overlap.
+- The same gross weighing (within 2 minutes, on the date) on the final slips of two disposals of one vehicle is a problem when Jev was sure of both times, else it asks a person (`same_weighing`): one weighing can't be proof for two disposals, even from new photos of the slip. It names the same net weight when both quantities and both net-weight answers match. The tare isn't compared, as one morning tare is printed on every slip of the day.
 - A trip whose photos (first collection photo to last unloading photo) overlap another disposal's by more than the clock slack is a problem, whatever its quantity (`overlap`). The weighings aren't used: one morning tare is often printed on every slip of the day, which made normal second and third trips look like overlaps (about 40 wrong flags on 19 and 23 Oct).
 - Within the disposal itself, one file used as both a collection and an unloading photo is a problem (`same_file`). This one is part of every trip's checks, so the command line, the folder runner and the test page catch it too.
 
@@ -454,7 +455,7 @@ trips/ eval/ mockups/   real trips, saved answers and reports, design mockups: n
 | `verifier/api.py` | Receives gw_sales' requests (`POST /v1/verifications`) and answers `GET /health`. |
 | `verifier/tasks.py` | The queue's jobs: check a request, post its result, recover stalled or lost jobs. |
 | `verifier/disposal_check.py` | Checks a disposal with `proof_check` and turns its checks into gw_sales flags. |
-| `verifier/compare_disposals.py` | Compares a disposal with the same vehicle's other disposals: reused images, overlapping trips (by photo times), the same moment. |
+| `verifier/compare_disposals.py` | Compares a disposal with the same vehicle's other disposals: reused images, the same gross weighing, overlapping trips (by photo times), the same moment. |
 | `verifier/entry_checks.py` | Checks what was entered in gw_sales against the photos: a photo for every collection log, pickup days, the end time, the arrival after the pickups, and collected vs weighed (recorded only). |
 | `verifier/database.py` | Requests, the outbox of results, and what disposals are compared by. |
 | `verifier/migrate.py`, `verifier/migrations/` | Applies the database changes (ours and the queue's), each once, in order. |

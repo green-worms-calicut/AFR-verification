@@ -117,7 +117,7 @@ PART_OF = {
     "weigh_order": "real", "weigh_gap": "real", "weigh_day": "real", "time_in_tare": "real",
     "loading_timing": "real", "unloading_timing": "real", "unloading_day": "real",
     "loading_direct": "real", "unloading_direct": "real", "bill_direct": "real", "unloading_plant": "real",
-    "reused": "real", "overlap": "real",
+    "reused": "real", "overlap": "real", "same_weighing": "real",
     "loading_missing": "docs", "unloading_missing": "docs", "bill_missing": "docs",
     "loading_vehicle": "docs", "unloading_vehicle": "docs", "loading_stamp": "docs", "unloading_stamp": "docs",
     "bill_found": "docs", "net_weight": "docs", "gross_vs_tare": "docs",
@@ -343,6 +343,13 @@ def weighings(bill: dict, first_slip: dict | None = None, around=None) -> dict |
                           "source": f"the times printed at the top of the first and final slips, {first['choice']} first",
                           "slips": [first_slip["name"], bill["name"]]})
     return max(found, key=lambda w: w["certainty"], default=None)
+
+
+def trip_weighings(images: dict[str, list[dict]], around=None) -> dict | None:
+    """The weighings of a trip from its final and first slips (`weighings`); None without a final slip."""
+    bills = images.get("bill", [])
+    final = final_slip(bills)
+    return weighings(final, first_slip(bills), around) if final else None
 
 
 def first_slip(bills: list[dict]) -> dict | None:
@@ -903,7 +910,7 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     checks += bill_checks(bills, vehicle_number, quantity, verra, weighbridge)
 
     final = final_slip(bills)
-    w = weighings(final, first_slip(bills), around) if final else None
+    w = trip_weighings(images, around)
     gap = minutes_between(w["tare"], w["gross"]) if w else None  # positive when the tare was taken first
     not_checked = "so the weighing order and photo times weren't checked"
     if not w:

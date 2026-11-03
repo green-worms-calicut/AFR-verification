@@ -150,15 +150,16 @@ async def note_disposal(pool: AsyncConnectionPool, request_id: str, vehicle: str
                            "WHERE request_id = %s", (vehicle, quantity, day, request_id))
 
 
-async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str, day: date) -> list[tuple[int, dict]]:
+async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str,
+                 day: date) -> list[tuple[int, dict, str | None]]:
     """The other disposals of `vehicle` with a trip within a day of `day`, each as last edited: (disposal id,
-    proof_check's result). A disposal's earlier requests are its own edits, never others. One whose latest request
-    isn't analysed (still being checked, or it ended in an error) is left out: its earlier photos may have been
+    proof_check's result, the quantity entered). A disposal's earlier requests are its own edits, never others. One
+    whose latest request isn't analysed (still being checked, or it ended in an error) is left out: its earlier photos may have been
     changed, and one still being checked compares itself with this one when it runs (one vehicle at a time)."""
     async with pool.connection() as conn:
         cur = await conn.execute(
-            """SELECT disposal_id, analysis FROM (
-                   SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.vehicle_number, q.trip_day, r.analysis
+            """SELECT disposal_id, analysis, quantity FROM (
+                   SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.vehicle_number, q.trip_day, q.quantity, r.analysis
                    FROM verification_request q LEFT JOIN verification_result r USING (request_id)
                    WHERE q.disposal_id <> %(disposal)s AND q.disposal_id IN (
                        SELECT disposal_id FROM verification_request
