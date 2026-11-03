@@ -1399,6 +1399,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         async with self.svc.pool.connection() as conn:  # as a retry would: the same prints saved again
             rows = await (await conn.execute("SELECT kind, name, md5, dhash FROM image_print WHERE request_id = %s",
                                               (request["requestId"],))).fetchall()
+        self.assertTrue(rows)
         await database.save_prints(self.svc.pool, request["requestId"], [tuple(r) for r in rows])
         self.assertEqual(self.gw.stored[request["requestId"]]["outcome"], "passed")
         self.assertEqual(await database.copies(self.svc.pool, DISPOSAL, [r[2] for r in rows]), [])
@@ -1416,6 +1417,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         codes = {f["code"] for f in self.gw.stored[again["requestId"]]["flags"]}
         for code in ("overlap", "same_weighing", "same_moment"):
             self.assertNotIn(code, codes, "1000 is now another vehicle's")
+        self.assertEqual(await database.others(self.svc.pool, 1001, NUMBER, date(2026, 10, 15)), [],
+                         "1000's latest request is now KL07BC1234's")
         flag = {f["code"]: f for f in self.gw.stored[again["requestId"]]["flags"]}["reused"]
         self.assertIn("(KL07BC1234", flag["message"])
 
@@ -1444,6 +1447,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         codes = {f["code"] for f in self.gw.stored[again["requestId"]]["flags"]}
         for code in ("overlap", "same_moment", "same_weighing"):
             self.assertNotIn(code, codes, "the look-alike comparisons stay within a day")
+        self.assertEqual(await database.others(self.svc.pool, 1001, NUMBER, date(2026, 10, 15)), [],
+                         "1000 is two days earlier")
         self.assertIn("reused", codes, "an exact copy is found on any date")
 
     async def test_answers_are_saved_as_they_come(self):
