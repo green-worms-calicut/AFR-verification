@@ -207,6 +207,21 @@ async def copies(pool: AsyncConnectionPool, disposal_id: int, md5s: list[str]) -
         return [Copy(*row) for row in await cur.fetchall()]
 
 
+class PrintHistory:
+    """The worker thread's way to compare a request's image fingerprints with every other disposal's: saves them,
+    and only then (the save commits first) looks for exact copies, on `loop`, the worker's."""
+
+    def __init__(self, pool: AsyncConnectionPool, loop: asyncio.AbstractEventLoop, request_id: str, disposal_id: int):
+        self.pool, self.loop, self.request_id, self.disposal_id = pool, loop, request_id, disposal_id
+
+    def __call__(self, prints: list[ImagePrint]) -> list[Copy]:
+        return asyncio.run_coroutine_threadsafe(self.find(prints), self.loop).result()
+
+    async def find(self, prints: list[ImagePrint]) -> list[Copy]:
+        await save_prints(self.pool, self.request_id, prints)
+        return await copies(self.pool, self.disposal_id, [p[2] for p in prints])
+
+
 async def beat(pool: AsyncConnectionPool) -> None:
     """The worker is alive (migrations/007)."""
     async with pool.connection() as conn:

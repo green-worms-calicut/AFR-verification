@@ -1354,6 +1354,55 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.work()
         self.assertEqual(self.gw.stored[edit["requestId"]]["outcome"], "passed")
 
+    async def test_a_copy_of_another_vehicles_older_disposal_is_flagged(self):
+        uploads = self.store_trip()
+        await self.post(disposal(uploads, disposal_id=1000, vehicle={"id": 13, "vehicleNumber": "KL07BC1234"},
+                                 arrivalTime="2026-09-01T03:00:00.000Z"))
+        await self.work()
+        again = disposal(uploads, disposal_id=1001)
+        await self.post(again)
+        await self.work()
+        flag = {f["code"]: f for f in self.gw.stored[again["requestId"]]["flags"]}["reused"]
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
+        self.assertIn("(KL07BC1234, 01/09)", flag["message"])
+
+    async def test_a_copy_of_a_disposal_whose_check_ended_in_an_error_is_flagged(self):
+        uploads = self.store_trip()
+        first = disposal(uploads, disposal_id=1000)
+        await database.save_request(self.svc.pool, first)
+        await database.save_prints(self.svc.pool, first["requestId"],
+                                   [("loading", k, proof_check.fingerprints(v)["md5"], "00" * 8)
+                                    for k, v in files(uploads).items() if "collection" in k])
+        await database.save_result(self.svc.pool, first["requestId"], tasks.make_result(first, "error", error={"code": "X", "message": "x"}))
+        again = disposal(uploads, disposal_id=1001)
+        await self.post(again)
+        await self.work()
+        self.assertIn("reused", {f["code"] for f in self.gw.stored[again["requestId"]]["flags"]})
+
+    async def test_two_vehicles_checked_at_once_the_later_finds_the_earlier(self):
+        # Disposal 1000 (another vehicle) is still being checked: request and prints saved, no result yet.
+        uploads = self.store_trip()
+        first = disposal(uploads, disposal_id=1000, vehicle={"id": 13, "vehicleNumber": "KL07BC1234"})
+        await database.save_request(self.svc.pool, first)
+        await database.save_prints(self.svc.pool, first["requestId"],
+                                   [("bill", k, proof_check.fingerprints(v)["md5"], "00" * 8) for k, v in files(uploads).items()])
+        again = disposal(uploads, disposal_id=1001)
+        await self.post(again)
+        await self.work()
+        self.assertIn("reused", {f["code"] for f in self.gw.stored[again["requestId"]]["flags"]})
+
+    async def test_a_retried_request_never_matches_itself(self):
+        uploads = self.store_trip()
+        request = disposal(uploads)
+        await self.post(request)
+        await self.work()
+        async with self.svc.pool.connection() as conn:  # as a retry would: the same prints saved again
+            rows = await (await conn.execute("SELECT kind, name, md5, dhash FROM image_print WHERE request_id = %s",
+                                              (request["requestId"],))).fetchall()
+        await database.save_prints(self.svc.pool, request["requestId"], [tuple(r) for r in rows])
+        self.assertEqual(self.gw.stored[request["requestId"]]["outcome"], "passed")
+        self.assertEqual(await database.copies(self.svc.pool, DISPOSAL, [r[2] for r in rows]), [])
+
     async def test_a_disposal_is_compared_as_last_edited(self):
         uploads = self.store_trip()
         await self.post(disposal(uploads, disposal_id=1000))
@@ -1364,8 +1413,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         again = disposal(uploads, disposal_id=1001)
         await self.post(again)
         await self.work()
-        self.assertNotIn("reused", {f["code"] for f in self.gw.stored[again["requestId"]]["flags"]},
-                         "1000 is now another vehicle's")
+        codes = {f["code"] for f in self.gw.stored[again["requestId"]]["flags"]}
+        for code in ("overlap", "same_weighing", "same_moment"):
+            self.assertNotIn(code, codes, "1000 is now another vehicle's")
+        flag = {f["code"]: f for f in self.gw.stored[again["requestId"]]["flags"]}["reused"]
+        self.assertIn("(KL07BC1234", flag["message"])
 
     async def test_a_disposal_whose_last_edit_is_not_checked_yet_is_left_out(self):
         uploads = self.store_trip()
@@ -1389,7 +1441,10 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         again = disposal(uploads, disposal_id=1001)
         await self.post(again)
         await self.work()
-        self.assertEqual(self.gw.stored[again["requestId"]]["outcome"], "passed")
+        codes = {f["code"] for f in self.gw.stored[again["requestId"]]["flags"]}
+        for code in ("overlap", "same_moment", "same_weighing"):
+            self.assertNotIn(code, codes, "the look-alike comparisons stay within a day")
+        self.assertIn("reused", codes, "an exact copy is found on any date")
 
     async def test_answers_are_saved_as_they_come(self):
         request = disposal()

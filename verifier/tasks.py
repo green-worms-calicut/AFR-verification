@@ -179,9 +179,10 @@ async def verify(context, request_id: str) -> None:
             others = await others_of(request_id, request, svc.settings.verra_project)
             saved = database.SavedAnswers(svc.pool, asyncio.get_running_loop(), request_id,
                                           await database.saved_answers(svc.pool, request_id))
+            history = database.PrintHistory(svc.pool, asyncio.get_running_loop(), request_id, request["subject"]["id"])
             last_try = VERIFY_RETRY.gives_up(disposal_check.JevUnavailable(), context.job)
             checked = await asyncio.to_thread(disposal_check.check, request, svc.photos.fetch, svc.jev,
-                                              svc.settings.verra_project, others, saved, last_try)
+                                              svc.settings.verra_project, others, saved, last_try, history)
             result = make_result(request, checked.outcome, checked.flags, standard=checked.standard,
                                  extractions=checked.extractions)
             analysis, cost = checked.analysis, checked.cost_usd
