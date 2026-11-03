@@ -21,13 +21,16 @@ def logs(request: dict) -> list[dict]:
     return (request.get("reference") or {}).get("collectionLogs") or []
 
 
-def owners(request: dict) -> dict[str, int | None]:
-    """Each collection photo's s3Key and its collection log's id, or None for a photo of the disposal itself."""
-    found = {}
+def owners(request: dict) -> dict[str, list[int | None]]:
+    """Each collection photo's s3Key and every collection log's id it is listed under (distinct, in order), with
+    None for a photo of the disposal itself."""
+    found: dict[str, list[int | None]] = {}
     for item in request.get("evidence") or []:
         if item.get("category") == "collection" and item.get("s3Key"):
             owner = item.get("owner") or {}
-            found[item["s3Key"]] = owner.get("id") if owner.get("type") == "collection_log" else None
+            log_id = owner.get("id") if owner.get("type") == "collection_log" else None
+            if log_id not in found.setdefault(item["s3Key"], []):
+                found[item["s3Key"]].append(log_id)
     return found
 
 
@@ -47,7 +50,7 @@ def has_photos(request: dict) -> list[dict]:
     entries = logs(request)
     if not entries:
         return []
-    taken = {i for i in owners(request).values() if i is not None}
+    taken = {i for ids in owners(request).values() for i in ids if i is not None}
     label = "Every collection log has a photo"
     missing = [e for e in entries if e["id"] not in taken]
     if not missing:
@@ -58,6 +61,64 @@ def has_photos(request: dict) -> list[dict]:
                   f"{log_name(e)[0].upper()}{log_name(e)[1:]} has no collection photo: ask for the photo taken at the pickup.")
         c["target"] = {"type": "collection_log", "id": e["id"]}
         made.append(c)
+    return made
+
+
+def log_same_photo(request: dict, images: dict[str, list[dict]]) -> list[dict]:
+    """Each collection log has a photo of its own: one photo listed under two logs, the same file under two keys in
+    different logs, or a look-alike in different logs, is not one pickup's photo of its own place. The same file
+    twice in one log only asks a person. One pass check, or one check per finding; none without logs."""
+    entries = {e["id"]: e for e in logs(request)}
+    if not entries:
+        return []
+    label = "Each collection log has its own photo"
+    named = lambda i: log_name(entries[i]) if i in entries else f"collection log {i}"
+    short = lambda i: named(i).removeprefix("collection log ")
+    owner_of = {k: [i for i in ids if i is not None] for k, ids in owners(request).items()}
+    prints = {r["name"]: r["prints"] for r in images.get("loading", []) if r["name"] in owner_of and r.get("prints")}
+    made, seen = [], set()
+
+    def found(status: str, detail: str, keys: list[str], target: int | None = None) -> None:
+        c = check("collection", "log_same_photo", label, status, detail, images=keys)
+        if target is not None:
+            c["target"] = {"type": "collection_log", "id": target}
+        made.append(c)
+
+    for key, ids in owner_of.items():
+        if len(ids) > 1:
+            found("fail", f"{key} is the photo of both {named(ids[0])} and {' and '.join(short(i) for i in ids[1:])}. "
+                  "Each pickup needs its own photo.", [key])
+    by_md5: dict[str, list[str]] = {}
+    for key, p in prints.items():
+        by_md5.setdefault(p["md5"], []).append(key)
+    for keys in by_md5.values():
+        for n, a in enumerate(keys):
+            for b in keys[n + 1:]:
+                seen.add(frozenset((a, b)))
+                apart = [(x, y) for x in owner_of[a] for y in owner_of[b] if x != y]
+                if apart:
+                    x, y = apart[0]
+                    found("fail", f"{a} and {b} are the same file, the photo of {named(x)} and of {short(y)}. "
+                          "Each pickup needs its own photo.", [a, b])
+                elif set(owner_of[a]) & set(owner_of[b]):
+                    x = next(i for i in owner_of[a] if i in owner_of[b])
+                    found("review", f"{a} and {b} are the same file, both under {named(x)}. Check the log has a photo of "
+                          "its own pickup.", [a, b], x)
+    index = proof_check.ImageIndex()
+    for key, p in prints.items():
+        for i in owner_of[key]:
+            index.add(str(i), key, p)
+    for key, p in prints.items():
+        for i in owner_of[key]:
+            for m in index.matches(p, str(i)):
+                pair = frozenset((key, m["name"]))
+                if m["exact"] or m["name"] == key or pair in seen:
+                    continue
+                seen.add(pair)
+                found("review", f"{key} ({named(i)}) and {m['name']} ({named(int(m['trip']))}) look the same. Compare them.",
+                      [key, m["name"]])
+    if not made:
+        return [check("collection", "log_same_photo", label, "pass", f"Each of the {len(entries)} logs has its own photo")]
     return made
 
 
@@ -72,18 +133,18 @@ def photo_date(request: dict, images: dict[str, list[dict]], around=None) -> dic
     for r, m in photo_moments(images.get("loading", []), around):
         if m is None or r["name"] not in owner_of:  # an unreadable stamp is the GPS stamp check's to ask about
             continue
-        log_id = owner_of[r["name"]]
-        if log_id is None:
-            days = sorted({f"{at:%d/%m}" for _, at in pickups.values()})
-            why = f"the disposal's logs were picked up on {and_list(days)}"
-        elif log_id in pickups:
-            entry, at = pickups[log_id]
-            days, why = [f"{at:%d/%m}"], f"{log_name(entry)} was picked up on {at:%d/%m}"
-        else:
-            continue
-        checked += 1
-        if m["date"] not in days:
-            wrong.append((r["name"], m, why))
+        for log_id in owner_of[r["name"]]:  # a photo listed under two logs must fit each
+            if log_id is None:
+                days = sorted({f"{at:%d/%m}" for _, at in pickups.values()})
+                why = f"the disposal's logs were picked up on {and_list(days)}"
+            elif log_id in pickups:
+                entry, at = pickups[log_id]
+                days, why = [f"{at:%d/%m}"], f"{log_name(entry)} was picked up on {at:%d/%m}"
+            else:
+                continue
+            checked += 1
+            if m["date"] not in days:
+                wrong.append((r["name"], m, why))
     if not checked:
         return None
     label = "Collection photos taken on the pickup day"
@@ -93,7 +154,7 @@ def photo_date(request: dict, images: dict[str, list[dict]], around=None) -> dic
     detail = "; ".join(f"{name} was stamped {m['date']}, but {why}" for name, m, why in wrong)
     return check("collection", "collection_photo_date", label, "review",
                  f"{detail}. Every collection photo must be taken on its pickup day: check the photo, or the pickup date "
-                 "entered.", min(m["certainty"] for _, m, _ in wrong), images=[name for name, _, _ in wrong])
+                 "entered.", min(m["certainty"] for _, m, _ in wrong), images=list(dict.fromkeys(name for name, _, _ in wrong)))
 
 
 def too_late(request: dict, images: dict[str, list[dict]], around=None) -> dict | None:
@@ -156,7 +217,7 @@ def known_point(entry: dict) -> tuple[float, float] | None:
 def photos_to_place(request: dict) -> set[str]:
     """The collection photos whose GPS position Jev should read: those of logs whose collection point is known."""
     known = {e["id"] for e in logs(request) if known_point(e)}
-    return {key for key, log_id in owners(request).items() if log_id in known}
+    return {key for key, ids in owners(request).items() if known & set(ids)}
 
 
 def collection_points(request: dict, images: dict[str, list[dict]], radius: float) -> list[dict]:
@@ -165,7 +226,7 @@ def collection_points(request: dict, images: dict[str, list[dict]], radius: floa
     owner_of, made = owners(request), []
     for e in logs(request):
         point = point_of(e)
-        photos = [r for r in images.get("loading", []) if point and owner_of.get(r["name"]) == e["id"]]
+        photos = [r for r in images.get("loading", []) if point and e["id"] in owner_of.get(r["name"], [])]
         if not photos:  # no point known, or no photo of it to check (has_photos asks for one)
             continue
         name = (e.get("collectionPoint") or {}).get("name")
@@ -186,7 +247,7 @@ def collection_points(request: dict, images: dict[str, list[dict]], radius: floa
 def checks(request: dict, images: dict[str, list[dict]], radius: float = 500, around=None) -> list[dict]:
     """Every check of what was entered, for one disposal's request and its checked images; `radius` is how far from
     its collection point a collection photo may be, and `around` the trip's date."""
-    return [*has_photos(request),
+    return [*has_photos(request), *log_same_photo(request, images),
             *(c for c in (photo_date(request, images, around), too_late(request, images, around),
                           after_collections(request)) if c),
             *collection_points(request, images, radius)]

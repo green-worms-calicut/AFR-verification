@@ -410,6 +410,54 @@ class EntryCheckTests(unittest.TestCase):
         self.assertEqual(flag["target"], {"type": "collection_log", "id": 45002})
         self.assertIn("Collection log 45002 (XYZ School, Main Kitchen) has no collection photo", flag["message"])
 
+    def two_logs(self, uploads, split=True):
+        """Two logs, with the second collection photo under 45002 (or both under 45001 when not `split`)."""
+        request = disposal(uploads, logs=[log(45001), log(45002, client={"name": "XYZ School"})])
+        if split:
+            for item in request["evidence"]:
+                if item["s3Key"].endswith(uploads["loading"][1].name):
+                    item["owner"] = {"type": "collection_log", "id": 45002}
+        return request
+
+    def test_one_photo_listed_under_two_logs_is_a_problem(self):
+        uploads, self.jev = make_trip()
+        request = disposal(uploads, logs=[log(45001), log(45002, client={"name": "XYZ School"})])
+        shared = next(e for e in request["evidence"] if e["category"] == "collection")  # collection1.jpg
+        request["evidence"].append({**shared, "owner": {"type": "collection_log", "id": 45002}})
+        flag = next(f for f in self.checked(request, uploads).flags if f["code"] == "log_same_photo")
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
+        self.assertIn("is the photo of both collection log 45001 (ABC Hotel, Main Kitchen) and 45002 (XYZ School, Main Kitchen)",
+                      flag["message"])
+        self.assertIn("Each pickup needs its own photo.", flag["message"])
+
+    def test_the_same_file_under_two_keys_in_two_logs_is_a_problem(self):
+        uploads, self.jev = make_trip(same=(("loading", 0, "loading", 1),))
+        flag = next(f for f in self.checked(self.two_logs(uploads), uploads).flags if f["code"] == "log_same_photo")
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
+        self.assertIn("collection1.jpg and collection-logs/2026/10/15/collection2.jpg are the same file", flag["message"])
+        self.assertNotIn("target", flag)
+
+    def test_a_look_alike_in_two_logs_asks_a_person(self):
+        uploads, self.jev = make_trip()
+        uploads["loading"][1] = Upload(uploads["loading"][1].name, coloured(COLOURS[0], 60))
+        flag = next(f for f in self.checked(self.two_logs(uploads), uploads).flags if f["code"] == "log_same_photo")
+        self.assertEqual(flag["kind"], "please check")
+        self.assertIn("look the same. Compare them.", flag["message"])
+
+    def test_the_same_file_twice_in_one_log_asks_a_person(self):
+        uploads, self.jev = make_trip(same=(("loading", 0, "loading", 1),))
+        checked = self.checked(self.two_logs(uploads, split=False), uploads)
+        flag = next(f for f in checked.flags if f["code"] == "log_same_photo")
+        self.assertEqual(flag["kind"], "please check")
+        self.assertIn("are the same file, both under collection log 45001 (ABC Hotel, Main Kitchen)", flag["message"])
+        self.assertEqual(flag["target"], {"type": "collection_log", "id": 45001})
+
+    def test_each_log_with_its_own_photo_passes(self):
+        uploads, self.jev = make_trip()
+        checked = self.checked(self.two_logs(uploads), uploads)
+        self.assertEqual(self.check_of(checked, "log_same_photo")["status"], "pass")
+        self.assertFalse([f for f in checked.flags if f["code"] == "log_same_photo"])
+
     def test_unloading_just_before_new_year_is_not_late(self):
         # End 31 Dec 23:00 IST, unloading stamped 31/12 23:20: by the end time + 1 h 30 min, across New Year.
         images = {"unloading": [{"name": "unloading1.jpg", "readings": [

@@ -131,6 +131,7 @@ PART_OF = {
     # taken on its pickup day, no unloading photo long after the end time, and the collections before the arrival.
     "collection_has_photos": "docs", "collection_photo_date": "real", "unloading_too_late": "real",
     "disposal_after_collections": "docs", "weighbridge_matches": "docs", "collection_point": "real",
+    "log_same_photo": "real",
 }
 
 
