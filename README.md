@@ -298,15 +298,28 @@ These flags name the other disposals in `related`. Checks of one vehicle's dispo
 
 The limits a trip is checked by are those of its own day (`verifier/standards.py`, `STANDARDS`). To change a limit, add an entry from the day it applies rather than editing one, unless every trip is to be checked again by it: standard "2" (plant 2 km, collection points 4 km) replaced "1" (500 m each) for all trips on 2 Nov 2026. The Jev versions are pinned there too (`MODEL`, `BOX_MODEL`, `jev-1.14.0`), so answers don't change when an alias moves. Only upgrade them after testing.
 
-A dev Postgres for it runs in Docker, on port 5433:
+A dev Postgres for it runs in Docker, on port 5433, with a password. Make the password and keep it in `~/.pgpass` (read by `psql` and the tests) and in `deploy/.env` (git-ignored; read by the verifier), without it ever being printed:
 
 ```bash
+pw=$(openssl rand -hex 32)
+echo "127.0.0.1:5433:*:verifier:$pw" >> ~/.pgpass && chmod 600 ~/.pgpass
 docker run -d --name jev-verifier-db --restart unless-stopped -p 127.0.0.1:5433:5432 \
   -v jev-verifier-pg:/var/lib/postgresql -e POSTGRES_USER=verifier -e POSTGRES_DB=verifier \
-  -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18
+  -e POSTGRES_PASSWORD="$pw" postgres:18
+echo "VERIFIER_DATABASE_URL=postgresql://verifier:$pw@127.0.0.1:5433/verifier" >> deploy/.env && chmod 600 deploy/.env
+unset pw
 ```
 
-Settings come from the environment: `VERIFIER_DATABASE_URL` (`postgresql://verifier@127.0.0.1:5433/verifier` for the dev one), `VERIFIER_WEBHOOK_SECRET` (gw_sales signs its requests with it), `VERIFIER_CALLBACK_SECRET` (we sign our results with it), `VERIFIER_API_KEY` (sent as `X-API-Key` with our results), `GW_SALES_URL` (results are only posted under it), `VERIFIER_S3_BUCKET` (the photos; AWS credentials and region come the usual AWS ways), the TypeSafe key (`TYPESAFE_API_KEY`, or on a laptop the keyring, as above), optionally `VERIFIER_VERRA_PROJECT` (the project code that makes a disposal a Verra project trip; unset, no Verra checks), and while changing the webhook secret `VERIFIER_WEBHOOK_SECRET_NEXT` (the new one, accepted as well as the old until gw_sales has switched; then make it the only one). The secrets must be at least 32 characters (`openssl rand -hex 32`) and `GW_SALES_URL` must be `https://` (`http://localhost` or `http://127.0.0.1` only for tests), or the service won't start. Before deploying this, check the dev server's secrets: if one is shorter, agree a new one with gw_sales first. A request over 1 MB is refused (413) before its signature is checked.
+A dev Postgres started the older way, with `POSTGRES_HOST_AUTH_METHOD=trust`, lets anyone on the laptop in without a password. To give it one, keep the existing volume: set the password (`ALTER ROLE verifier PASSWORD '…'`, with the same one in `~/.pgpass` and `deploy/.env` as above), then make its network logins ask for it and reload:
+
+```bash
+sudo docker exec jev-verifier-db sed -i -E '/^host/ s/trust$/scram-sha-256/' /var/lib/postgresql/18/docker/pg_hba.conf
+psql -h 127.0.0.1 -p 5433 -U verifier -d verifier -c 'select pg_reload_conf()'
+```
+
+Logins from inside the container stay password-free, so `sudo docker exec jev-verifier-db psql -U verifier` still gets in if the password is lost.
+
+Settings come from the environment: `VERIFIER_DATABASE_URL` (`postgresql://verifier:<password>@127.0.0.1:5433/verifier` for the dev one, kept in `deploy/.env`; load it with `set -a; source deploy/.env; set +a`), `VERIFIER_WEBHOOK_SECRET` (gw_sales signs its requests with it), `VERIFIER_CALLBACK_SECRET` (we sign our results with it), `VERIFIER_API_KEY` (sent as `X-API-Key` with our results), `GW_SALES_URL` (results are only posted under it), `VERIFIER_S3_BUCKET` (the photos; AWS credentials and region come the usual AWS ways), the TypeSafe key (`TYPESAFE_API_KEY`, or on a laptop the keyring, as above), optionally `VERIFIER_VERRA_PROJECT` (the project code that makes a disposal a Verra project trip; unset, no Verra checks), and while changing the webhook secret `VERIFIER_WEBHOOK_SECRET_NEXT` (the new one, accepted as well as the old until gw_sales has switched; then make it the only one). The secrets must be at least 32 characters (`openssl rand -hex 32`) and `GW_SALES_URL` must be `https://` (`http://localhost` or `http://127.0.0.1` only for tests), or the service won't start. Before deploying this, check the dev server's secrets: if one is shorter, agree a new one with gw_sales first. A request over 1 MB is refused (413) before its signature is checked.
 
 ```bash
 .venv/bin/python -m verifier migrate      # apply the queue's and our migrations not applied yet
