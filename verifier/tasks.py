@@ -21,7 +21,7 @@ from psycopg_pool import AsyncConnectionPool
 from typesafe_sdk import TypeSafeClient
 
 import proof_check
-from verifier import VERSION, compare_disposals, database, disposal_check, s3_photos, signatures, standards
+from verifier import VERSION, compare_disposals, database, disposal_check, entry_checks, s3_photos, signatures, standards
 from verifier.settings import Settings
 from verifier.s3_photos import Photos
 
@@ -177,12 +177,16 @@ async def verify(context, request_id: str) -> None:
         analysis = cost = None
         try:
             others = await others_of(request_id, request, svc.settings.verra_project)
+            logs = await database.other_logs(svc.pool, request["subject"]["id"],
+                                             [e["id"] for e in entry_checks.logs(request)],
+                                             disposal_check.disposal(request, svc.settings.verra_project).day)
             saved = database.SavedAnswers(svc.pool, asyncio.get_running_loop(), request_id,
                                           await database.saved_answers(svc.pool, request_id))
             history = database.PrintHistory(svc.pool, asyncio.get_running_loop(), request_id, request["subject"]["id"])
             last_try = VERIFY_RETRY.gives_up(disposal_check.JevUnavailable(), context.job)
             checked = await asyncio.to_thread(disposal_check.check, request, svc.photos.fetch, svc.jev,
-                                              svc.settings.verra_project, others, saved, last_try, history)
+                                              svc.settings.verra_project, others, saved, last_try, history=history,
+                                              other_logs=logs)
             result = make_result(request, checked.outcome, checked.flags, standard=checked.standard,
                                  extractions=checked.extractions)
             analysis, cost = checked.analysis, checked.cost_usd

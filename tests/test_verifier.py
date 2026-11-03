@@ -365,18 +365,53 @@ def log(log_id: int = 45001, picked_up: str = "2026-10-14T21:00:00.000Z", **kw) 
             "collectionPoint": {"name": "Main Kitchen", "location": None}, **kw}
 
 
+MATERIALS = [{"materialName": "PET", "quantity": 120, "unit": "kg"}]
+
+
 class EntryCheckTests(unittest.TestCase):
     """What was entered in gw_sales (collection logs, times) against the photos, every time turned from UTC to IST."""
 
-    def checked(self, request=None, uploads=None, **kw):
+    def checked(self, request=None, uploads=None, other_logs=(), **kw):
         if uploads is None:
             uploads, self.jev = make_trip()
         request = request or disposal(uploads, **kw)
         with self.jev.client() as client:
-            return disposal_check.check(request, files(uploads).get, client)
+            return disposal_check.check(request, files(uploads).get, client, other_logs=list(other_logs))
 
     def check_of(self, checked, key):
         return next((c for c in checked.analysis["verdict"]["checks"] if c["key"] == key), None)
+
+    def test_a_log_on_another_disposal_is_a_problem(self):
+        checked = self.checked(logs=[log(45001, materials=MATERIALS)], other_logs=[(1000, log(45001, materials=MATERIALS))])
+        flag = next(f for f in checked.flags if f["code"] == "log_reused")
+        self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
+        self.assertEqual(flag["target"], {"type": "collection_log", "id": 45001})
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
+        self.assertIn("is also on disposal 1000. One pickup can't be counted in two disposals.", flag["message"])
+        self.assertNotIn("log_repeated", {f["code"] for f in checked.flags}, "the same id is reused's, not also repeated")
+
+    def test_the_same_pickup_under_another_id_asks_a_person(self):
+        checked = self.checked(logs=[log(45001, materials=MATERIALS)], other_logs=[(1000, log(46001, materials=MATERIALS))])
+        flag = next(f for f in checked.flags if f["code"] == "log_repeated")
+        self.assertEqual(flag["kind"], "please check")
+        self.assertIn("46001", flag["message"])
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
+
+    def test_the_same_pickup_twice_in_one_disposal_asks_a_person(self):
+        checked = self.checked(logs=[log(45001, materials=MATERIALS), log(45002, materials=MATERIALS)])
+        flag = next(f for f in checked.flags if f["code"] == "log_repeated")
+        self.assertIn("collection log 45002 (on this disposal)", flag["message"])
+
+    def test_two_pickups_the_same_day_with_other_weights_pass(self):
+        other = log(46001, materials=[{"materialName": "PET", "quantity": 95, "unit": "kg"}])
+        checked = self.checked(logs=[log(45001, materials=MATERIALS)], other_logs=[(1000, other)])
+        self.assertNotIn("log_repeated", {f["code"] for f in checked.flags})
+
+    def test_a_log_without_materials_or_pickup_is_not_matched(self):
+        bare = log(46001, collectionDate=None)
+        checked = self.checked(logs=[log(45001), bare], other_logs=[(1000, log(46002))])
+        self.assertNotIn("log_repeated", {f["code"] for f in checked.flags})
+        self.assertNotIn("log_reused", {f["code"] for f in checked.flags})
 
     def test_pickup_in_utc_is_compared_as_ist(self):
         checked = self.checked(logs=[log()])  # 14 Oct 21:00 UTC = 15 Oct IST, the photos' day
@@ -1000,6 +1035,25 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             await conn.execute((migrate.OURS / "008_image_print.sql").read_text().split("-- backfill\n", 1)[1])
         [(n,)] = await self.sql("SELECT count(*) FROM image_print")
         self.assertEqual(n, 6)
+
+    async def test_other_logs_finds_a_log_id_on_any_date_and_others_within_a_day(self):
+        day = date(2026, 10, 15)
+        for disposal_id, log_id, back in ((1000, 45001, 60), (1001, 46001, 1), (1002, 47001, 3), (DISPOSAL, 45001, 0)):
+            request = disposal(disposal_id=disposal_id, logs=[log(log_id)])
+            await database.save_request(self.svc.pool, request)
+            await database.note_disposal(self.svc.pool, request["requestId"], None, None, day - timedelta(days=back))
+        found = await database.other_logs(self.svc.pool, DISPOSAL, [45001], day)
+        self.assertEqual(sorted((i, e["id"]) for i, e in found), [(1000, 45001), (1001, 46001)])
+
+    async def test_a_log_on_two_disposals_is_flagged_end_to_end(self):
+        uploads = self.store_trip()
+        await self.post(disposal(uploads, disposal_id=1000, logs=[log(45001)]))
+        await self.work()
+        second = disposal(uploads, disposal_id=1001, logs=[log(45001)], vehicle={"id": 13, "vehicleNumber": "kl 07 zz 9999"})
+        await self.post(second)
+        await self.work()
+        [(result,)] = await self.sql("SELECT body FROM verification_result WHERE request_id = %s", second["requestId"])
+        self.assertIn("log_reused", {f["code"] for f in result["flags"]})
 
     async def test_copies_are_found_in_any_vehicles_latest_request_never_its_own(self):
         a = disposal(disposal_id=1000)

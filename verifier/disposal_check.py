@@ -179,12 +179,14 @@ def extractions(trip: dict, unavailable: list[str]) -> dict:
 
 def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeClient,
           verra_project: str | None = None, others: list[compare_disposals.Other] = (), cache=None,
-          last_try: bool = False, history: Callable[[list[ImagePrint]], list[Copy]] | None = None) -> Checked:
+          last_try: bool = False, history: Callable[[list[ImagePrint]], list[Copy]] | None = None,
+          other_logs: list[tuple[int, dict]] = ()) -> Checked:
     """Check one request's disposal, and compare it with `others`: the same vehicle's other disposals within a day
     of its date (`database.others`). `cache` holds the request's Jev answers from earlier tries. S3 failing raises,
     and so does Jev being busy or down for an image (`JevUnavailable`), so the job retries; on the `last_try` such an
     image is flagged and the rest sent, unless Jev answered for none. `history`, if given, is handed a fingerprint of
-    every image fetched (before Jev is asked) and returns the copies of them in any disposal."""
+    every image fetched (before Jev is asked) and returns the copies of them in any disposal. `other_logs` are the
+    collection logs of other disposals (`database.other_logs`)."""
     d = disposal(request, verra_project)
     std = standards.for_day(d.day)
     uploads, unavailable = {kind: [] for kind in WORDS}, []  # (kind, s3Key, why)
@@ -231,7 +233,7 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
     checks += [c for c in trip["verdict"]["checks"] if c["key"] not in {MISSING_KEY[k] for k in gone}]
     if d.bad_plant:
         checks.append(bad_plant_check(d.bad_plant, trip["images"]["unloading"]))
-    checks += entry_checks.checks(request, trip["images"], std.collection_radius, d.day)
+    checks += entry_checks.checks(request, trip["images"], std.collection_radius, d.day, other_logs)
     checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack, d.day, d.quantity_key,
                                        copies)
     trip["verdict"] = {**trip["verdict"], **proof_check.decide_parts(checks)}

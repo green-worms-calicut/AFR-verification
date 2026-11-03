@@ -173,6 +173,31 @@ async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str,
         return await cur.fetchall()
 
 
+async def other_logs(pool: AsyncConnectionPool, disposal_id: int, log_ids: list[int],
+                     day: date) -> list[tuple[int, dict]]:
+    """The collection logs, as sent, of other disposals' latest requests (analysed or not, errored or still being
+    checked) that either hold one of `log_ids` (any date; that log alone) or have a trip within a day of `day` (every
+    log): (disposal id, log). Never `disposal_id`'s own."""
+    ids = [json.dumps({"reference": {"collectionLogs": [{"id": i}]}}) for i in log_ids]
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """SELECT disposal_id, trip_day, body FROM (
+                   SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.trip_day, q.body
+                   FROM verification_request q
+                   WHERE q.disposal_id <> %(disposal)s AND q.disposal_id IN (
+                       SELECT disposal_id FROM verification_request
+                       WHERE trip_day BETWEEN %(day)s::date - 1 AND %(day)s::date + 1
+                          OR body @> ANY(%(ids)s::jsonb[]))
+                   ORDER BY q.disposal_id, q.received_at DESC) latest
+               ORDER BY disposal_id""", {"disposal": disposal_id, "day": day, "ids": ids})
+        found = []
+        for other, trip_day, body in await cur.fetchall():
+            near = trip_day is not None and abs((trip_day - day).days) <= 1
+            entries = (body.get("reference") or {}).get("collectionLogs") or []
+            found += [(other, e) for e in entries if near or e.get("id") in log_ids]
+        return found
+
+
 @dataclass
 class Copy:
     """An image of another disposal with the same md5 as one checked now."""
