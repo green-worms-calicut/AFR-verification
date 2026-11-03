@@ -817,6 +817,7 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(applied[0].startswith("procrastinate 3."), applied)
         self.assertIn("verifier/001_requests_and_results.sql", applied)
         self.assertIn("verifier/004_jev_answers.sql", applied)
+        self.assertIn("verifier/008_image_print.sql", applied)
         recorded = await self.recorded()
         self.assertTrue({"procrastinate/" + p.name for p in migrate.procrastinate_migrations()} <= recorded)
         self.assertEqual(await self.migrate(), [])
@@ -897,6 +898,31 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         for key, data in files(uploads).items():
             s3.put_object(Bucket=BUCKET, Key=key, Body=data)
         return uploads
+
+    async def test_the_migration_fills_prints_from_saved_results(self):
+        # A result saved before 008: its analysis holds the prints. Run 008's backfill SQL again and find them.
+        uploads = self.store_trip()
+        await self.post(disposal(uploads, disposal_id=1000))
+        await self.work()
+        await self.sql("TRUNCATE image_print")
+        async with self.svc.pool.connection() as conn:
+            await conn.execute((migrate.OURS / "008_image_print.sql").read_text().split("-- backfill\n", 1)[1])
+        [(n,)] = await self.sql("SELECT count(*) FROM image_print")
+        self.assertEqual(n, 6)
+
+    async def test_copies_are_found_in_any_vehicles_latest_request_never_its_own(self):
+        a = disposal(disposal_id=1000)
+        await database.save_request(self.svc.pool, a)
+        await database.save_prints(self.svc.pool, a["requestId"], [("loading", "k1.jpg", "m1", "0f" * 8)])
+        await database.save_prints(self.svc.pool, a["requestId"], [("loading", "k1.jpg", "m1", "0f" * 8)])  # a retry
+        found = await database.copies(self.svc.pool, 1001, ["m1", "m2"])
+        self.assertEqual([(c.name, c.disposal_id) for c in found], [("k1.jpg", 1000)])
+        self.assertEqual(await database.copies(self.svc.pool, 1000, ["m1"]), [], "never its own")
+        edit = disposal(disposal_id=1000, reason="edited", data_version="sha256:bbb")
+        await database.save_request(self.svc.pool, edit)
+        await database.save_prints(self.svc.pool, edit["requestId"], [("loading", "k2.jpg", "m2", "0f" * 8)])
+        self.assertEqual([c.name for c in await database.copies(self.svc.pool, 1001, ["m1", "m2"])], ["k2.jpg"],
+                         "an image dropped in an edit is forgotten")
 
     async def make_due(self):
         """Bring retries forward to now."""

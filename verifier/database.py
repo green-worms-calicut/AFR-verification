@@ -8,11 +8,14 @@ job last queued for it, so the sweep can tell when one went missing.
 import asyncio
 import json
 from collections.abc import MutableMapping
+from dataclasses import dataclass
 from datetime import date, datetime
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+
+ImagePrint = tuple[str, str, str, str]  # (kind, name, md5, dhash): proof_check's role, the s3Key, its fingerprints
 
 def dumps(value) -> str:
     """JSON for proof_check's results, which hold the odd date."""
@@ -168,6 +171,40 @@ async def others(pool: AsyncConnectionPool, disposal_id: int, vehicle: str,
                WHERE vehicle_number = %(vehicle)s AND trip_day BETWEEN %(day)s::date - 1 AND %(day)s::date + 1
                  AND analysis IS NOT NULL""", {"disposal": disposal_id, "vehicle": vehicle, "day": day})
         return await cur.fetchall()
+
+
+@dataclass
+class Copy:
+    """An image of another disposal with the same md5 as one checked now."""
+    name: str
+    kind: str
+    md5: str
+    disposal_id: int
+    vehicle: str | None
+    day: date | None
+
+
+async def save_prints(pool: AsyncConnectionPool, request_id: str, prints: list[ImagePrint]) -> None:
+    """Keep a request's image fingerprints (migrations/008). Safe to call again on a retry."""
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany("INSERT INTO image_print (request_id, kind, name, md5, dhash) "
+                                  "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                                  [(request_id, *p) for p in prints])
+
+
+async def copies(pool: AsyncConnectionPool, disposal_id: int, md5s: list[str]) -> list[Copy]:
+    """The images of other disposals, each as last edited (analysed, errored or still being checked), whose md5 is in
+    `md5s`: any vehicle, any date, never `disposal_id`'s own."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """SELECT p.name, p.kind, p.md5, q.disposal_id, q.vehicle_number, q.trip_day
+               FROM image_print p JOIN (
+                   SELECT DISTINCT ON (disposal_id) request_id, disposal_id, vehicle_number, trip_day
+                   FROM verification_request WHERE disposal_id <> %s
+                   ORDER BY disposal_id, received_at DESC) q USING (request_id)
+               WHERE p.md5 = ANY(%s) ORDER BY q.disposal_id, p.name""", (disposal_id, md5s))
+        return [Copy(*row) for row in await cur.fetchall()]
 
 
 async def beat(pool: AsyncConnectionPool) -> None:
