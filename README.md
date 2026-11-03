@@ -249,6 +249,14 @@ Changing the number, the quantity, a limit or an image clears the result, so a v
 
 Prints each image's answers and readings, then the verdict, timeline and limits, and each part's verdict and flags.
 
+### Count look-alike images: tools/measure_look_alikes.py
+
+```bash
+.venv/bin/python -m tools.measure_look_alikes --trips trips/ --db postgresql://verifier@127.0.0.1:5433/verifier
+```
+
+Counts pairs of images that only look alike (not the same file) across all saved images, inside and outside today's window (the same vehicle, a day apart; for `trips/`, the same date folder and vehicle), and writes the pairs outside it to `eval/look-alikes-YYYY-MM-DD.html` for a person to mark which are real copies. Read-only; no Jev, no S3. It changes nothing in the verifier.
+
 ### Check a whole day: tools/check_trip_folders.py
 
 ```bash

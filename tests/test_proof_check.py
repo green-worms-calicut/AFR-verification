@@ -1591,6 +1591,16 @@ class CheckTripFoldersTests(unittest.TestCase):
         self.assertEqual(fields, {"photo time", "plate matches", "slip kind", "bill number", "tare time", "gross time", "weighing order"})
 
 
+class MeasureLookAlikesTests(unittest.TestCase):
+    def test_look_alike_pairs_outside_the_window(self):
+        from tools import measure_look_alikes as m
+        base = 0x0F0F0F0F0F0F0F0F  # 32 bits set: not featureless
+        items = [("a", "1.jpg", "x", base), ("b", "2.jpg", "y", base ^ 0b11), ("c", "3.jpg", "x", base),
+                 ("d", "4.jpg", "z", 0)]
+        found = m.pairs(items, window=lambda g, h: {g, h} == {"a", "c"})
+        self.assertEqual([(p[0], p[1]) for p in found], [("1.jpg", "2.jpg")])
+
+
 class CheckTripFoldersPlaceTests(unittest.TestCase):
     def test_compare_positions_with_hand_read_values(self):
         unloading = ({**UNLOADING, **AT_PLANT}, {**UNLOADING, **stamped_at("11.440504", "75.941976")})
