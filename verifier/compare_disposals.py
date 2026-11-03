@@ -1,10 +1,11 @@
 """Checks across disposals, from what was kept when each was checked (its latest proof_check result).
 
-Only disposals of the same vehicle within a day of this trip's date are looked at, never this disposal itself
-(its earlier requests are edits), whatever their quantity: photos borrowed from another trip come with a different
-one (23 Oct 2026: 173186's collection photos were 172929's unloading photos). An image also in such a disposal is a
-problem if an exact copy and asks a person if a look-alike (`reused`); an exact copy is also looked for in any
-disposal of any vehicle and date, from the fingerprints kept with every request (`database.Copy`). The trip's time out, from its first
+An exact copy of an image is found in any other disposal, of any vehicle and date, from the fingerprints kept with
+every request (`database.Copy`), at most MOST_NAMED disposals named. Look-alikes and the timing comparisons look only
+at the vehicle's disposals with a trip within a day of this trip's date. Never this disposal itself (its earlier
+requests are edits), whatever the quantity: photos borrowed from another trip come with a different one (23 Oct
+2026: 173186's collection photos were 172929's unloading photos). An image also in another disposal is a problem if
+an exact copy and asks a person if a look-alike (`reused`). The trip's time out, from its first
 collection photo to its last unloading photo, overlapping another disposal's by more than the clock slack is a
 problem (`overlap`): not the weighings, as one morning tare is often printed on every slip of the day. A photo
 stamped within SAME_MOMENT minutes of one in another disposal asks a person (`same_moment`). The same gross
@@ -15,12 +16,14 @@ Each other disposal is flagged once, by the first of these that finds it. Every 
 """
 
 from dataclasses import dataclass
+from datetime import date
 
 import proof_check
 from proof_check import CONFIDENT, Limits, and_list, busy_time, check, overlap_minutes, trip_weighings, unsure_stamps
 from verifier.database import Copy
 
 SAME_WEIGHING = 2  # minutes between the gross weighings on two disposals' slips that make them one weighing
+MOST_NAMED = 5  # other disposals named for exact copies found in all history; the rest are counted
 SAME_MOMENT = 5  # minutes between photo stamps in two disposals that make them look like one moment
 PHOTOS = ("loading", "unloading")
 
@@ -60,21 +63,30 @@ def reused(images: dict[str, list[dict]], others: list[Other], copies: list[Copy
     by_md5 = {}
     for c in copies:
         by_md5.setdefault(c.md5, []).append(c)
-    exact, alike, at = [], [], {}
+    exact, alike, at, history = [], [], {}, []
     for results in images.values():
         for r in results:
             for m in index.matches(r["prints"], None):
                 (exact if m["exact"] else alike).append((r["name"], m["name"], int(m["trip"])))
             for c in by_md5.get(r["prints"]["md5"], []):
-                exact.append((r["name"], c.name, c.disposal_id))
+                history.append((r["name"], c.name, c.disposal_id))
                 at[c.disposal_id, c.name] = c
-    exact = list(dict.fromkeys(exact))
+    # Copies in this vehicle's nearby disposals are all named; the others from history at most MOST_NAMED, the latest.
+    near = {i for _, _, i in exact}
+    far = sorted({i for _, _, i in history} - near,
+                 key=lambda i: (min((c.day or date.min for (d, _), c in at.items() if d == i), default=date.min), i),
+                 reverse=True)
+    named = set(far[:MOST_NAMED])
+    more = len(far) - len(named)
+    exact = list(dict.fromkeys(exact + [h for h in history if h[2] in near | named]))
     label = "Images not used in other disposals"
     if not exact and not alike:
-        return check("trips", "reused", label, "pass", "None seen in another disposal of this vehicle")
+        return check("trips", "reused", label, "pass", "None seen in another disposal")
     found = exact or alike
     what = "the same file as" if exact else "looks the same as"
     detail = "; ".join(f"{a} is {what} {b} in disposal {i}{where(at.get((i, b)))}" for a, b, i in dict.fromkeys(found))
+    if more:
+        detail += f"; and {more} more disposals"
     tail = " The same photo can't be proof for two disposals." if exact else " Compare them."
     made = check("trips", "reused", label, "fail" if exact else "review", detail + "." + tail,
                  images=list(dict.fromkeys(n for a, b, _ in found for n in (a, b))))
@@ -130,11 +142,13 @@ def same_weighing(images: dict[str, list[dict]], quantity: str | None, others: l
     label = "Weighing not in another disposal"
     if not found:
         return check("trips", "same_weighing", label, "pass", "No other disposal of this vehicle with the same gross weighing")
-    sure = all(here["certainty"] >= CONFIDENT and t["gross"]["certainty"] >= CONFIDENT for _, t in found)
+    sure_enough = lambda t: here["certainty"] >= CONFIDENT and t["gross"]["certainty"] >= CONFIDENT
+    sure = [(o, t) for o, t in found if sure_enough(t)]
+    doubtful = [(o, t) for o, t in found if not sure_enough(t)]
     ours = w["slips"][-1]
     final = proof_check.final_slip(images["bill"])
     parts = []
-    for o, t in found:
+    for o, t in sure or found:
         part = f"{ours} shows the gross weighing at {here['time']} on {here['date']}, the same as {disposals([o.disposal_id])}'s slip {t['slips'][-1]}"
         theirs_final = proof_check.final_slip(o.analysis["images"]["bill"])
         net = lambda slip: slip["answers"].get("net_weight", {}).get("choice")  # asked only of a quantity in kg
@@ -144,15 +158,19 @@ def same_weighing(images: dict[str, list[dict]], quantity: str | None, others: l
         parts.append(part)
     detail = "; ".join(parts)
     if sure:
-        made = check("trips", "same_weighing", label, "fail", f"{detail}. One weighing can't be proof for two disposals.",
-                     images=list(dict.fromkeys([ours, *(t["slips"][-1] for _, t in found)])))
+        also = (f" It may also be the same weighing as {disposals(o.disposal_id for o, _ in doubtful)}, by times Jev "
+                "wasn't sure of: check those too.") if doubtful else ""
+        made = check("trips", "same_weighing", label, "fail",
+                     f"{detail}. One weighing can't be proof for two disposals.{also}",
+                     images=list(dict.fromkeys([ours, *(t["slips"][-1] for _, t in sure)])))
     else:
         unclear = [(ours, here)] + [(t["slips"][-1], t["gross"]) for _, t in found]
         read = "; ".join(f"{name} was read as {m['time']} on {m['date']}, but only {m['certainty']:.0%} sure"
                          for name, m in unclear if m["certainty"] < CONFIDENT)
         made = check("trips", "same_weighing", label, "review",
                      f"{detail}, but Jev wasn't sure of every time: {read}. Check the gross time on both slips.",
-                     min(m["certainty"] for _, m in unclear), images=[ours])
+                     min(m["certainty"] for _, m in unclear),
+                     images=list(dict.fromkeys(name for name, _ in unclear)))
     made["related"] = related(o.disposal_id for o, _ in found)
     return made
 

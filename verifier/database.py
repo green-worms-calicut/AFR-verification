@@ -15,6 +15,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from proof_check import FEATURELESS
+
 ImagePrint = tuple[str, str, str, str]  # (kind, name, md5, dhash): proof_check's role, the s3Key, its fingerprints
 
 def dumps(value) -> str:
@@ -181,8 +183,9 @@ async def other_logs(pool: AsyncConnectionPool, disposal_id: int, log_ids: list[
     ids = [json.dumps({"reference": {"collectionLogs": [{"id": i}]}}) for i in log_ids]
     async with pool.connection() as conn:
         cur = await conn.execute(
-            """SELECT disposal_id, trip_day, body FROM (
-                   SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.trip_day, q.body
+            """SELECT disposal_id, trip_day, logs FROM (
+                   SELECT DISTINCT ON (q.disposal_id) q.disposal_id, q.trip_day,
+                          q.body->'reference'->'collectionLogs' AS logs
                    FROM verification_request q
                    WHERE q.disposal_id <> %(disposal)s AND q.disposal_id IN (
                        SELECT disposal_id FROM verification_request
@@ -191,9 +194,9 @@ async def other_logs(pool: AsyncConnectionPool, disposal_id: int, log_ids: list[
                    ORDER BY q.disposal_id, q.received_at DESC) latest
                ORDER BY disposal_id""", {"disposal": disposal_id, "day": day, "ids": ids})
         found = []
-        for other, trip_day, body in await cur.fetchall():
+        for other, trip_day, entries in await cur.fetchall():
             near = trip_day is not None and abs((trip_day - day).days) <= 1
-            entries = (body.get("reference") or {}).get("collectionLogs") or []
+            entries = entries or []
             found += [(other, e) for e in entries if near or e.get("id") in log_ids]
         return found
 
@@ -221,14 +224,19 @@ async def save_prints(pool: AsyncConnectionPool, request_id: str, prints: list[I
 async def copies(pool: AsyncConnectionPool, disposal_id: int, md5s: list[str]) -> list[Copy]:
     """The images of other disposals, each as last edited (analysed, errored or still being checked), whose md5 is in
     `md5s`: any vehicle, any date, never `disposal_id`'s own."""
+    if not md5s:
+        return []
     async with pool.connection() as conn:
         cur = await conn.execute(
             """SELECT p.name, p.kind, p.md5, q.disposal_id, q.vehicle_number, q.trip_day
                FROM image_print p JOIN (
                    SELECT DISTINCT ON (disposal_id) request_id, disposal_id, vehicle_number, trip_day
-                   FROM verification_request WHERE disposal_id <> %s
+                   FROM verification_request
+                   WHERE disposal_id <> %(disposal)s AND disposal_id IN (
+                       SELECT x.disposal_id FROM image_print m JOIN verification_request x USING (request_id)
+                       WHERE m.md5 = ANY(%(md5s)s))
                    ORDER BY disposal_id, received_at DESC) q USING (request_id)
-               WHERE p.md5 = ANY(%s) ORDER BY q.disposal_id, p.name""", (disposal_id, md5s))
+               WHERE p.md5 = ANY(%(md5s)s) ORDER BY q.disposal_id, p.name""", {"disposal": disposal_id, "md5s": md5s})
         return [Copy(*row) for row in await cur.fetchall()]
 
 
@@ -244,7 +252,9 @@ class PrintHistory:
 
     async def find(self, prints: list[ImagePrint]) -> list[Copy]:
         await save_prints(self.pool, self.request_id, prints)
-        return await copies(self.pool, self.disposal_id, [p[2] for p in prints])
+        # A plain image says nothing (as for look-alikes): saved, but not looked up.
+        return await copies(self.pool, self.disposal_id,
+                            [p[2] for p in prints if FEATURELESS < bin(int(p[3], 16)).count("1") < 64 - FEATURELESS])
 
 
 async def beat(pool: AsyncConnectionPool) -> None:

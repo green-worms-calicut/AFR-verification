@@ -39,9 +39,12 @@ def pickup(entry: dict) -> datetime | None:
     return standards.ist_time(entry.get("collectionDate"))
 
 
-def log_name(entry: dict) -> str:
-    """'collection log 45001 (ABC Hotel, Main Kitchen)'."""
+def log_name(entry: dict, picked_up: bool = False) -> str:
+    """'collection log 45001 (ABC Hotel, Main Kitchen)', with ', picked up 30/10' inside the brackets if `picked_up`
+    and the pickup is known."""
     where = [x for x in ((entry.get("client") or {}).get("name"), (entry.get("collectionPoint") or {}).get("name")) if x]
+    if picked_up and (at := pickup(entry)):
+        where.append(f"picked up {at:%d/%m}")
     return f"collection log {entry['id']}" + (f" ({', '.join(where)})" if where else "")
 
 
@@ -76,13 +79,10 @@ def log_same_photo(request: dict, images: dict[str, list[dict]]) -> list[dict]:
     short = lambda i: named(i).removeprefix("collection log ")
     owner_of = {k: [i for i in ids if i is not None] for k, ids in owners(request).items()}
     prints = {r["name"]: r["prints"] for r in images.get("loading", []) if r["name"] in owner_of and r.get("prints")}
-    made, seen = [], set()
+    findings, seen = [], []
 
     def found(status: str, detail: str, keys: list[str], target: int | None = None) -> None:
-        c = check("collection", "log_same_photo", label, status, detail, images=keys)
-        if target is not None:
-            c["target"] = {"type": "collection_log", "id": target}
-        made.append(c)
+        findings.append((status, detail, keys, target))
 
     for key, ids in owner_of.items():
         if len(ids) > 1:
@@ -94,7 +94,7 @@ def log_same_photo(request: dict, images: dict[str, list[dict]]) -> list[dict]:
     for keys in by_md5.values():
         for n, a in enumerate(keys):
             for b in keys[n + 1:]:
-                seen.add(frozenset((a, b)))
+                seen.append(frozenset((a, b)))
                 apart = [(x, y) for x in owner_of[a] for y in owner_of[b] if x != y]
                 if apart:
                     x, y = apart[0]
@@ -114,11 +114,25 @@ def log_same_photo(request: dict, images: dict[str, list[dict]]) -> list[dict]:
                 pair = frozenset((key, m["name"]))
                 if m["exact"] or m["name"] == key or pair in seen:
                     continue
-                seen.add(pair)
+                seen.append(pair)
                 found("review", f"{key} ({named(i)}) and {m['name']} ({named(int(m['trip']))}) look the same. Compare them.",
                       [key, m["name"]])
-    if not made:
+    if not findings:
         return [check("collection", "log_same_photo", label, "pass", f"Each of the {len(entries)} logs has its own photo")]
+    # One check per shared photo file: findings that name a common file are one, a problem if any part is.
+    groups: list[list[tuple]] = []
+    for finding in findings:
+        joined = [g for g in groups if any(set(finding[2]) & set(f[2]) for f in g)]
+        merged = [finding] + [f for g in joined for f in g]
+        groups = [g for g in groups if g not in joined] + [sorted(merged, key=findings.index)]
+    made = []
+    for group in sorted(groups, key=lambda g: findings.index(g[0])):
+        status = "fail" if any(f[0] == "fail" for f in group) else "review"
+        c = check("collection", "log_same_photo", label, status, " ".join(f[1] for f in group),
+                  images=list(dict.fromkeys(k for f in group for k in f[2])))
+        if len(group) == 1 and group[0][3] is not None:
+            c["target"] = {"type": "collection_log", "id": group[0][3]}
+        made.append(c)
     return made
 
 
@@ -245,24 +259,28 @@ def collection_points(request: dict, images: dict[str, list[dict]], radius: floa
 
 
 def log_reused(request: dict, other_logs: list[tuple[int, dict]]) -> list[dict]:
-    """A collection log is one pickup, never split over two disposals: one problem per log id that is also on another
-    disposal, aimed at the log. `other_logs` is (disposal id, log) as `database.other_logs` finds them."""
+    """A collection log is one pickup, never split over two disposals: one problem per other disposal that holds any
+    of this one's log ids, naming every shared log. Aimed at the log when only one is shared. `other_logs` is
+    (disposal id, log) as `database.other_logs` finds them."""
     label = "No collection log is on another disposal"
     made = []
-    for entry in logs(request):
-        on = sorted({i for i, other in other_logs if other.get("id") == entry["id"]})
-        if on:
-            name = log_name(entry)
-            detail = (f"{name[0].upper()}{name[1:]} (picked up {pickup(entry):%d/%m}) is also on "
-                      f"{compare_disposals.disposals(on)}. One pickup can't be counted in two disposals."
-                      if pickup(entry) else
-                      f"{name[0].upper()}{name[1:]} is also on {compare_disposals.disposals(on)}. "
-                      "One pickup can't be counted in two disposals.")
-            c = check("collection", "log_reused", label, "fail", detail,
-                      images=[k for k, ids in owners(request).items() if entry["id"] in ids])
-            c["target"] = {"type": "collection_log", "id": entry["id"]}
-            c["related"] = compare_disposals.related(on)
-            made.append(c)
+    for i in sorted({i for i, _ in other_logs}):
+        ids = {other.get("id") for j, other in other_logs if j == i}
+        shared = [e for e in logs(request) if e["id"] in ids]
+        if not shared:
+            continue
+        names = [log_name(e, True) for e in shared]
+        if len(shared) == 1:
+            who, verb = names[0], "is"
+        else:
+            who, verb = f"collection logs {and_list([n.removeprefix('collection log ') for n in names])}", "are"
+        c = check("collection", "log_reused", label, "fail",
+                  f"{who[0].upper()}{who[1:]} {verb} also on disposal {i}. One pickup can't be counted in two disposals.",
+                  images=[k for k, owned in owners(request).items() if {e["id"] for e in shared} & set(owned)])
+        if len(shared) == 1:
+            c["target"] = {"type": "collection_log", "id": shared[0]["id"]}
+        c["related"] = compare_disposals.related([i])
+        made.append(c)
     return made
 
 
@@ -289,17 +307,25 @@ def log_repeated(request: dict, other_logs: list[tuple[int, dict]]) -> list[dict
     shared = {i: {o["id"] for j, o in other_logs if j == i} & {e["id"] for e in logs(request)} for i, _ in other_logs}
     pairs = [(a, b, None) for n, a in enumerate(entries) for b in entries[n + 1:]]
     pairs += [(a, b, i) for a in entries for i, b in other_logs if pickup_key(b)]
-    made = []
+    found: dict[int | None, list[tuple[dict, dict]]] = {}
     for a, b, i in pairs:
         if a["id"] == b["id"] or pickup_key(a) != pickup_key(b) or (i is not None and {a["id"], b["id"]} & shared[i]):
             continue
-        name = log_name(a)
+        found.setdefault(i, []).append((a, b))
+    made = []
+    for i, matched in found.items():
         where = "on this disposal" if i is None else f"on disposal {i}"
+        said = []
+        for a, b in matched:
+            name = log_name(a)
+            said.append(f"{name[0].upper()}{name[1:]} and collection log {b['id']} ({where}) are the same pickup: same "
+                        f"client, collection point, day {pickup(a):%d/%m} and weights.")
+        ours = {a["id"] for a, _ in matched}
         c = check("collection", "log_repeated", label, "review",
-                  f"{name[0].upper()}{name[1:]} and collection log {b['id']} ({where}) are the same pickup: same client, "
-                  f"collection point, day {pickup(a):%d/%m} and weights. Check it wasn't entered twice.",
-                  images=[k for k, ids in owners(request).items() if a["id"] in ids])
-        c["target"] = {"type": "collection_log", "id": a["id"]}
+                  f"{' '.join(said)} Check {'it wasn' if len(matched) == 1 else 'they weren'}'t entered twice.",
+                  images=[k for k, owned in owners(request).items() if ours & set(owned)])
+        if len(matched) == 1:
+            c["target"] = {"type": "collection_log", "id": matched[0][0]["id"]}
         if i is not None:
             c["related"] = compare_disposals.related([i])
         made.append(c)

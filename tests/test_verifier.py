@@ -388,6 +388,8 @@ class EntryCheckTests(unittest.TestCase):
         self.assertEqual(flag["target"], {"type": "collection_log", "id": 45001})
         self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
         self.assertIn("is also on disposal 1000. One pickup can't be counted in two disposals.", flag["message"])
+        self.assertRegex(flag["message"], r"\(.*, picked up \d\d/\d\d\) is also on")
+        self.assertNotIn(") (picked up", flag["message"])
         self.assertNotIn("log_repeated", {f["code"] for f in checked.flags}, "the same id is reused's, not also repeated")
 
     def test_the_same_pickup_under_another_id_asks_a_person(self):
@@ -396,6 +398,41 @@ class EntryCheckTests(unittest.TestCase):
         self.assertEqual(flag["kind"], "please check")
         self.assertIn("46001", flag["message"])
         self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
+
+    def test_three_shared_logs_are_one_flag_for_the_other_disposal(self):
+        mine = [log(45001, materials=MATERIALS), log(45002, materials=MATERIALS), log(45003, materials=MATERIALS)]
+        checked = self.checked(logs=mine, other_logs=[(64188, e) for e in mine])
+        [flag] = [f for f in checked.flags if f["code"] == "log_reused"]
+        self.assertIn("Collection logs 45001 (ABC Hotel, Main Kitchen, picked up 15/10), 45002 (", flag["message"])
+        self.assertIn("and 45003 (ABC Hotel, Main Kitchen, picked up 15/10) are also on disposal 64188.", flag["message"])
+        self.assertNotIn("target", flag)
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 64188}])
+
+    def test_logs_shared_with_two_disposals_are_one_flag_each(self):
+        mine = [log(45001), log(45002)]
+        checked = self.checked(logs=mine, other_logs=[(1000, mine[0]), (1001, mine[1])])
+        flags = [f for f in checked.flags if f["code"] == "log_reused"]
+        self.assertEqual([f["related"][0]["id"] for f in flags], [1000, 1001])
+        self.assertTrue(all(f["target"]["type"] == "collection_log" for f in flags))
+
+    def test_several_repeated_pickups_on_one_disposal_are_one_flag(self):
+        hdpe = [{"materialName": "HDPE", "quantity": 40, "unit": "kg"}]
+        mine = [log(45001, materials=MATERIALS), log(45002, materials=hdpe)]
+        theirs = [log(46001, materials=MATERIALS), log(46002, materials=hdpe)]
+        checked = self.checked(logs=mine, other_logs=[(1000, e) for e in theirs])
+        [flag] = [f for f in checked.flags if f["code"] == "log_repeated"]
+        self.assertIn("46001", flag["message"])
+        self.assertIn("46002", flag["message"])
+        self.assertNotIn("target", flag)
+
+    def test_the_same_pair_in_one_log_and_under_two_logs_is_one_photo_flag(self):
+        uploads, self.jev = make_trip(same=(("loading", 0, "loading", 1),))
+        request = self.two_logs(uploads)
+        shared = next(e for e in request["evidence"] if e["category"] == "collection")
+        request["evidence"].append({**shared, "owner": {"type": "collection_log", "id": 45002}})  # also listed twice
+        flags = [f for f in self.checked(request, uploads).flags if f["code"] == "log_same_photo"]
+        self.assertEqual(len(flags), 1)
+        self.assertEqual(flags[0]["kind"], "problem found")
 
     def test_the_same_pickup_twice_in_one_disposal_asks_a_person(self):
         checked = self.checked(logs=[log(45001, materials=MATERIALS), log(45002, materials=MATERIALS)])
@@ -780,6 +817,37 @@ class CompareTests(unittest.TestCase):
         uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")}, bill=morning)
         self.assertIsNone(self.flag(self.checked(uploads, jev, [self.first()]), "same_weighing"))
 
+    def test_one_widely_shared_file_names_five_disposals_and_counts_the_rest(self):
+        uploads, jev = make_trip()
+        name = "collection-logs/2026/10/15/collection1.jpg"
+        md5 = proof_check.fingerprints(files(uploads)[name])["md5"]
+        copies = [database.Copy(name, "loading", md5, 900 + i, "KL07BC1234", date(2026, 9, 1 + i)) for i in range(7)]
+        with jev.client() as client:
+            checked = disposal_check.check(disposal(uploads), files(uploads).get, client, history=lambda rows: copies)
+        flag = self.flag(checked, "reused")
+        self.assertEqual([r["id"] for r in flag["related"]], [902, 903, 904, 905, 906], "the latest five by trip day")
+        self.assertIn("and 2 more disposals", flag["message"])
+        self.assertNotIn("disposal 900 ", flag["message"])
+        self.assertNotIn("disposal 901 ", flag["message"])
+
+    def test_two_slips_are_named_when_a_doubtful_time_asks_a_person(self):
+        unsure = (FIRST, {**FINAL, **at("gross", "03:31", confidence=0.4)})
+        uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")}, bill=unsure)
+        flag = self.flag(self.checked(uploads, jev, [self.first()]), "same_weighing")
+        self.assertIn("disposal/2026/10/15/b-weighbill2.jpg", flag["evidence"])
+        self.assertIn("disposal/2026/10/15/weighbill2.jpg", flag["evidence"])
+
+    def test_a_sure_same_weighing_is_a_problem_naming_a_doubtful_one_beside_it(self):
+        unsure = (FIRST, {**FINAL, **at("gross", "03:31", confidence=0.4)})
+        uploads, jev = other_trip("c-", 0, loading={**LOADING, **stamp("05:20")}, quality=60,
+                                  unloading={**UNLOADING, **stamp("06:40")}, bill=unsure)
+        doubtful = compare_disposals.Other(1001, self.checked(uploads, jev, disposal_id=1001).analysis)
+        uploads, jev = other_trip(loading={**LOADING, **stamp("05:20")}, unloading={**UNLOADING, **stamp("06:40")})
+        flag = self.flag(self.checked(uploads, jev, [self.first(), doubtful]), "same_weighing")
+        self.assertEqual(flag["kind"], "problem found")
+        self.assertIn("It may also be the same weighing as disposal 1001, by times Jev wasn't sure of", flag["message"])
+        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}, {"type": "disposal_log", "id": 1001}])
+
     def test_alone_every_comparison_passes(self):
         uploads, jev = make_trip()
         checks = {c["key"]: c["status"] for c in self.checked(uploads, jev).analysis["verdict"]["checks"]}
@@ -1049,6 +1117,34 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             await conn.execute((migrate.OURS / "008_image_print.sql").read_text().split("-- backfill\n", 1)[1])
         [(n,)] = await self.sql("SELECT count(*) FROM image_print")
         self.assertEqual(n, 6)
+
+    async def test_a_plain_image_is_not_looked_up_in_all_history(self):
+        a, b = disposal(disposal_id=1000), disposal(disposal_id=1001)
+        await database.save_request(self.svc.pool, a)
+        await database.save_prints(self.svc.pool, a["requestId"],
+                                   [("loading", "plain.jpg", "m0", "00" * 8), ("loading", "k1.jpg", "m1", "0f" * 8)])
+        await database.save_request(self.svc.pool, b)
+        history = database.PrintHistory(self.svc.pool, asyncio.get_running_loop(), b["requestId"], 1001)
+        found = await history.find([("loading", "p.jpg", "m0", "00" * 8), ("loading", "k.jpg", "m1", "0f" * 8)])
+        self.assertEqual([c.md5 for c in found], ["m1"])
+        [(n,)] = await self.sql("SELECT count(*) FROM image_print WHERE request_id = %s", b["requestId"])
+        self.assertEqual(n, 2, "both are still saved")
+        self.assertEqual(await database.copies(self.svc.pool, 1001, []), [])
+
+    async def test_a_look_alike_in_an_older_disposal_is_not_flagged(self):
+        # Another vehicle's disposal, two days earlier, whose images are re-saved look-alikes (not exact copies).
+        uploads, jev = other_trip(colours=0, quality=60)
+        self.jev.by_colour.update(jev.by_colour)
+        s3 = boto3.client("s3")
+        for key, data in files(uploads).items():
+            s3.put_object(Bucket=BUCKET, Key=key, Body=data)
+        await self.post(disposal(uploads, disposal_id=1000, vehicle={"id": 13, "vehicleNumber": "kl 07 zz 9999"}))
+        await self.work()
+        await self.sql("UPDATE verification_request SET trip_day = trip_day - 2 WHERE disposal_id = 1000")
+        again = disposal(self.store_trip(), disposal_id=1001)
+        await self.post(again)
+        await self.work()
+        self.assertNotIn("reused", {f["code"] for f in self.gw.stored[again["requestId"]]["flags"]})
 
     async def test_other_logs_finds_a_log_id_on_any_date_and_others_within_a_day(self):
         day = date(2026, 10, 15)
