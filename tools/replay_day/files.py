@@ -170,7 +170,9 @@ def download(export: dict, trips: Path = TRIPS, http: httpx.Client | None = None
     finally:
         if own:
             http.close()
-    done, by_folder = Saved(more_pages=bool((export.get("pageInfo") or {}).get("hasNextPage"))), {}
+    # gw_sales has said an export isn't whole both ways: pageInfo.hasNextPage, and truncated.
+    more = bool((export.get("pageInfo") or {}).get("hasNextPage") or export.get("truncated"))
+    done, by_folder = Saved(more_pages=more), {}
     for body in disposals:
         disposal_id, day = body["subject"]["id"], trip_day(body)
         mine = [(item, why) for (i, _, item), why in zip(jobs, outcomes) if i == disposal_id]

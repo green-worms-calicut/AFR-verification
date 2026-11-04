@@ -52,17 +52,20 @@ def run_download(path: Path) -> None:
     export = files.read_export(path)
     done = files.download(export)
     days = sorted(done.days)
-    where = ", ".join(str(files.day_folder(d).relative_to(files.ROOT)) for d in days)
-    print(f"Done: {sum(done.days.values())} disposals, {done.images} images saved, {len(done.failed)} failed. "
-          f"Saved in {where or 'nothing'}.")
+    print(f"Done: {sum(done.days.values())} disposals, {done.images} images saved, {len(done.failed)} failed.")
+    if len(days) > 1:
+        print("They are filed by trip date (arrival, IST), so this export is split over more than one day:")
+    for d in days:
+        print(f"  {day_name(d)}: {done.days[d]} disposal{'' if done.days[d] == 1 else 's'} in "
+              f"{files.day_folder(d).relative_to(files.ROOT)}")
     if done.failed:
         print("The failed images will be flagged as unavailable. To fetch them, export the day again and run download "
               "with the new file: images already saved aren't downloaded again.")
-    print("gw_sales says there are more disposals (next page): export the next page and run download with it."
-          if done.more_pages else "This export is complete (no next page).")
+    print("gw_sales says this export isn't complete (more disposals than it holds): export the rest and run download "
+          "with it." if done.more_pages else "This export is complete.")
     print(f"You can delete {path} now: the tool keeps its own copy, without the image links.")
     for d in days:
-        print(f"Next: {command('check', d.isoformat())}")
+        print(f"Next: {command('check', d.isoformat())}" + ("  (one command per day)" if len(days) > 1 else ""))
 
 
 async def run_check(day: date, again: bool, yes: bool) -> None:

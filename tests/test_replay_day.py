@@ -114,6 +114,10 @@ class DownloadTests(unittest.TestCase):
 
     def test_a_next_page_is_reported(self):
         self.assertTrue(self.download(export_of(self.request, more=True)).more_pages)
+        cut_short = {**export_of(self.request), "truncated": True}
+        cut_short.pop("pageInfo")
+        self.assertTrue(self.download(cut_short).more_pages)
+        self.assertFalse(self.download({**export_of(self.request), "truncated": False}).more_pages)
 
     def test_a_day_is_loaded_in_order_of_entry(self):
         later = disposal(self.uploads, disposal_id=1000)
