@@ -268,6 +268,23 @@ Counts pairs of images that only look alike (not the same file) across all saved
 
 It prints a line per trip (its verdict, each part's, and its first flags), how many trips each part accepted, flagged or sent to a person, the totals, and, where `truth.jsonl` has hand-read values, how often Jev read each kind of value right, with every wrong reading. Saved answers are reused whenever the image, questions, typed values and model are the same, so after changing a rule or a threshold, `--cached` re-checks the whole day without asking Jev again.
 
+### Check a real gw_sales day: tools/replay_day
+
+To see how the verifier does on real work without the webhook, export a day of disposals from gw_sales (JSON with a signed link beside each image, valid for 100 minutes) and replay it:
+
+```bash
+.venv/bin/python -m tools.replay_day download ~/Downloads/<export>.json   # save the export and its images (free; within 100 min)
+.venv/bin/python -m tools.replay_day check 2026-11-01                     # check the day with Jev (paid: shows the cost, asks first)
+.venv/bin/python -m tools.replay_day recheck 2026-11-01                   # after a rule change, again from saved answers (free)
+.venv/bin/python -m tools.replay_day report 2026-11-01                    # open the report to read and mark (free)
+.venv/bin/python -m tools.replay_day report 2026-11-01 --save             # write a read-only copy to eval/replay-2026-11-01.html
+.venv/bin/python -m tools.replay_day days                                 # the saved days and where each stands
+```
+
+`download` saves each image under `trips/gw-<trip date>/<disposal id>/` and the disposals in that folder's `disposals.json`, without their signed links. An image that couldn't be fetched is listed; run `download` again with a fresh export and only what is missing is fetched. Then delete the export from Downloads. `check` runs each disposal through `disposal_check.check`, the webhook's own code, in the order they were entered, comparing each only with disposals entered before it, as happens live. Results go to the replay database (`REPLAY_DATABASE_URL`, by default `verifier_replay` on the dev Postgres, made on first use), exactly as gw_sales would receive them, but nothing is ever sent. `check` skips disposals already checked; `check --all` checks every one again, asking Jev only what isn't saved. Verra checks run when `VERIFIER_VERRA_PROJECT` is set, as in the verifier.
+
+The report page (on 127.0.0.1 only) shows the day's counts, accuracy by check from the marks over every replayed day, the duplicates found across disposals, then each disposal: flagged ones first, then passes that only just cleared a threshold (within `--margin`, 0.10), least sure first, then a random sample of `--sample` (5) other passes, the same each time for a day. Mark a flag **Right** or **Wrong**, a passed check **Should have flagged**, and a passed disposal **Reviewed: nothing missed**. Marks are kept by disposal and check, so after a `recheck` the report lists what the change fixed and what newly passes. A hand-read `truth.jsonl` in the day folder (one line per disposal: `{"disposal": 64301, "photos": {<file name>: {...}}, "bills": {...}}`, as in `trips/`) adds a comparison with Jev's readings.
+
 ### Measure accuracy per image: tools/measure_accuracy.py
 
 `tools/measure_accuracy.py` measures how often Jev is right on single labeled images, and shows what each confidence threshold would do. TypeSafe's guidance is to set thresholds per question, by the risk of acting on a wrong answer, from accuracy measured on your own data.
@@ -388,6 +405,8 @@ The tests use a fake Jev API that tells the test images apart by colour, so they
 
 `tests/test_verifier.py` covers the verifier service against a fake gw_sales: signatures, gw_sales' end-to-end cases (a signed result for a new disposal, an edit checked again, a repeated request checked once, wrong secrets refused), each answer gw_sales can give, retries for 24 hours, a checking error sent as `outcome: error`, and lost jobs picked up. It also covers disposals checked with `proof_check`: photos from a fake S3 (moto) answered by the offline tests' fake Jev, what is taken from a request, the standard by trip date, pinned models, unavailable photos, comparisons with other disposals, and how checks become flags. It also covers migrations. It needs the dev Postgres on port 5433 and makes a `verifier_test` database there. Without that Postgres, those tests are skipped.
 
+`tests/test_replay_day.py` covers `tools/replay_day`: images saved from fake signed links (expired, refused, non-S3 and non-image links), a day checked into a `verifier_replay_test` database in order of entry and compared only with earlier disposals, nothing sent, rechecks from saved answers only, the risky passes and sample, and marks kept across a recheck. Its database tests need the same dev Postgres. The report page was checked in a browser.
+
 ## Real trips
 
 `trips/inward-2026-10-19/` holds one plant's inward log for 19 Oct 2026: 48 trips, 42 with weigh bills. `truth.jsonl` there has values read by hand from every image of those 42 (plates, stamp times and positions, slip weights and times), to measure Jev against. They were read by Claude subagents (the unloading positions by Claude, checked against tesseract text recognition), not yet checked by a person.
@@ -446,6 +465,7 @@ verifier/            the gw_sales verifier service (`python -m verifier`)
   migrations/        its database changes, numbered, applied once each
 tools/               tools for working on the checks
   test_page/         the local test page: server and page
+  replay_day/        check a real gw_sales day exported as JSON: download, check, report and marks
 examples/            sample images, an example labels file, playground JSON
 experiments/         earlier experiments (reading a clock), kept for reference
 docs/                a longer illustrated guide
@@ -478,6 +498,7 @@ trips/ eval/ mockups/   real trips, saved answers and reports, design mockups: n
 | `tools/check_trip_folders.py` | Checks every trip folder under a folder, flags a vehicle on two trips at once, and compares Jev with hand-read values. |
 | `tools/measure_accuracy.py` | Measures accuracy on labeled single images and shows what each confidence threshold would do. |
 | `tools/test_page/server.py`, `page.html` | The local test page. The server uses only Python's standard library. |
+| `tools/replay_day/` | Replays a real gw_sales day: `files` (the export and its images), `checking` (the verifier's checks into the replay database), `report` (review order, risky passes, accuracy), `server` and `page.html` (the report and its marks). |
 | `examples/labels.example.csv` | Example labels for `tools/measure_accuracy.py`, including wrong-number rows. |
 | `examples/images/` | A low-resolution truck photo with a GPS stamp and a weighment slip (photographed sideways), for the example labels and tests. |
 | `examples/playground/` | The questions and a state for each slot, as JSON, to paste into the [TypeSafe playground](https://console.typesafe.ai/playground). Generated from `proof_check.QUESTIONS`. |
@@ -485,6 +506,7 @@ trips/ eval/ mockups/   real trips, saved answers and reports, design mockups: n
 | `docs/jev-guide.html` | A longer illustrated guide to Jev, pricing, images and the first version of this project. Open it in a browser. |
 | `tests/test_proof_check.py` | Offline tests of the checks, the tools and the test page, against a fake Jev API. |
 | `tests/test_verifier.py` | Offline tests of the verifier service against a fake gw_sales, a fake S3 and the fake Jev. |
+| `tests/test_replay_day.py` | Offline tests of `tools/replay_day` with fake signed links and the fake Jev. |
 | `trips/` | Real trip folders and their hand-read `truth.jsonl`. Not in git. |
 | `eval/` | Saved Jev answers and run reports. Not in git. |
 | `mockups/` | The design mockup of the trip page, with real photos. Not in git. |

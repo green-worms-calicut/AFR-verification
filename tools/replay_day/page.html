@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Replay report</title>
+<style>
+  :root {
+    --bg: #f6f7f5; --card: #ffffff; --text: #1d2420; --muted: #5d6862; --line: #dde2de;
+    --high: #b42318; --high-bg: #fde8e6; --recheck: #9a5b00; --recheck-bg: #fff3dc; --info: #375a8c; --info-bg: #e7eef9;
+    --pass: #1f7a4d; --pass-bg: #e3f4ea; --accent: #2f6f4f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141816; --card: #1c211e; --text: #e6ebe8; --muted: #9aa69f; --line: #2e3631;
+      --high: #ff8a7a; --high-bg: #3a1d1a; --recheck: #f0b75c; --recheck-bg: #362a14; --info: #9dbcf0; --info-bg: #1d2a3e;
+      --pass: #6fd29c; --pass-bg: #173226; --accent: #6fd29c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 80px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1.15rem; margin: 32px 0 10px; }
+  .muted { color: var(--muted); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 16px 0; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tile b { display: block; font-size: 1.4rem; }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: .85rem; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .wrap { overflow-x: auto; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+  .card header { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; }
+  .card header .id { font-weight: 700; font-size: 1.05rem; }
+  .pill { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: .8rem; font-weight: 600; }
+  .high { color: var(--high); background: var(--high-bg); }
+  .recheck { color: var(--recheck); background: var(--recheck-bg); }
+  .info { color: var(--info); background: var(--info-bg); }
+  .pass, .passed { color: var(--pass); background: var(--pass-bg); }
+  .flagged, .problem { color: var(--high); background: var(--high-bg); }
+  .review { color: var(--recheck); background: var(--recheck-bg); }
+  .error, .unchecked { color: var(--muted); background: var(--line); }
+  .flag { border-top: 1px solid var(--line); padding: 10px 0; }
+  .flag p { margin: 6px 0; }
+  .marks { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+  button { font: inherit; font-size: .85rem; border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  button.on { background: var(--accent); color: var(--card); border-color: var(--accent); }
+  button:disabled { cursor: default; opacity: .7; }
+  input.note { font: inherit; font-size: .85rem; flex: 1 1 200px; min-width: 0; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+  .thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  .thumbs figure { margin: 0; width: 132px; }
+  .thumbs img { width: 132px; height: 132px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); cursor: zoom-in; background: var(--bg); }
+  .thumbs figcaption { font-size: .75rem; color: var(--muted); overflow-wrap: anywhere; }
+  details > summary { cursor: pointer; color: var(--muted); margin: 8px 0; }
+  .risky { background: var(--recheck-bg); border-radius: 6px; padding: 6px 10px; margin: 8px 0; }
+  .risky li { margin: 2px 0; }
+  .note-line { font-size: .85rem; color: var(--muted); }
+  #lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none; align-items: center; justify-content: center; z-index: 9; cursor: zoom-out; }
+  #lightbox img { max-width: 96vw; max-height: 94vh; }
+  .ok { color: var(--pass); } .bad { color: var(--high); }
+</style>
+</head>
+<body>
+<main id="app"><p class="muted">Loading…</p></main>
+<div id="lightbox"><img alt=""></div>
+<script id="report-data"></script>
+<script>
+const READ_ONLY = !!window.REPORT;
+const GROUPS = [
+  ["flagged", "Flagged", "Mark each flag right or wrong."],
+  ["barely", "Barely passed", "Passed, but at least one check only just cleared its threshold. Least sure first."],
+  ["sample", "Random sample of passes", "Picked at random for today (the same each time). Catches mistakes Jev was sure about."],
+  ["passed", "Other passes", ""],
+  ["error", "Errors", "The verifier couldn't check these."],
+  ["unchecked", "Not checked yet", ""],
+];
+let report = null;
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const money = x => "$" + (x || 0).toFixed((x || 0) < 1 ? 3 : 2);
+
+function imgSrc(card, image, small = true) {
+  if (READ_ONLY) return image.data || "";
+  return `/${small ? "thumb" : "image"}/${card.id}/${encodeURIComponent(image.file)}`;
+}
+
+function thumbs(card, keys) {
+  const images = keys ? card.images.filter(i => keys.includes(i.key)) : card.images;
+  if (!images.length) return "";
+  return `<div class="thumbs">${images.map(i => `<figure><img loading="lazy" src="${imgSrc(card, i)}" data-full="${imgSrc(card, i, false)}" alt="${esc(i.name)}"><figcaption>${esc(i.kind)} · ${esc(i.name)}</figcaption></figure>`).join("")}</div>`;
+}
+
+function markControls(card, key, about, choices, current, note) {
+  if (READ_ONLY) return current ? `<div class="note-line">Marked ${esc(current)}${note ? ": " + esc(note) : ""}</div>` : "";
+  const data = `data-disposal="${card.id}" data-check="${esc(key)}" data-about="${esc(about)}"`;
+  return `<div class="marks" ${data}>${choices.map(([mark, label]) =>
+    `<button class="mark ${current === mark ? "on" : ""}" data-mark="${mark}">${label}</button>`).join("")}
+    <input class="note" placeholder="Note (optional)" value="${esc(note)}"></div>`;
+}
+
+function flagHtml(card, f) {
+  return `<div class="flag">
+    <span class="pill ${esc(f.severity)}">${esc(f.severity)}</span> <b>${esc(f.code)}</b> <span class="muted">· ${esc(f.kind)}</span>
+    <p>${esc(f.message)}</p>
+    ${f.related ? `<div class="note-line">Linked to disposal ${f.related.map(r => `<a href="#d${r.id}">${r.id}</a>`).join(", ")}</div>` : ""}
+    ${thumbs(card, f.evidence || [])}
+    ${markControls(card, f.code, f.about, [["right", "Right"], ["wrong", "Wrong"]], f.mark, f.note)}
+  </div>`;
+}
+
+function checksHtml(card) {
+  if (!card.checks.length) return "";
+  const rows = card.checks.map(c => `<tr>
+    <td><span class="pill ${esc(c.status)}">${esc(c.status)}</span></td>
+    <td>${esc(c.label)}<div class="note-line">${esc(c.detail)}</div></td>
+    <td class="n">${c.certainty == null ? "" : c.certainty.toFixed(2)}</td>
+    <td>${c.status === "pass" ? markControls(card, c.key, c.about, [["missed", "Should have flagged"]], c.mark, c.note) : ""}</td>
+  </tr>`).join("");
+  return `<details data-open="checks-${card.id}"><summary>All ${card.checks.length} checks</summary>
+    <div class="wrap"><table><tr><th>Status</th><th>Check</th><th>Sure</th><th></th></tr>${rows}</table></div></details>`;
+}
+
+function cardHtml(card) {
+  const parts = Object.entries(card.parts || {}).map(([p, s]) => `<span class="pill ${esc(s)}">${esc(p)}: ${esc(s)}</span>`).join(" ");
+  const risky = card.risky.length ? `<div class="risky"><b>Only just passed</b><ul>${card.risky.map(r =>
+      `<li>${esc(r.label)}: ${esc(r.why)}</li>`).join("")}</ul></div>` : "";
+  const timeline = card.timeline.length ? `<div class="note-line">Timeline: ${card.timeline.map(t =>
+      `<span class="${t.bad ? "bad" : ""}">${esc(t.time)} ${esc(t.what)}</span>`).join(" · ")}</div>` : "";
+  const truth = card.truth.length ? `<details data-open="truth-${card.id}"><summary>Hand-read comparison (${card.truth.filter(t => !t.right).length} differ)</summary>
+      <div class="wrap"><table><tr><th>Value</th><th>Image</th><th>Read by hand</th><th>Jev</th></tr>${card.truth.map(t =>
+      `<tr><td>${esc(t.field)}</td><td>${esc(t.image)}</td><td>${esc(t.expected)}</td><td class="${t.right ? "ok" : "bad"}">${esc(t.got)}</td></tr>`).join("")}</table></div></details>` : "";
+  const reviewedButton = card.outcome === "passed" && !READ_ONLY ? markControls(card, "disposal", "",
+      [["right", "Reviewed: nothing missed"]], card.disposalMark, "") : "";
+  return `<section class="card" id="d${card.id}">
+    <header><span class="id">${card.id}</span><span>${esc(card.vehicle)}</span><span>${esc(card.quantity || "")}</span>
+      <span class="muted">${esc(card.facility || "")}</span><span class="muted">entered ${esc(card.entered || "")}</span>
+      <span class="pill ${esc(card.outcome)}">${esc(card.outcome)}</span>${card.verra ? '<span class="pill info">Verra</span>' : ""}
+      ${card.reviewed ? '<span class="pill pass">reviewed</span>' : ""}</header>
+    <div style="margin:6px 0">${parts}</div>
+    ${card.notChecked.length ? `<div class="note-line">Not checked: ${card.notChecked.map(esc).join("; ")}</div>` : ""}
+    ${card.error ? `<p class="bad">${esc(card.error)}</p>` : ""}
+    ${risky}
+    ${card.flags.map(f => flagHtml(card, f)).join("")}
+    ${timeline}
+    ${reviewedButton}
+    ${checksHtml(card)}
+    ${truth}
+    <details data-open="images-${card.id}"><summary>${plural(card.images.length, "image", "images")}</summary>${thumbs(card)}</details>
+  </section>`;
+}
+
+function render() {
+  const s = report.summary, o = s.outcomes;
+  const open = new Set([...document.querySelectorAll("details[open]")].map(d => d.dataset.open));
+  const tiles = [["Disposals", s.disposals], ["Passed", o.passed || 0], ["Flagged", o.flagged || 0], ["Errors", o.error || 0],
+                 ["Barely passed", s.riskyPasses], ["Reviewed", `${s.reviewed}/${s.toReview}`], ["Jev cost", money(s.cost)]];
+  const counts = obj => Object.entries(obj).map(([k, n]) => `${esc(k)} ${n}`).join(" · ") || "none";
+  const accuracy = report.accuracy.length ? `<div class="wrap"><table><tr><th>Check</th><th class="n">Right</th><th class="n">Wrong</th><th class="n">Missed</th><th class="n">Unmarked today</th></tr>${
+      report.accuracy.map(r => `<tr><td>${esc(r.label)} <span class="muted">${esc(r.check)}</span></td><td class="n">${r.right}</td><td class="n">${r.wrong}</td><td class="n">${r.missed}</td><td class="n">${r.unmarked}</td></tr>`).join("")}</table></div>`
+      : `<p class="muted">No flags or marks yet.</p>`;
+  const changes = report.changes.length ? `<h2>Changed since marked</h2><ul>${report.changes.map(c =>
+      `<li class="${c.fixed ? "ok" : "bad"}"><a href="#d${c.disposal}">${c.disposal}</a> ${esc(c.check)}: ${esc(c.what)}</li>`).join("")}</ul>` : "";
+  const dupes = report.duplicates.length ? report.duplicates.map(d => {
+      const card = report.disposals.find(c => c.id === d.disposal);
+      return `<div class="card"><a href="#d${d.disposal}">${d.disposal}</a> ↔ ${d.others.map(i => `<a href="#d${i}">${i}</a>`).join(", ")}
+        <span class="pill ${esc(d.severity)}">${esc(d.code)}</span><p>${esc(d.message)}</p>${thumbs(card, d.images.map(i => i.key))}</div>`;
+    }).join("") : `<p class="muted">None.</p>`;
+  const groups = GROUPS.map(([g, title, about]) => {
+    const cards = report.disposals.filter(c => c.group === g);
+    if (!cards.length) return "";
+    const body = cards.map(cardHtml).join("");
+    return g === "passed"
+      ? `<details data-open="group-passed"><summary><h2 style="display:inline">${title} (${cards.length})</h2></summary>${body}</details>`
+      : `<h2>${title} (${cards.length})</h2>${about ? `<p class="muted">${about}</p>` : ""}${body}`;
+  }).join("");
+  document.getElementById("app").innerHTML = `
+    <h1>Real-data replay: ${esc(report.dayName)}</h1>
+    <p class="muted">${READ_ONLY ? "Saved copy, read-only." : "Marks are saved as you click."} Nothing here was sent to gw_sales.</p>
+    <div class="tiles">${tiles.map(([k, v]) => `<div class="tile"><span class="muted">${k}</span><b>${v}</b></div>`).join("")}</div>
+    <p>Flags by severity: ${counts(s.bySeverity)}<br>Flags by check: ${counts(s.byCheck)}<br>Not checked: ${counts(s.notChecked)}</p>
+    ${changes}
+    <h2>Accuracy by check (marks over every replayed day)</h2>${accuracy}
+    <h2>Duplicates across disposals</h2>${dupes}
+    ${groups}`;
+  document.querySelectorAll("details[data-open]").forEach(d => { if (open.has(d.dataset.open)) d.open = true; });
+}
+
+async function load() {
+  if (READ_ONLY) { report = window.REPORT; render(); return; }
+  const response = await fetch("/data");
+  report = await response.json();
+  render();
+}
+
+async function sendMark(box, mark) {
+  const body = {disposal: Number(box.dataset.disposal), check: box.dataset.check, about: box.dataset.about,
+                mark, note: box.querySelector(".note")?.value || ""};
+  box.querySelectorAll("button").forEach(b => b.disabled = true);
+  const response = await fetch("/mark", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!response.ok) alert("The mark wasn't saved: " + ((await response.json()).error || response.status));
+  await load();
+}
+
+document.addEventListener("click", event => {
+  const button = event.target.closest("button.mark");
+  if (button) {
+    const box = button.closest(".marks");
+    sendMark(box, button.classList.contains("on") ? null : button.dataset.mark);
+    return;
+  }
+  const img = event.target.closest(".thumbs img");
+  const box = document.getElementById("lightbox");
+  if (img) { box.querySelector("img").src = img.dataset.full || img.src; box.style.display = "flex"; }
+  else if (event.target.closest("#lightbox")) box.style.display = "none";
+});
+document.addEventListener("change", event => {
+  if (!event.target.matches("input.note")) return;
+  const box = event.target.closest(".marks"), on = box.querySelector("button.on");
+  if (on) sendMark(box, on.dataset.mark);
+});
+load();
+</script>
+</body>
+</html>
