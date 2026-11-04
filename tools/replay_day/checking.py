@@ -6,7 +6,7 @@ before them, as happens live (the verifier never sees a later one). Results are 
 receive them (`database.save_result`), but no send job is ever queued: `callback_url` is `replay:`.
 
 The replay database (REPLAY_DATABASE_URL, by default verifier_replay on the dev Postgres) is created on first use and
-has the verifier's migrations, plus `replay_mark` for the report's marks.
+has the verifier's migrations (so it shows times in IST, migrations/010), plus `replay_mark` for the report's marks.
 """
 
 import asyncio
@@ -57,7 +57,10 @@ async def open_database(url: str = DATABASE_URL) -> AsyncConnectionPool:
     except (psycopg.OperationalError, PoolTimeout) as error:
         raise Problem(f"The replay database can't be reached ({str(error).strip().splitlines()[0]}).\n"
                       "Is the dev Postgres running? Start it with: docker start jev-verifier-db") from None
-    await migrate.apply(pool)
+    if await migrate.apply(pool):  # migration 010 sets IST for new sessions: open the pool's connections again
+        await pool.close()
+        pool = AsyncConnectionPool(url, open=False)
+        await pool.open(wait=True, timeout=10)
     async with pool.connection() as conn:
         await conn.execute(MARKS)
     return pool

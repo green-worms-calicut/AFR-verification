@@ -1030,6 +1030,12 @@ class MigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue({"procrastinate/" + p.name for p in migrate.procrastinate_migrations()} <= recorded)
         self.assertEqual(await self.migrate(), [])
 
+    async def test_times_are_shown_in_ist_after_migrating(self):
+        await self.migrate()
+        async with await psycopg.AsyncConnection.connect(self.settings.database_url) as conn:
+            cur = await conn.execute("SELECT current_setting('TimeZone'), to_char(now(), 'OF')")
+            self.assertEqual(await cur.fetchone(), ("Asia/Kolkata", "+05:30"))
+
     async def test_new_migration_is_applied_once(self):
         await self.migrate()
         with tempfile.TemporaryDirectory() as folder:

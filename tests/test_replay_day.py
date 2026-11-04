@@ -265,6 +265,12 @@ class ReplayTests(unittest.IsolatedAsyncioTestCase):
             cur = await conn.execute("SELECT to_regclass('replay_mark') IS NOT NULL, to_regclass('image_print') IS NOT NULL")
             self.assertEqual(await cur.fetchone(), (True, True))
 
+    async def test_times_are_shown_in_ist(self):
+        await self.check(bodies=[self.bodies[0]])
+        async with self.pool.connection() as conn:
+            cur = await conn.execute("SELECT current_setting('TimeZone'), to_char(made_at, 'OF') FROM verification_result")
+            self.assertEqual(await cur.fetchone(), ("Asia/Kolkata", "+05:30"))
+
 
 if __name__ == "__main__":
     unittest.main()
