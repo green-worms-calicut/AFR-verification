@@ -1323,10 +1323,20 @@ class PartTests(unittest.TestCase):
         self.assertEqual({p: x["status"] for p, x in v["parts"].items()}, {"real": "problem", "docs": "review", "verra": "pass"})
         self.assertEqual(v["status"], "problem")
 
-    def test_missing_images_ask_a_person_in_the_real_part_too(self):
+    def test_no_collection_photo_is_not_flagged(self):
+        # The user, 5 Nov 2026: the order is checked from the weighings and unloading photos without it.
         v = run_trip(loading=())[0]["verdict"]
-        self.assertEqual([c["key"] for c in v["parts"]["docs"]["flags"]], ["loading_missing"])
-        self.assertEqual([(c["key"], c["detail"]) for c in v["parts"]["real"]["flags"]], [("loading_plate", f"No loading photos to compare with {NUMBER}.")])
+        self.assertEqual({p: x["status"] for p, x in v["parts"].items()}, {"real": "pass", "docs": "pass"})
+        self.assertFalse([c for c in v["checks"] if c["group"] == "loading"])
+        self.assertEqual(by_key(v["checks"])["unloading_timing"]["status"], "pass")
+        late = run_trip(loading=(), bill=(FIRST, {**FINAL, **at("gross", "04:30")}))[0]["verdict"]
+        self.assertEqual(by_key(late["checks"])["unloading_timing"]["status"], "fail", "unloading 04:09, before gross 04:30")
+
+    def test_missing_images_ask_a_person_in_the_real_part_too(self):
+        v = run_trip(unloading=())[0]["verdict"]
+        self.assertEqual([c["key"] for c in v["parts"]["docs"]["flags"]], ["unloading_missing"])
+        self.assertEqual([(c["key"], c["detail"]) for c in v["parts"]["real"]["flags"]],
+                         [("unloading_plate", f"No unloading photos to compare with {NUMBER}.")])
         v = run_trip(bill=(), verra=True)[0]["verdict"]
         self.assertEqual({p: x["status"] for p, x in v["parts"].items()}, {"real": "review", "docs": "review", "verra": "review"})
         self.assertEqual([(c["key"], c["detail"]) for c in v["parts"]["real"]["flags"]],
@@ -1426,6 +1436,30 @@ class CrossTripTests(unittest.TestCase):
         self.assertEqual(found["1"]["detail"], f"{NUMBER} is also on trip 2 at the same time, by the photos' stamps. A "
                                                "vehicle can't be on two trips at once. It may also be on trip 3 then, by "
                                                "stamps Jev wasn't sure of: check those too.")
+
+    def test_without_a_collection_photo_the_trip_starts_at_the_gross_weighing(self):
+        trip = run_trip(loading=())[0]
+        self.assertEqual((trip["verdict"]["window"], trip["verdict"]["sure_window"]),
+                         ([f"{proof_check.YEAR}-10-15T03:30:00", f"{proof_check.YEAR}-10-15T04:09:00"],) * 2)
+        self.assertEqual(proof_check.unsure_stamps(trip["images"]), [])
+        # Read unsurely, the gross weighing times the trip, but not by sure times only, and is named to check.
+        trip = run_trip(loading=(), bill=(FIRST, {**FINAL, **at("gross", "03:30", confidence=0.5)}))[0]
+        self.assertEqual((trip["verdict"]["window"][0], trip["verdict"]["sure_window"]), (f"{proof_check.YEAR}-10-15T03:30:00", None))
+        self.assertEqual([(name, m["time"]) for name, m in proof_check.unsure_stamps(trip["images"])], [("weighbill2.jpg", "03:30")])
+
+    def test_trips_without_collection_photos_still_overlap(self):
+        first = run_trip(loading=())[0]
+        second = run_trip(loading=(), unloading=({**PHOTO, **stamp("04:30")},) * 2,
+                          bill=(FIRST, {**FINAL, **at("gross", "03:50")}))[0]
+        trips = {n: {"vehicle_number": NUMBER, "verdict": t["verdict"]} for n, t in (("1", first), ("2", second))}
+        found = proof_check.overlap_checks(trips)
+        self.assertEqual({t: c["status"] for t, c in found.items()}, {"1": "fail", "2": "fail"}, "03:30-04:09 and 03:50-04:30")
+        self.assertEqual(found["1"]["detail"], f"{NUMBER} is also on trip 2 at the same time, by the photos' stamps and "
+                                               "gross weighing times. A vehicle can't be on two trips at once.")
+        second["verdict"]["sure_window"] = None
+        self.assertEqual(proof_check.overlap_checks(trips)["1"]["detail"],
+                         f"{NUMBER} may also be on trip 2 at the same time, but Jev was not sure of some of the photos' stamps "
+                         "and gross weighing times that put it there. Check those times.")
 
     def test_a_morning_tare_on_every_slip_is_no_window(self):
         # 19 Oct 2026, KL57AD9265: weighed empty at 05:10, that tare printed on slips with gross 07:02 and 09:23.

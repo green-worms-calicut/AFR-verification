@@ -3,7 +3,7 @@
 Nothing is rejected here: a check that finds a problem flags its part, an unsure one asks a person.
 """
 
-from proof_check.trip_rules import Limits, PARTS, busy_time, photo_moments, trip_checks
+from proof_check.trip_rules import Limits, PARTS, busy_time, gross_start, photo_moments, trip_checks
 
 # A check's status is pass, fail (a problem found) or review (unsure). Nothing is rejected without a person.
 TITLES = {"pass": "Accepted", "problem": "Flagged: problem found", "review": "Flagged: please check"}
@@ -52,11 +52,13 @@ def verdict(images: dict[str, list[dict]], vehicle_number: str, quantity: str | 
     `around` is the trip's date, for the years of stamps and slips."""
     checks, w = trip_checks(images, vehicle_number, quantity, limits, plant, verra, weighbridge, around)
     checks += list(extra)
-    # When the trip was out, by its photos, for finding a vehicle on two trips at once (`overlap_checks`).
+    # When the trip was out, by its photos (from the gross weighing without a collection photo), for finding a
+    # vehicle on two trips at once (`overlap_checks`).
     window, sure = busy_time(images, around=around), busy_time(images, sure_only=True, around=around)
     return {**decide_parts(checks), "timeline": timeline(images, w, checks, around),
             "window": [t.isoformat() for t in window] if window else None,
-            "sure_window": [t.isoformat() for t in sure] if sure else None}
+            "sure_window": [t.isoformat() for t in sure] if sure else None,
+            "window_from": "gross" if window and gross_start(images, around) else "photos"}
 
 
 def add_checks(trip: dict, extra: list[dict]) -> None:

@@ -360,6 +360,17 @@ class CheckTests(unittest.TestCase):
         self.assertIn("bill_number", merged["checks"])
         self.assertEqual(merged["severity"], "recheck")
 
+    def test_collection_photos_listed_but_not_stored_still_ask_a_person(self):
+        uploads, jev = make_trip()
+        stored = files(uploads)
+        for u in uploads["loading"]:
+            del stored[key_of("loading", u)]
+        with self.assertLogs("verifier", "WARNING"):
+            checked = self.check(uploads, jev, stored=stored)
+        [flag] = checked.flags
+        self.assertEqual((flag["code"], flag["kind"]), ("image_unavailable", "please check"))
+        self.assertIn("isn't in storage", flag["message"])
+
     def test_nothing_in_storage_needs_no_jev(self):
         jev = FakeJev()
         with self.assertLogs("verifier", "WARNING"):
@@ -499,12 +510,13 @@ class EntryCheckTests(unittest.TestCase):
         self.assertEqual(c["status"], "review")
         self.assertIn("but the disposal's logs were picked up on 13/10", c["detail"])
 
-    def test_a_log_without_a_photo_asks_a_person_aimed_at_it(self):
+    def test_a_log_without_a_photo_is_not_flagged(self):
+        # The user, 5 Nov 2026: a missing collection photo isn't flagged, for one log or the whole disposal.
         checked = self.checked(logs=[log(), log(45002, client={"name": "XYZ School"})])
-        [flag] = [f for f in checked.flags if f["code"] == "collection_has_photos"]
-        self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
-        self.assertEqual(flag["target"], {"type": "collection_log", "id": 45002})
-        self.assertIn("Collection log 45002 (XYZ School, Main Kitchen) has no collection photo", flag["message"])
+        self.assertFalse([f for f in checked.flags if f.get("target") == {"type": "collection_log", "id": 45002}])
+        uploads, self.jev = make_trip(loading=())
+        checked = self.checked(uploads=uploads, logs=[log()])
+        self.assertEqual((checked.outcome, checked.flags), ("passed", []))
 
     def two_logs(self, uploads, split=True):
         """Two logs, with the second collection photo under 45002 (or both under 45001 when not `split`)."""
@@ -778,6 +790,26 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(flag["kind"], "please check")
         self.assertIn("1234 unloading photo 2 was read as 03:00", flag["message"])
         self.assertIn("30% sure", flag["message"])
+
+    def test_without_collection_photos_the_trip_is_timed_from_the_gross_weighing(self):
+        uploads, jev = make_trip(loading=())
+        first = compare_disposals.Other(1000, self.checked(uploads, jev, disposal_id=1000).analysis)  # 03:30-04:09
+        uploads, jev = other_trip(unloading={**UNLOADING, **stamp("04:30")}, bill=(FIRST, {**FINAL, **at("gross", "03:50")}))
+        uploads["loading"] = []
+        flag = self.flag(self.checked(uploads, jev, [first], quantity=999), "overlap")
+        self.assertEqual(flag["kind"], "problem found")
+        self.assertIn("KL05AF9341's gross weighing and unloading photos for this disposal were at 03:50-04:30 on 15/10, "
+                      "overlapping disposal 1000's 03:30-04:09 on 15/10", flag["message"])
+
+    def test_an_unsure_gross_weighing_that_starts_the_trip_is_named_to_check(self):
+        uploads, jev = make_trip(loading=())
+        first = compare_disposals.Other(1000, self.checked(uploads, jev, disposal_id=1000).analysis)
+        uploads, jev = other_trip(unloading={**UNLOADING, **stamp("04:30")},
+                                  bill=(FIRST, {**FINAL, **at("gross", "03:50", confidence=0.5)}))
+        uploads["loading"] = []
+        flag = self.flag(self.checked(uploads, jev, [first], quantity=999), "overlap")
+        self.assertEqual(flag["kind"], "please check")
+        self.assertIn("1234 weigh bill 2 was read as 03:50 on 15/10, but only 50% sure", flag["message"])
 
     def test_trips_without_both_kinds_of_photo_are_not_timed(self):
         uploads, jev = other_trip()

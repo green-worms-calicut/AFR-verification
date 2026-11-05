@@ -6,8 +6,9 @@ at the vehicle's disposals with a trip within a day of this trip's date. Never t
 requests are edits), whatever the quantity: photos borrowed from another trip come with a different one (23 Oct
 2026: 173186's collection photos were 172929's unloading photos). An image also in another disposal is a problem if
 an exact copy and asks a person if a look-alike (`reused`). The trip's time out, from its first
-collection photo to its last unloading photo, overlapping another disposal's by more than the clock slack is a
-problem (`overlap`): not the weighings, as one morning tare is often printed on every slip of the day. A photo
+collection photo (or without one its gross weighing) to its last unloading photo, overlapping another disposal's by
+more than the clock slack is a problem (`overlap`): not the tare, as one morning tare is often printed on every slip
+of the day. A photo
 stamped within SAME_MOMENT minutes of one in another disposal asks a person (`same_moment`). The same gross
 weighing, within SAME_WEIGHING minutes, on the final slips of two disposals is a problem (`same_weighing`): one
 weighing can't be proof for two disposals.
@@ -219,10 +220,12 @@ def overlap(vehicle: str, images: dict[str, list[dict]], others: list[Other], fl
         return check("trips", "overlap", label, "pass", "No other disposal of this vehicle while its photos were taken")
     at = "; ".join(f"disposal {i}'s {w[0]:%H:%M}-{w[1]:%H:%M} on {w[0]:%d/%m}" for i, w in found)
     here = here_sure
+    # Without a collection photo the trip starts at the gross weighing (`proof_check.gross_start`).
+    by, were = ("photos", "were taken") if images.get("loading") else ("gross weighing and unloading photos", "were at")
     also = (f" It may also overlap {disposals(o.disposal_id for o in doubtful)}, by stamps Jev wasn't sure of: check "
             "those too.") if doubtful else ""
     made = check("trips", "overlap", label, "fail",
-                 f"{vehicle}'s photos for this disposal were taken {here[0]:%H:%M}-{here[1]:%H:%M} on {here[0]:%d/%m}, "
+                 f"{vehicle}'s {by} for this disposal {were} {here[0]:%H:%M}-{here[1]:%H:%M} on {here[0]:%d/%m}, "
                  f"overlapping {at}. A vehicle can't be on two trips at once: check which trip is real.{also}")
     made["related"] = related([*(i for i, _ in found), *(o.disposal_id for o in doubtful)])
     return made

@@ -36,7 +36,7 @@ The checks fall into three parts (`PARTS`, `PART_OF`), each decided on its own:
   - real: did the trip happen as claimed? The plates and bills match the typed vehicle number, the
     weighings and photos are in order and far enough apart, the photos were taken directly, unloading
     was at the plant, and no image or trip is a duplicate;
-  - docs: is the proof complete? Every kind of image added, a vehicle and a GPS stamp in every photo,
+  - docs: is the proof complete? Unloading photos and bills added, a vehicle and a GPS stamp in every photo,
     a final slip, its net weight the typed quantity, and gross heavier than tare;
   - verra: what a Verra project trip also needs: the material and the weighbridge's stamp.
 
@@ -89,7 +89,7 @@ from proof_check.trip_rules import (
     unsure_stamps, same_file, stamp_year,
     each_photo, plate_check, photo_checks, metres_between, distance, from_square, to_square, positions, chance_within, placed, plant_check, near_check,
     final_slip, LOOK_FOR, choice_check, seal_checks, verra_checks, bill_checks, weighbridge_check, photo_moments,
-    busy_time,
+    gross_start, busy_time,
     overlap_minutes, photo_window,
     photo_timing, same_day, trip_checks, short_trip, and_list, reuse_check, overlap_checks
 )

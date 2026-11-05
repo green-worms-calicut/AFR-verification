@@ -110,15 +110,15 @@ GROUPS = {"loading": "Loading photos", "unloading": "Unloading photos", "bill": 
 # The three parts of a trip's check, each decided, and accepted or rejected, on its own: did the trip happen as
 # claimed, is its proof complete, and what a Verra project trip also needs.
 PARTS = {"real": "Trip is real", "docs": "Documentation", "verra": "Verra"}
-# Which part each of a trip's checks (by key) is in. A missing image can't be checked for being real, so its
-# plate or times ask a person in the real part too.
+# Which part each of a trip's checks (by key) is in. A missing unloading photo or bill can't be checked for being
+# real, so its plate or times ask a person in the real part too. A missing collection (loading) photo isn't flagged.
 PART_OF = {
     "loading_plate": "real", "unloading_plate": "real", "bill_number": "real",
     "weigh_order": "real", "weigh_gap": "real", "weigh_day": "real", "time_in_tare": "real",
     "loading_timing": "real", "unloading_timing": "real", "unloading_day": "real",
     "loading_direct": "real", "unloading_direct": "real", "bill_direct": "real", "unloading_plant": "real",
     "reused": "real", "overlap": "real", "same_weighing": "real",
-    "loading_missing": "docs", "unloading_missing": "docs", "bill_missing": "docs",
+    "unloading_missing": "docs", "bill_missing": "docs",
     "loading_vehicle": "docs", "unloading_vehicle": "docs", "loading_stamp": "docs", "unloading_stamp": "docs",
     "bill_found": "docs", "net_weight": "docs", "gross_vs_tare": "docs",
     "material": "verra", "weighbridge_seal": "verra",
@@ -127,9 +127,9 @@ PART_OF = {
     "image_unavailable": "docs", "same_file": "real", "same_moment": "real", "not_compared": "real",
     # Any trip: an image Jev couldn't answer for after its retries (the others' checks still run).
     "image_unanswered": "docs",
-    # The verifier, from what was entered in gw_sales: every collection log has a photo, every collection photo was
-    # taken on its pickup day, no unloading photo long after the end time, and the collections before the arrival.
-    "collection_has_photos": "docs", "collection_photo_date": "real", "unloading_too_late": "real",
+    # The verifier, from what was entered in gw_sales: every collection photo was taken on its pickup day, no unloading
+    # photo long after the end time, and the collections before the arrival.
+    "collection_photo_date": "real", "unloading_too_late": "real",
     "disposal_after_collections": "docs", "weighbridge_matches": "docs", "collection_point": "real",
     "log_same_photo": "real", "log_reused": "real", "log_repeated": "real",
 }
@@ -438,6 +438,10 @@ def unanswered_check(role: str, names: list[str], none_left: bool) -> dict:
 
 
 def photo_checks(role: str, results: list[dict], vehicle_number: str) -> list[dict]:
+    """A kind of photo's checks. No collection (loading) photo isn't flagged: the trip's order is checked from the
+    weighings and unloading photos without it (the user, 5 Nov 2026)."""
+    if not results and role == "loading":
+        return []
     if not results:
         cause = f"{role}_missing"
         return [check(role, f"{role}_missing", GROUPS[role], "review", f"No {role} photos added.", cause=cause),
@@ -761,19 +765,32 @@ def photo_moments(results: list[dict], around=None) -> list[tuple[dict, dict | N
     return out
 
 
-def busy_time(images: dict[str, list[dict]], sure_only: bool = False, around=None) -> tuple[datetime, datetime] | None:
-    """When the trip was out, by its photos' GPS stamps: from the first collection (loading) photo to the last
-    unloading photo, only by stamps read at least CONFIDENT with `sure_only`. None without a readable stamp on both
-    kinds.
+def gross_start(images: dict[str, list[dict]], around=None) -> tuple[str, dict] | None:
+    """A trip with no collection (loading) photo starts, for `busy_time`, at its gross weighing: the vehicle is loaded
+    by then in either order. (The slip its time is read from, the moment, as sure as the weighing times.) None with a
+    collection photo, or without the weighing times."""
+    if images.get("loading") or not (w := trip_weighings(images, around)):
+        return None
+    # Read from the first and final slips, the earlier time is the first slip's.
+    slip = w["slips"][0] if len(w["slips"]) > 1 and w["gross"]["at"] < w["tare"]["at"] else w["slips"][-1]
+    return slip, {**w["gross"], "certainty": w["certainty"]}
 
-    Not the weighings: a vehicle is often weighed empty once in the morning and that tare printed on every slip of
-    the day, so tare to gross would span all its earlier trips (19 and 23 Oct 2026).
+
+def busy_time(images: dict[str, list[dict]], sure_only: bool = False, around=None) -> tuple[datetime, datetime] | None:
+    """When the trip was out, by its photos' GPS stamps: from the first collection (loading) photo, or the gross
+    weighing without one (`gross_start`), to the last unloading photo, only by times read at least CONFIDENT with
+    `sure_only`. None without a readable start and unloading stamp.
+
+    Not the tare: a vehicle is often weighed empty once in the morning and that tare printed on every slip of the
+    day, so tare to gross would span all its earlier trips (19 and 23 Oct 2026).
     """
     def times(kind):
         return [m["at"] for _, m in photo_moments(images.get(kind, []), around)
                 if m and (not sure_only or m["certainty"] >= CONFIDENT)]
 
     loading, unloading = times("loading"), times("unloading")
+    if (start := gross_start(images, around)) and (not sure_only or start[1]["certainty"] >= CONFIDENT):
+        loading = [start[1]["at"]]
     if not loading or not unloading:
         return None
     times = loading + unloading
@@ -781,9 +798,12 @@ def busy_time(images: dict[str, list[dict]], sure_only: bool = False, around=Non
 
 
 def unsure_stamps(images: dict[str, list[dict]], around=None) -> list[tuple[str, dict]]:
-    """The loading and unloading photos whose stamp was read, but less than CONFIDENT: (name, moment)."""
-    return [(r["name"], m) for kind in ("loading", "unloading") for r, m in photo_moments(images.get(kind, []), around)
-            if m and m["certainty"] < CONFIDENT]
+    """The loading and unloading photos whose stamp was read, but less than CONFIDENT, and the gross weighing when it
+    starts the trip (`gross_start`) and was read less surely: (name, moment)."""
+    found = [(r["name"], m) for kind in ("loading", "unloading") for r, m in photo_moments(images.get(kind, []), around)
+             if m and m["certainty"] < CONFIDENT]
+    start = gross_start(images, around)
+    return found + ([start] if start and start[1]["certainty"] < CONFIDENT else [])
 
 
 def overlap_minutes(a: tuple[datetime, datetime], b: tuple[datetime, datetime]) -> float:
@@ -1090,7 +1110,8 @@ def reuse_check(images: dict[str, list[dict]], index: ImageIndex, trip: str | No
 def overlap_checks(trips: dict[str, dict], slack: int = Limits().clock_slack) -> dict[str, dict]:
     """A vehicle can't be on two trips at once: {trip: check} for each trip whose window (its photos' `busy_time`)
     overlaps another trip's with the same vehicle number by more than `slack` minutes (the cameras' clocks).
-    `trips` maps a trip id to {"vehicle_number", "verdict"}.
+    `trips` maps a trip id to {"vehicle_number", "verdict"}. A window from the gross weighing (no collection photo,
+    the verdict's `window_from`) is named as such.
     """
     def span(w):
         return (datetime.fromisoformat(w[0]), datetime.fromisoformat(w[1])) if w else None
@@ -1111,14 +1132,17 @@ def overlap_checks(trips: dict[str, dict], slack: int = Limits().clock_slack) ->
     for trip, others in found.items():
         number, sure = trips[trip]["vehicle_number"], sorted(o for o, s in others.items() if s)
         doubtful = sorted(o for o, s in others.items() if not s)
+        gross = any(trips[t]["verdict"].get("window_from") == "gross" for t in (trip, *others))
+        by = "the photos' stamps and gross weighing times" if gross else "the photos' stamps"
         if sure:
-            also = (f" It may also be on trip {and_list(doubtful)} then, by stamps Jev wasn't sure of: check those too."
-                    if doubtful else "")
+            also = (f" It may also be on trip {and_list(doubtful)} then, by "
+                    f"{'times' if gross else 'stamps'} Jev wasn't sure of: check those too." if doubtful else "")
             made[trip] = check("trips", "overlap", "One trip at a time", "fail",
-                               f"{number} is also on trip {and_list(sure)} at the same time, by the photos' stamps. "
+                               f"{number} is also on trip {and_list(sure)} at the same time, by {by}. "
                                f"A vehicle can't be on two trips at once.{also}")
         else:
             made[trip] = check("trips", "overlap", "One trip at a time", "review",
                                f"{number} may also be on trip {and_list(sorted(others))} at the same time, but Jev was "
-                               "not sure of some of the photos' stamp times that put it there. Check those stamps.")
+                               f"not sure of some of {by} that put it there. Check those "
+                               f"{'times' if gross else 'stamps'}.")
     return made

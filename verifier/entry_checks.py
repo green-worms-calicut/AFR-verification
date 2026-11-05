@@ -1,5 +1,4 @@
-"""Checks of what was entered in gw_sales against the photos: every collection log has a photo, every collection
-photo was taken on its pickup day and near its collection point, no unloading photo long after the end time, and
+"""Checks of what was entered in gw_sales against the photos: every collection photo was taken on its pickup day and near its collection point, no unloading photo long after the end time, and
 the collections before the disposal's arrival. Also what was collected by hand scale against the net weight entered: recorded, not flagged.
 
 gw_sales sends times in UTC and the photos' GPS stamps show the phone's time, IST, so every time entered is turned
@@ -46,25 +45,6 @@ def log_name(entry: dict, picked_up: bool = False) -> str:
     if picked_up and (at := pickup(entry)):
         where.append(f"picked up {at:%d/%m}")
     return f"collection log {entry['id']}" + (f" ({', '.join(where)})" if where else "")
-
-
-def has_photos(request: dict) -> list[dict]:
-    """Every collection log has a photo of its own: one check per log without, aimed at that log."""
-    entries = logs(request)
-    if not entries:
-        return []
-    taken = {i for ids in owners(request).values() for i in ids if i is not None}
-    label = "Every collection log has a photo"
-    missing = [e for e in entries if e["id"] not in taken]
-    if not missing:
-        return [check("collection", "collection_has_photos", label, "pass", f"Each of the {len(entries)} logs has a photo")]
-    made = []
-    for e in missing:
-        c = check("collection", "collection_has_photos", label, "review",
-                  f"{log_name(e)[0].upper()}{log_name(e)[1:]} has no collection photo: ask for the photo taken at the pickup.")
-        c["target"] = {"type": "collection_log", "id": e["id"]}
-        made.append(c)
-    return made
 
 
 def log_same_photo(request: dict, images: dict[str, list[dict]]) -> list[dict]:
@@ -241,7 +221,7 @@ def collection_points(request: dict, images: dict[str, list[dict]], radius: floa
     for e in logs(request):
         point = point_of(e)
         photos = [r for r in images.get("loading", []) if point and e["id"] in owner_of.get(r["name"], [])]
-        if not photos:  # no point known, or no photo of it to check (has_photos asks for one)
+        if not photos:  # no point known, or no photo of it to check (a log without a photo isn't flagged)
             continue
         name = (e.get("collectionPoint") or {}).get("name")
         where = f"the collection point of {log_name(e)}" if not name else f"{name}, the collection point of collection log {e['id']}"
@@ -337,7 +317,7 @@ def checks(request: dict, images: dict[str, list[dict]], radius: float = 500, ar
     """Every check of what was entered, for one disposal's request and its checked images; `radius` is how far from
     its collection point a collection photo may be, `around` the trip's date, and `other_logs` the collection logs of
     other disposals (`database.other_logs`)."""
-    return [*has_photos(request), *log_same_photo(request, images), *log_reused(request, other_logs),
+    return [*log_same_photo(request, images), *log_reused(request, other_logs),
             *log_repeated(request, other_logs),
             *(c for c in (photo_date(request, images, around), too_late(request, images, around),
                           after_collections(request)) if c),
