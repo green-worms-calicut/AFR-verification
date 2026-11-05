@@ -52,9 +52,16 @@ def where(copy: Copy | None) -> str:
     return f" ({', '.join(known)})" if known else ""
 
 
-def reused(images: dict[str, list[dict]], others: list[Other], copies: list[Copy] = ()) -> dict:
+def as_named(key: str, disposal: int | None = None) -> str:
+    """An image's name in a message: its s3Key, unless the caller names images for people (`disposal_check.Namer`).
+    `disposal` is the other disposal it is in, None for this one's."""
+    return key
+
+
+def reused(images: dict[str, list[dict]], others: list[Other], copies: list[Copy] = (), name=as_named) -> dict:
     """Images also in another disposal: an exact copy is a problem, a look-alike asks a person. Exact copies are
-    found in `copies` (any vehicle, any date) and in `others`; look-alikes only in `others`."""
+    found in `copies` (any vehicle, any date) and in `others`; look-alikes only in `others`. `name` names an image in
+    the message (`as_named`)."""
     index = proof_check.ImageIndex()
     for o in others:
         for results in o.analysis["images"].values():
@@ -84,7 +91,8 @@ def reused(images: dict[str, list[dict]], others: list[Other], copies: list[Copy
         return check("trips", "reused", label, "pass", "None seen in another disposal")
     found = exact or alike
     what = "the same file as" if exact else "looks the same as"
-    detail = "; ".join(f"{a} is {what} {b} in disposal {i}{where(at.get((i, b)))}" for a, b, i in dict.fromkeys(found))
+    detail = "; ".join(f"{name(a)} is {what} {name(b, i)} in disposal {i}{where(at.get((i, b)))}"
+                       for a, b, i in dict.fromkeys(found))
     if more:
         detail += f"; and {more} more disposals"
     tail = " The same photo can't be proof for two disposals." if exact else " Compare them."
@@ -99,7 +107,8 @@ def moments(images: dict[str, list[dict]], around=None) -> list[tuple[dict, dict
     return [(r, m) for kind in PHOTOS for r, m in proof_check.photo_moments(images.get(kind, []), around) if m]
 
 
-def same_moment(images: dict[str, list[dict]], others: list[Other], flagged: set[int], around=None) -> dict:
+def same_moment(images: dict[str, list[dict]], others: list[Other], flagged: set[int], around=None,
+                name=as_named) -> dict:
     """A photo stamped within SAME_MOMENT minutes of a photo in another disposal, one not already `flagged` by
     `reused` or `overlap`."""
     found = []
@@ -113,8 +122,8 @@ def same_moment(images: dict[str, list[dict]], others: list[Other], flagged: set
     label = "Photos not from another disposal's moment"
     if not found:
         return check("trips", "same_moment", label, "pass", f"No photo within {SAME_MOMENT} min of one in another disposal")
-    detail = "; ".join(f"{a} was stamped {m['time']} on {m['date']}, {b} in disposal {i} {m2['time']} on {m2['date']}"
-                       for a, m, b, m2, i in found)
+    detail = "; ".join(f"{name(a)} was stamped {m['time']} on {m['date']}, {name(b, i)} in disposal {i} "
+                       f"{m2['time']} on {m2['date']}" for a, m, b, m2, i in found)
     made = check("trips", "same_moment", label, "review",
                  f"{detail}. Photos of one vehicle within {SAME_MOMENT} min in two disposals may be one trip entered "
                  "twice: check they're different trips.", min(min(m["certainty"], m2["certainty"]) for _, m, _, m2, _ in found),
@@ -124,7 +133,7 @@ def same_moment(images: dict[str, list[dict]], others: list[Other], flagged: set
 
 
 def same_weighing(images: dict[str, list[dict]], quantity: str | None, others: list[Other], flagged: set[int],
-                  around=None) -> dict | None:
+                  around=None, name=as_named) -> dict | None:
     """The same gross weighing, within SAME_WEIGHING minutes, on this trip's final slip and another disposal's, one not
     already `flagged` by `reused`: a problem when Jev was sure of both times, else it asks a person. The tare isn't
     compared, as one morning tare is printed on every slip of the day. None without a gross weighing to compare."""
@@ -149,7 +158,8 @@ def same_weighing(images: dict[str, list[dict]], quantity: str | None, others: l
     final = proof_check.final_slip(images["bill"])
     parts = []
     for o, t in sure or found:
-        part = f"{ours} shows the gross weighing at {here['time']} on {here['date']}, the same as {disposals([o.disposal_id])}'s slip {t['slips'][-1]}"
+        part = (f"{name(ours)} shows the gross weighing at {here['time']} on {here['date']}, the same as "
+                f"{disposals([o.disposal_id])}'s {name(t['slips'][-1], o.disposal_id)}")
         theirs_final = proof_check.final_slip(o.analysis["images"]["bill"])
         net = lambda slip: slip["answers"].get("net_weight", {}).get("choice")  # asked only of a quantity in kg
         if (quantity and quantity.endswith(" kg") and quantity == o.quantity and net(final) == "same"
@@ -164,19 +174,19 @@ def same_weighing(images: dict[str, list[dict]], quantity: str | None, others: l
                      f"{detail}. One weighing can't be proof for two disposals.{also}",
                      images=list(dict.fromkeys([ours, *(t["slips"][-1] for _, t in sure)])))
     else:
-        unclear = [(ours, here)] + [(t["slips"][-1], t["gross"]) for _, t in found]
-        read = "; ".join(f"{name} was read as {m['time']} on {m['date']}, but only {m['certainty']:.0%} sure"
-                         for name, m in unclear if m["certainty"] < CONFIDENT)
+        unclear = [(ours, here, None)] + [(t["slips"][-1], t["gross"], o.disposal_id) for o, t in found]
+        read = "; ".join(f"{name(key, i)}{f' in disposal {i}' if i else ''} was read as {m['time']} on {m['date']}, "
+                         f"but only {m['certainty']:.0%} sure" for key, m, i in unclear if m["certainty"] < CONFIDENT)
         made = check("trips", "same_weighing", label, "review",
                      f"{detail}, but Jev wasn't sure of every time: {read}. Check the gross time on both slips.",
-                     min(m["certainty"] for _, m in unclear),
-                     images=list(dict.fromkeys(name for name, _ in unclear)))
+                     min(m["certainty"] for _, m, _ in unclear),
+                     images=list(dict.fromkeys(key for key, _, _ in unclear)))
     made["related"] = related(o.disposal_id for o, _ in found)
     return made
 
 
 def overlap(vehicle: str, images: dict[str, list[dict]], others: list[Other], flagged: set[int], slack: int,
-            around=None) -> dict | None:
+            around=None, name=as_named) -> dict | None:
     """The vehicle can't be on two trips at once: this trip's time out (`busy_time`) overlapping another disposal's by
     more than `slack` minutes, one not already `flagged` by `reused`. A problem only by stamps Jev was sure of on both
     sides; by unsure ones too, it asks a person. None without the photos to time it."""
@@ -195,14 +205,14 @@ def overlap(vehicle: str, images: dict[str, list[dict]], others: list[Other], fl
             doubtful.append(o)
     label = "One trip at a time"
     if not found and doubtful:
-        stamps = [(name, m, None) for name, m in unsure_stamps(images, around)]
-        stamps += [(name, m, o.disposal_id) for o in doubtful for name, m in unsure_stamps(o.analysis["images"], around)]
-        read = "; ".join(f"{name}{f' in disposal {i}' if i else ''} was read as {m['time']} on {m['date']}, but only "
-                         f"{m['certainty']:.0%} sure" for name, m, i in stamps)
+        stamps = [(key, m, None) for key, m in unsure_stamps(images, around)]
+        stamps += [(key, m, o.disposal_id) for o in doubtful for key, m in unsure_stamps(o.analysis["images"], around)]
+        read = "; ".join(f"{name(key, i)}{f' in disposal {i}' if i else ''} was read as {m['time']} on {m['date']}, "
+                         f"but only {m['certainty']:.0%} sure" for key, m, i in stamps)
         made = check("trips", "overlap", label, "review",
                      f"{vehicle}'s photos for this disposal would overlap {disposals(o.disposal_id for o in doubtful)} "
                      f"by stamps Jev wasn't sure of: {read}. Check those stamp times.",
-                     min(m["certainty"] for _, m, _ in stamps), images=[name for name, _, i in stamps if i is None])
+                     min(m["certainty"] for _, m, _ in stamps), images=[key for key, _, i in stamps if i is None])
         made["related"] = related(o.disposal_id for o in doubtful)
         return made
     if not found:
@@ -219,25 +229,25 @@ def overlap(vehicle: str, images: dict[str, list[dict]], others: list[Other], fl
 
 
 def checks(vehicle: str | None, analysis: dict, others: list[Other], slack: int = Limits().clock_slack,
-           around=None, quantity: str | None = None, copies: list[Copy] = ()) -> list[dict]:
+           around=None, quantity: str | None = None, copies: list[Copy] = (), name=as_named) -> list[dict]:
     """Every check across disposals for one checked disposal, `slack` the minutes cameras' clocks may differ.
     Without a vehicle number, only `reused` (exact copies in `copies` need none) and one saying it wasn't compared. Each other disposal is flagged by the first check
-    that finds it."""
+    that finds it. `name` names images in the messages (`as_named`)."""
     images = analysis["images"]
     if not vehicle:
-        return [reused(images, [], copies),
+        return [reused(images, [], copies, name),
                 check("trips", "not_compared", "Compared with other disposals", "review",
                       "The vehicle number entered couldn't be read as a number, so this disposal wasn't compared with "
                       "other disposals. Check it against the photos.")]
     made = []
-    reuse = reused(images, others, copies)
+    reuse = reused(images, others, copies, name)
     made.append(reuse)
     flagged = {r["id"] for r in reuse.get("related", [])}
-    if c := same_weighing(images, quantity, others, flagged, around):
+    if c := same_weighing(images, quantity, others, flagged, around, name):
         made.append(c)
         flagged |= {r["id"] for r in c.get("related", [])}
-    if c := overlap(vehicle, images, others, flagged, slack, around):
+    if c := overlap(vehicle, images, others, flagged, slack, around, name):
         made.append(c)
         flagged |= {r["id"] for r in c.get("related", [])}
-    made.append(same_moment(images, others, flagged, around))
+    made.append(same_moment(images, others, flagged, around, name))
     return made

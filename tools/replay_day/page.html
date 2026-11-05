@@ -90,7 +90,7 @@ function imgSrc(card, image, small = true) {
 function thumbs(card, keys) {
   const images = keys ? card.images.filter(i => keys.includes(i.key)) : card.images;
   if (!images.length) return "";
-  return `<div class="thumbs">${images.map(i => `<figure><img loading="lazy" src="${imgSrc(card, i)}" data-full="${imgSrc(card, i, false)}" alt="${esc(i.name)}"><figcaption>${esc(i.kind)} · ${esc(i.name)}</figcaption></figure>`).join("")}</div>`;
+  return `<div class="thumbs">${images.map(i => `<figure><img loading="lazy" src="${imgSrc(card, i)}" data-full="${imgSrc(card, i, false)}" alt="${esc(i.name)}"><figcaption title="${esc(i.fileName)}">${esc(card.id)} ${esc(i.name)}</figcaption></figure>`).join("")}</div>`;
 }
 
 function markControls(card, key, about, choices, current, note) {
@@ -103,7 +103,8 @@ function markControls(card, key, about, choices, current, note) {
 
 function flagHtml(card, f) {
   return `<div class="flag">
-    <span class="pill ${esc(f.severity)}">${esc(f.severity)}</span> <b>${esc(f.code)}</b> <span class="muted">· ${esc(f.kind)}</span>
+    <span class="pill ${esc(f.severity)}">${esc(f.severity)}</span> <b>${esc(f.title || f.code)}</b>
+    <span class="muted">· ${esc(f.kind)} · ${esc(f.code)}</span>
     <p>${esc(f.message)}</p>
     ${f.related ? `<div class="note-line">Linked to disposal ${f.related.map(r => `<a href="#d${r.id}">${r.id}</a>`).join(", ")}</div>` : ""}
     ${thumbs(card, f.evidence || [])}
@@ -166,7 +167,7 @@ function render() {
   const dupes = report.duplicates.length ? report.duplicates.map(d => {
       const card = report.disposals.find(c => c.id === d.disposal);
       return `<div class="card"><a href="#d${d.disposal}">${d.disposal}</a> ↔ ${d.others.map(i => `<a href="#d${i}">${i}</a>`).join(", ")}
-        <span class="pill ${esc(d.severity)}">${esc(d.code)}</span><p>${esc(d.message)}</p>${thumbs(card, d.images.map(i => i.key))}</div>`;
+        <span class="pill ${esc(d.severity)}">${esc(d.title || d.code)}</span><p>${esc(d.message)}</p>${thumbs(card, d.images.map(i => i.key))}</div>`;
     }).join("") : `<p class="muted">None.</p>`;
   const groups = GROUPS.map(([g, title, about]) => {
     const cards = report.disposals.filter(c => c.group === g);

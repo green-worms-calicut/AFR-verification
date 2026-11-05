@@ -68,8 +68,10 @@ def fake_answers(slot: str, picks: dict, body: bytes | None = None, drop: set[st
                            "confidence": 0.9}
     for qid in proof_check.PICKS:
         if body is not None and f'"{qid}":{{'.encode() in body:
-            choice, conf = picks.get(qid, (proof_check.NOT_SHOWN, 0.3))
-            answers[qid] = {"type": "choice", "choice": choice, "confidence": conf, "probabilities": {choice: conf, "other": 1 - conf}}
+            choice, conf, *others = picks.get(qid, (proof_check.NOT_SHOWN, 0.3))
+            others = others[0] if others else {}
+            answers[qid] = {"type": "choice", "choice": choice, "confidence": conf,
+                            "probabilities": {choice: conf, **others, "other": 1 - conf - sum(others.values())}}
     return {"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 1000, "output_tokens": 30}}
 
 
@@ -820,6 +822,14 @@ class TripTests(unittest.TestCase):
         self.assertEqual(c["detail"], "The time on the GPS stamp of unloading1.jpg was read as 04:09, but only 50% sure. "
                                       "Check it was taken after the gross (loaded) weighing at 03:30.")
 
+    def test_an_unsure_stamp_date_is_named_as_the_date(self):
+        # The time read surely but the month not (3 Nov 2026: 11 or 03): the reason says the date was unsure, not the time.
+        v = run_trip(unloading=({**UNLOADING, "stamp_month": ("10", 0.6)},))[0]["verdict"]
+        c = by_key(v["checks"])["unloading_timing"]
+        self.assertEqual((c["status"], c["cause"]), ("review", "unloading_stamps"))
+        self.assertEqual(c["detail"], "The date on the GPS stamp of unloading1.jpg was read as 15/10, but only 60% sure. "
+                                      "Check it was taken after the gross (loaded) weighing at 03:30.")
+
     def test_unsure_weighing_times_are_one_reason(self):
         # The gap and every photo time depend on the weighing times: unsure of those, all ask a person for one cause.
         v = run_trip(bill=(FIRST, {**FINAL, **at("tare", "02:00", confidence=0.6)}))[0]["verdict"]
@@ -947,6 +957,24 @@ class TripTests(unittest.TestCase):
         self.assertEqual(by_key(run_trip(unloading=(unread,), plant=PLANT)[0]["verdict"]["checks"])["unloading_plant"]["status"], "review")
         trip, jev = run_trip(unloading=({**UNLOADING, **AT_PLANT, "lat_degrees": ("not_shown", 0.9)},), plant=PLANT)
         self.assertFalse(any(b'"line":{"type":"box"' in sent(r) for r in jev.requests))
+
+    def test_neighbouring_picks_on_the_same_side_decide(self):
+        # As 79220 on 3 Nov 2026: torn between two values 11 m apart, both well within, so the photo is within.
+        torn = {**UNLOADING, **AT_PLANT, "lat_pick": ("11.4404", 0.6, {"11.4405": 0.38})}
+        c = by_key(run_trip(unloading=(torn,), plant=PLANT)[0]["verdict"]["checks"])["unloading_plant"]
+        self.assertEqual((c["status"], c["detail"]),
+                         ("pass", "1 of 1 stamped within 500 m: unloading1.jpg at 11.4404, 75.9419, 0 m from the plant "
+                                  "(93% likely within 500 m)"))
+
+    def test_a_two_decimal_square_all_within_the_radius_decides(self):
+        # Not picked to four decimals, but all of the 1.1 km square is within 2 km of the plant.
+        unpicked = {**UNLOADING, **stamped_at("11.440404", "75.941976", picked=None)}
+        c = by_key(run_trip(unloading=(unpicked,), plant=PLANT, limits=Limits(plant_radius=2000))[0]["verdict"]["checks"])
+        self.assertEqual((c["unloading_plant"]["status"], c["unloading_plant"]["detail"]),
+                         ("pass", "1 of 1 stamped within 2 km: unloading1.jpg at 11.44, 75.94, within 1.4 km of the plant"))
+        # Across the radius, the square decides nothing.
+        c = by_key(run_trip(unloading=(unpicked,), plant=PLANT)[0]["verdict"]["checks"])
+        self.assertEqual(c["unloading_plant"]["status"], "review")
 
     def test_a_torn_two_decimal_reading_against_a_sure_one_asks_a_person(self):
         # As 171535 on 19 Oct 2026: one photo read 11.40 (11.44 on the stamp) and its line not picked,

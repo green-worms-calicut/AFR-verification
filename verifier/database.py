@@ -210,6 +210,7 @@ class Copy:
     disposal_id: int
     vehicle: str | None
     day: date | None
+    evidence: list[dict] | None = None  # that request's evidence, to name its images for people
 
 
 async def save_prints(pool: AsyncConnectionPool, request_id: str, prints: list[ImagePrint]) -> None:
@@ -228,9 +229,10 @@ async def copies(pool: AsyncConnectionPool, disposal_id: int, md5s: list[str]) -
         return []
     async with pool.connection() as conn:
         cur = await conn.execute(
-            """SELECT p.name, p.kind, p.md5, q.disposal_id, q.vehicle_number, q.trip_day
+            """SELECT p.name, p.kind, p.md5, q.disposal_id, q.vehicle_number, q.trip_day, q.evidence
                FROM image_print p JOIN (
-                   SELECT DISTINCT ON (disposal_id) request_id, disposal_id, vehicle_number, trip_day
+                   SELECT DISTINCT ON (disposal_id) request_id, disposal_id, vehicle_number, trip_day,
+                          body->'evidence' AS evidence
                    FROM verification_request
                    WHERE disposal_id <> %(disposal)s AND disposal_id IN (
                        SELECT x.disposal_id FROM image_print m JOIN verification_request x USING (request_id)

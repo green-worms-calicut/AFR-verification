@@ -68,7 +68,10 @@ def close_calls(analysis: dict, names: dict[str, str], margin: float) -> list[di
 
 
 def image_list(body: dict) -> list[dict]:
-    return [{"key": item["s3Key"], "name": item.get("fileName") or item["s3Key"].rsplit("/", 1)[-1],
+    """The disposal's images, each named as in the flags ("collection photo 1"), with the file name it was added as."""
+    labels = disposal_check.image_labels(body.get("evidence"))
+    return [{"key": item["s3Key"], "name": labels.get(item["s3Key"]) or item.get("fileName") or item["s3Key"],
+             "fileName": item.get("fileName") or item["s3Key"].rsplit("/", 1)[-1],
              "kind": disposal_check.KINDS.get(item.get("category"), item.get("category")),
              "file": files.file_name(item["s3Key"])}
             for item in body.get("evidence") or [] if item.get("s3Key")]
@@ -235,7 +238,8 @@ def changes(cards: list[dict], marks: dict) -> list[dict]:
 
 def duplicates(cards: list[dict]) -> list[dict]:
     """Every flag linking a disposal with another: (this disposal, the others, the flag)."""
-    return [{"disposal": c["id"], "others": [r["id"] for r in f["related"]], "code": f["code"], "severity": f["severity"],
+    return [{"disposal": c["id"], "others": [r["id"] for r in f["related"]], "code": f["code"], "title": f.get("title"),
+             "severity": f["severity"],
              "message": f["message"], "images": f["images"]}
             for c in cards for f in c["flags"] if f.get("related")]
 

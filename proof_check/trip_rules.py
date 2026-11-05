@@ -288,7 +288,8 @@ def moment(time: dict, date: dict, around=None) -> dict | None:
     except (ValueError, TypeError):
         return None
     return {"at": at, "time": time["value"], "date": date["value"],
-            "certainty": min(time["min_confidence"], date["min_confidence"])}
+            "certainty": min(time["min_confidence"], date["min_confidence"]),
+            "time_certainty": time["min_confidence"], "date_certainty": date["min_confidence"]}
 
 
 def minutes_between(a: dict, b: dict) -> int:
@@ -476,18 +477,45 @@ def from_square(value: str, plant: tuple[float, float]) -> float:
     return metres_between(plant, tuple(nearest))
 
 
-def chance_away(answers: dict[str, dict], plant: tuple[float, float], radius: float) -> float:
-    """The probability that a photo's two-decimal reading places it farther than `radius` from the plant,
-    over every combination of the likeliest answers (each place question's top five).
+def to_square(value: str, point: tuple[float, float]) -> float:
+    """How far `point` is from the farthest corner of the square a position reading stands for (`from_square`), in
+    metres: every place in the square is at most this far."""
+    corner = [float(x) for x in value.split(", ")]
+    size = 10.0 ** -len(value.split(", ")[0].partition(".")[2])
+    return max(metres_between(point, (lat, long)) for lat in (corner[0], corner[0] + size) for long in (corner[1], corner[1] + size))
 
-    An unsure digit can still be clear about the plant: 11.16 or 11.11 are both far from 11.44.
+
+def positions(answers: dict[str, dict]) -> list[tuple[bool, list[tuple[str, float]]]]:
+    """The positions a photo's GPS stamp may show, as readings with their probability, such as ("11.4404, 75.9419", 0.9):
+    over every combination of each question's likeliest answers (its top five), leaving out a combination with an
+    answer that isn't a number, such as "can't read". First the four-decimal picks (`read_line`), when made, then the two-decimal reading, each with
+    whether it is to four decimals.
+
+    Only Jev's answers: nothing here knows where the photo should be.
     """
-    away = 0.0
-    for combo in itertools.product(*(answers[q]["top"] for q in PLACE)):
-        chosen = [option for option, _ in combo]
-        if NOT_SHOWN not in chosen and from_square(f"{chosen[0]}.{chosen[1]}, {chosen[2]}.{chosen[3]}", plant) > radius:
-            away += math.prod(p for _, p in combo)
-    return away
+    found = []
+    for four, qids, join in ((True, PICKS, ", ".join), (False, PLACE, lambda c: f"{c[0]}.{c[1]}, {c[2]}.{c[3]}")):
+        if all(q in answers for q in qids):
+            readings = []
+            for combo in itertools.product(*(answers[q]["top"] for q in qids)):
+                chosen = [option for option, _ in combo]
+                if all(option.replace(".", "", 1).isdigit() for option in chosen):
+                    readings.append((join(chosen), math.prod(p for _, p in combo)))
+            found.append((four, readings))
+    return found
+
+
+def chance_within(readings: list[tuple[str, float]], point: tuple[float, float], radius: float) -> tuple[float, float]:
+    """The probability that the photo was taken within `radius` of `point`, and that it was taken farther: a reading
+    counts as within when all of its square is (`to_square`), farther when none of it is (`from_square`).
+
+    A square across the radius, and the probability on answers outside the likeliest, count as neither, so an
+    unsure digit decides nothing unless every likely reading agrees: 11.16 or 11.11 are both far from 11.44, and
+    11.6721 or 11.6722 both 1.4 km from a collection point 4 km allowed.
+    """
+    within = sum(p for value, p in readings if to_square(value, point) <= radius)
+    farther = sum(p for value, p in readings if from_square(value, point) > radius)
+    return within, farther
 
 
 def plant_check(results: list[dict], plant: tuple[float, float], limits: Limits) -> dict:
@@ -497,38 +525,52 @@ def plant_check(results: list[dict], plant: tuple[float, float], limits: Limits)
                       "the plant", "unloading")
 
 
+def placed(four: bool, readings: list[tuple[str, float]], near: bool, chance: float, point: tuple[float, float],
+           radius: float, point_name: str, coarse: str | None) -> tuple[str, float]:
+    """How a decided position reads in a detail, and its distance in metres: the likeliest reading on the side
+    decided, with how likely that side is when no one reading is sure on its own."""
+    side = [(v, p) for v, p in readings if (to_square(v, point) <= radius if near else from_square(v, point) > radius)]
+    value, likeliest = max(side, key=lambda x: x[1])
+    m = from_square(value, point)
+    sure = likeliest >= YES
+    if four:
+        how = f" ({chance:.0%} likely {'within' if near else 'farther than'} {distance(radius)})" if not sure else ""
+        return f"at {value}, {distance(m)} from {point_name}{how}", m
+    if near:
+        how = f" ({chance:.0%} likely)" if not sure else ""
+        return f"at {value}, within {distance(to_square(value, point))} of {point_name}{how}", m
+    if sure:
+        return f"at {value}, at least {distance(m)} from {point_name}", m
+    return f"away from {point_name} ({chance:.0%} likely, {f'read as {coarse}' if coarse else 'partly read'})", m
+
+
 def near_check(group: str, key: str, label: str, results: list[dict], point: tuple[float, float], radius: float,
                point_name: str, doing: str) -> dict:
     """At least one of the photos in `results` stamped within `radius` of `point`; any stamped farther is a problem.
     `point_name` names the point in the details ("the plant") and `doing` what happens there ("unloading").
 
-    Within the radius takes a position picked surely to four decimals (a square about 11 m across), so the
-    distance is known to the metre. Away can also be shown by the two-decimal reading: when even the
-    nearest point of its 1.1 km square (`from_square`) is past the radius, read surely or by `chance_away`.
-    But a two-decimal "away" against another photo surely near asks a person: on 19 Oct 2026 two photos
-    at the plant were read 11.40 or 11.14 for 11.44, 84% sure. Like the plate, one photo is enough to
+    Each photo is decided in three steps that don't know about each other: the positions its stamp may show
+    (`positions`, from Jev's answers), how likely they put it within the radius or farther (`chance_within`, only
+    geometry), and the decision: within or farther when that is at least YES likely, from the four-decimal picks
+    if they decide, otherwise from the two-decimal reading (its 1.1 km squares decide only when all of a square
+    is on one side). But a two-decimal "farther" against another photo within asks a person: on 19 Oct 2026 two
+    photos at the plant were read 11.40 or 11.14 for 11.44, 84% sure. Like the plate, one photo is enough to
     pass, and anything less sure asks a person.
     """
     near, away, unsure, unread = [], [], [], []  # near and away: (result, detail, certainty, metres, to four decimals)
     for r in results:
         p = next((x for x in r["readings"] if x["key"] == "position"), None)
-        if not p:
-            unread.append(r)
-            continue
-        if not p["missing"] and p["value"] != p["coarse"]["value"] and p["min_confidence"] >= CONFIDENT:
-            m = from_square(p["value"], point)
-            (near if m <= radius else away).append((r, f"at {p['value']}, {distance(m)} from {point_name}", p["min_confidence"], m, True))
-            continue
-        c = p["coarse"]
-        if not c["missing"] and c["min_confidence"] >= CONFIDENT:
-            if (m := from_square(c["value"], point)) > radius:
-                away.append((r, f"at {c['value']}, at least {distance(m)} from {point_name}", c["min_confidence"], m, False))
-                continue
-        elif (no := chance_away(r["answers"], point, radius)) >= YES:
-            read = f"read as {c['value']}" if c["value"] else "partly read"
-            away.append((r, f"away from {point_name} ({no:.0%} likely, {read})", no, None, False))
-            continue
-        (unread if c["missing"] else unsure).append(r)
+        decided = None
+        for four, readings in positions(r["answers"]) if p else ():
+            within, farther = chance_within(readings, point, radius)
+            if within >= YES or farther >= YES:
+                chance = max(within, farther)
+                detail, m = placed(four, readings, within >= YES, chance, point, radius, point_name, p["coarse"]["value"])
+                (near if within >= YES else away).append((r, detail, chance, m, four))
+                decided = True
+                break
+        if not decided:
+            (unread if not p or p["coarse"]["missing"] else unsure).append(r)
     closest = min(near, key=lambda x: x[3], default=None)
     if away and (any(x[4] for x in away) or not near):
         r, detail, c, _, _ = next((x for x in away if x[4]), away[0])
@@ -804,10 +846,13 @@ def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_f
                      f"taken {window}.", images=named(unread))
     if unsure:
         photos = [r for r, _ in unsure]
-        read = and_list(sorted({at(m) for _, m in unsure}))
         c = min(m["certainty"] for _, m in unsure)
+        if all(m["date_certainty"] < m["time_certainty"] for _, m in unsure):  # the time was sure, its date wasn't
+            part, read = "date", and_list(sorted({m["date"] for _, m in unsure}))
+        else:
+            part, read = "time", and_list(sorted({at(m) for _, m in unsure}))
         return check(role, f"{role}_timing", label, "review",
-                     f"The time on the GPS stamp of {names(photos)} was read as {read}, but only {c:.0%} sure. "
+                     f"The {part} on the GPS stamp of {names(photos)} was read as {read}, but only {c:.0%} sure. "
                      f"Check {plural(photos, 'it was', 'they were')} taken {window}.", c, named(photos), f"{role}_stamps")
     short = (f"between {after} {shown[after]} and {before} {shown[before]}" if after and before
              else f"after {after} {shown[after]}" if after else f"before {before} {shown[before]}")

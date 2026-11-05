@@ -319,7 +319,17 @@ class CheckTests(unittest.TestCase):
         first = checked.flags[0]
         self.assertEqual((first["code"], first["severity"], first["kind"]), ("bill_number", "high", "problem found"))
         self.assertIn("disposal/2026/10/15/weighbill2.jpg", first["evidence"])
-        self.assertTrue(first["message"])
+        self.assertEqual(first["title"], "Bills match KL05AF9341")
+        self.assertIn("1234 weigh bill 2", first["message"])
+        self.assertNotIn("disposal/2026", first["message"])
+        self.assertEqual(checked.extractions["images"]["disposal/2026/10/15/weighbill2.jpg"]["label"], "weigh bill 2")
+        self.assertEqual(checked.analysis["labels"]["collection-logs/2026/10/15/collection1.jpg"], "collection photo 1")
+
+    def test_images_are_named_by_kind_in_the_order_listed(self):
+        evidence = [{"category": c, "s3Key": k} for c, k in (("collection", "a"), ("weighbill", "b"), ("collection", "c"),
+                                                              ("unloading", "d"), ("gps_photo", "e"), ("collection", "a"))]
+        self.assertEqual(disposal_check.image_labels(evidence),
+                         {"a": "collection photo 1", "b": "weigh bill", "c": "collection photo 2", "d": "unloading photo"})
 
     def test_missing_photo_asks_a_person_and_the_rest_is_checked(self):
         uploads, jev = make_trip()
@@ -520,7 +530,7 @@ class EntryCheckTests(unittest.TestCase):
         uploads, self.jev = make_trip(same=(("loading", 0, "loading", 1),))
         flag = next(f for f in self.checked(self.two_logs(uploads), uploads).flags if f["code"] == "log_same_photo")
         self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
-        self.assertIn("collection1.jpg and collection-logs/2026/10/15/collection2.jpg are the same file", flag["message"])
+        self.assertIn("1234 collection photo 1 and 1234 collection photo 2 are the same file", flag["message"])
         self.assertNotIn("target", flag)
 
     def test_a_look_alike_in_two_logs_asks_a_person(self):
@@ -677,8 +687,10 @@ class CompareTests(unittest.TestCase):
         flag = self.flag(checked, "reused")
         self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
         self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
-        self.assertIn("is the same file as collection-logs/2026/10/15/collection1.jpg in disposal 1000", flag["message"])
-        self.assertIn("collection-logs/2026/10/15/b-collection1.jpg", flag["evidence"])
+        self.assertIn("1234 collection photo 1 is the same file as collection photo 1 in disposal 1000", flag["message"])
+        self.assertIn("1234 weigh bill 2 is the same file as weigh bill 2 in disposal 1000", flag["message"])
+        self.assertNotIn(".jpg", flag["message"], "images are named for people, not by s3Key")
+        self.assertIn("collection-logs/2026/10/15/b-collection1.jpg", flag["evidence"], "evidence keeps the s3Keys")
         self.assertIsNone(self.flag(checked, "same_moment"), "copies are reused's, not also the same moment")
 
     def test_look_alike_asks_a_person(self):
@@ -696,8 +708,7 @@ class CompareTests(unittest.TestCase):
         checked = self.checked(uploads, jev, [self.first()], quantity=999)
         flag = self.flag(checked, "reused")
         self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
-        self.assertIn("b-collection1.jpg is the same file as disposal/2026/10/15/unloading1.jpg in disposal 1000",
-                      flag["message"])
+        self.assertIn("1234 collection photo 1 is the same file as unloading photo 1 in disposal 1000", flag["message"])
 
     def test_photos_at_the_same_moment_ask_a_person(self):
         # Disposal 1000's last unloading photo is 04:09; this trip's collection photos are 04:11, its unloading 05:30.
@@ -707,7 +718,8 @@ class CompareTests(unittest.TestCase):
         flag = self.flag(checked, "same_moment")
         self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
         self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
-        self.assertIn("b-collection1.jpg was stamped 04:11 on 15/10", flag["message"])
+        self.assertIn("1234 collection photo 1 was stamped 04:11 on 15/10, unloading photo 2 in disposal 1000 04:09 on 15/10",
+                      flag["message"])
         self.assertIsNone(self.flag(checked, "overlap"))
         self.assertIsNone(self.flag(checked, "reused"))
 
@@ -764,7 +776,7 @@ class CompareTests(unittest.TestCase):
                                   bill=(FIRST, {**FINAL, **at("gross", "05:00")}))
         flag = self.flag(self.checked(uploads, jev, [self.first()], quantity=999), "overlap")
         self.assertEqual(flag["kind"], "please check")
-        self.assertIn("b-unloading2.jpg", flag["message"])
+        self.assertIn("1234 unloading photo 2 was read as 03:00", flag["message"])
         self.assertIn("30% sure", flag["message"])
 
     def test_trips_without_both_kinds_of_photo_are_not_timed(self):
@@ -779,8 +791,8 @@ class CompareTests(unittest.TestCase):
         flag = self.flag(self.checked(uploads, jev, [self.first()]), "same_weighing")
         self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
         self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
-        self.assertIn("disposal/2026/10/15/b-weighbill2.jpg shows the gross weighing at 03:30 on 15/10, the same as "
-                      "disposal 1000's slip disposal/2026/10/15/weighbill2.jpg", flag["message"])
+        self.assertIn("1234 weigh bill 2 shows the gross weighing at 03:30 on 15/10, the same as disposal 1000's weigh bill 2",
+                      flag["message"])
         self.assertIn("One weighing can't be proof for two disposals.", flag["message"])
 
     def test_the_same_net_weight_is_named_when_both_quantities_match(self):
@@ -858,7 +870,7 @@ class CompareTests(unittest.TestCase):
         uploads, jev = make_trip(same=(("loading", 0, "unloading", 0),))
         flag = self.flag(self.checked(uploads, jev), "same_file")
         self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
-        self.assertIn("collection-logs/2026/10/15/collection1.jpg and disposal/2026/10/15/unloading1.jpg", flag["message"])
+        self.assertIn("1234 collection photo 1 and 1234 unloading photo 1", flag["message"])
 
     def test_without_a_vehicle_number_only_the_disposal_itself_is_checked(self):
         uploads, jev = other_trip(colours=0, bill=LATER)
@@ -880,9 +892,17 @@ class CompareTests(unittest.TestCase):
             checked = disposal_check.check(disposal(uploads), files(uploads).get, client, history=lambda rows: [self.copy()])
         flag = self.flag(checked, "reused")
         self.assertEqual((flag["kind"], flag["severity"]), ("problem found", "high"))
-        self.assertIn("is the same file as collection-logs/2026/10/15/collection1.jpg in disposal 900 (KL07BC1234, 01/09)",
-                      flag["message"])
+        self.assertIn("1234 collection photo 1 is the same file as collection photo in disposal 900 (KL07BC1234, 01/09)",
+                      flag["message"], "named by its kind when that disposal's evidence isn't known")
         self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 900}])
+
+    def test_a_copy_is_named_by_its_own_disposals_evidence(self):
+        uploads, jev = make_trip()
+        copy = self.copy()
+        copy.evidence = disposal(uploads, disposal_id=900)["evidence"][::-1]  # listed last of its two there
+        with jev.client() as client:
+            checked = disposal_check.check(disposal(uploads), files(uploads).get, client, history=lambda rows: [copy])
+        self.assertIn("is the same file as collection photo 2 in disposal 900", self.flag(checked, "reused")["message"])
 
     def test_prints_are_handed_over_before_jev_is_asked(self):
         uploads, jev = make_trip()

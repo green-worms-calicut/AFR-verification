@@ -147,7 +147,7 @@
   },
   "stamp_day": {
     "type": "choice",
-    "instructions": "If a GPS stamp is printed on `photo`, what day of the month is the date in the stamp?",
+    "instructions": "If a GPS stamp is printed on `photo`, what day of the month is the date in the stamp? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March.",
     "criteria": {
       "01": null,
       "02": null,
@@ -185,7 +185,7 @@
   },
   "stamp_month": {
     "type": "choice",
-    "instructions": "If a GPS stamp is printed on `photo`, what month (01 to 12) is the date in the stamp?",
+    "instructions": "If a GPS stamp is printed on `photo`, what month (01 to 12) is the date in the stamp? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March.",
     "criteria": {
       "01": null,
       "02": null,

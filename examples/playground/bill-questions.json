@@ -171,7 +171,7 @@
   },
   "gross_day": {
     "type": "choice",
-    "instructions": "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it, what day of the month is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it, what day of the month is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
@@ -209,7 +209,7 @@
   },
   "gross_month": {
     "type": "choice",
-    "instructions": "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it, what month (01 to 12) is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it, what month (01 to 12) is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
@@ -336,7 +336,7 @@
   },
   "tare_day": {
     "type": "choice",
-    "instructions": "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it, what day of the month is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it, what day of the month is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
@@ -374,7 +374,7 @@
   },
   "tare_month": {
     "type": "choice",
-    "instructions": "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it, what month (01 to 12) is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it, what month (01 to 12) is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
@@ -501,7 +501,7 @@
   },
   "in_day": {
     "type": "choice",
-    "instructions": "If `bill` prints a Time In (the first weighment, often beside a Date In), what day of the month is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a Time In (the first weighment, often beside a Date In), what day of the month is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
@@ -539,7 +539,7 @@
   },
   "in_month": {
     "type": "choice",
-    "instructions": "If `bill` prints a Time In (the first weighment, often beside a Date In), what month (01 to 12) is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a Time In (the first weighment, often beside a Date In), what month (01 to 12) is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
@@ -666,7 +666,7 @@
   },
   "out_day": {
     "type": "choice",
-    "instructions": "If `bill` prints a Time Out (the second weighment, often beside a Date Out), what day of the month is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a Time Out (the second weighment, often beside a Date Out), what day of the month is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
@@ -704,7 +704,7 @@
   },
   "out_month": {
     "type": "choice",
-    "instructions": "If `bill` prints a Time Out (the second weighment, often beside a Date Out), what month (01 to 12) is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints a Time Out (the second weighment, often beside a Date Out), what month (01 to 12) is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
@@ -831,7 +831,7 @@
   },
   "printed_day": {
     "type": "choice",
-    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what day of the month is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what day of the month is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
@@ -869,7 +869,7 @@
   },
   "printed_month": {
     "type": "choice",
-    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what month (01 to 12) is its date? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what month (01 to 12) is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,

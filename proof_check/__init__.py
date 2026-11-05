@@ -87,7 +87,7 @@ from proof_check.trip_rules import (
     GROUPS, PARTS, PART_OF, readings_for, position, to_24h, same_hour, lower_first, unsure, unsure_yes, noul_status, checks_for, unanswered_check,
     YEAR, moment, minutes_between, duration, show, weighings, trip_weighings, first_slip, check, names, named, plural, EACH_PHOTO,
     unsure_stamps, same_file, stamp_year,
-    each_photo, plate_check, photo_checks, metres_between, distance, from_square, chance_away, plant_check, near_check,
+    each_photo, plate_check, photo_checks, metres_between, distance, from_square, to_square, positions, chance_within, placed, plant_check, near_check,
     final_slip, LOOK_FOR, choice_check, seal_checks, verra_checks, bill_checks, weighbridge_check, photo_moments,
     busy_time,
     overlap_minutes, photo_window,

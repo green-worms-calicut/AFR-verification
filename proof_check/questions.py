@@ -40,6 +40,9 @@ TO_24H = "Give the hour on a 24-hour clock: 2:15 AM is 02, 2:15 PM is 14, 12:30 
 STAMP = "If a GPS stamp is printed on `photo`,"
 NO_STAMP_TIME = "There is no GPS stamp with a time, or its time can't be read."
 NO_STAMP_DATE = "There is no GPS stamp with a date, or its date can't be read."
+# On 3 Nov 2026 the stamp month of 10 of 88 photos was unsure (0.52-0.75), every time between 11 and 03: Jev wondered
+# whether 03/11 was 11 March. In October (days 19 and 23, which can't be months) it never was. Our dates are day first.
+DAY_FIRST = "Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March."
 # The two bill layouts: a date and time printed with each weight, or only a Time In and Time Out.
 GROSS = "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it,"
 TARE = "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it,"
@@ -76,9 +79,9 @@ def bill_time(prefix: str, premise: str) -> dict:
                                  criteria={"none": "Neither: the time is on a 24-hour clock, such as 15:06.",
                                            "am": "AM is printed after the time.", "pm": "PM is printed after the time.",
                                            NOT_SHOWN: NO_BILL_TIME}),
-        f"{prefix}_day": Choice(instructions=f"{premise} what day of the month is its date? {NOT_CAMERA}",
+        f"{prefix}_day": Choice(instructions=f"{premise} what day of the month is its date? {DAY_FIRST} {NOT_CAMERA}",
                                 criteria=options(DAYS, NO_BILL_DATE)),
-        f"{prefix}_month": Choice(instructions=f"{premise} what month (01 to 12) is its date? {NOT_CAMERA}",
+        f"{prefix}_month": Choice(instructions=f"{premise} what month (01 to 12) is its date? {DAY_FIRST} {NOT_CAMERA}",
                                   criteria=options(MONTHS, NO_BILL_DATE)),
     }
 
@@ -189,8 +192,8 @@ QUESTIONS = {
         ),
         "stamp_hour": Choice(instructions=f"{STAMP} what hour is the time in the stamp? {TO_24H}", criteria=options(HOURS, NO_STAMP_TIME)),
         "stamp_minute": Choice(instructions=f"{STAMP} what minute is the time in the stamp?", criteria=options(MINUTES, NO_STAMP_TIME)),
-        "stamp_day": Choice(instructions=f"{STAMP} what day of the month is the date in the stamp?", criteria=options(DAYS, NO_STAMP_DATE)),
-        "stamp_month": Choice(instructions=f"{STAMP} what month (01 to 12) is the date in the stamp?", criteria=options(MONTHS, NO_STAMP_DATE)),
+        "stamp_day": Choice(instructions=f"{STAMP} what day of the month is the date in the stamp? {DAY_FIRST}", criteria=options(DAYS, NO_STAMP_DATE)),
+        "stamp_month": Choice(instructions=f"{STAMP} what month (01 to 12) is the date in the stamp? {DAY_FIRST}", criteria=options(MONTHS, NO_STAMP_DATE)),
         # Only asked about unloading photos when the plant's location is given: see `questions_for`.
         **coordinate("lat", "latitude", "Lat or Latitude", 90),
         **coordinate("long", "longitude", "Long, Lng or Longitude", 180),

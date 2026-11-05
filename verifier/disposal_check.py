@@ -103,6 +103,56 @@ def disposal(request: dict, verra_project: str | None = None) -> Disposal:
                     f"{quantity} kg" if quantity else quantity_key)
 
 
+def image_labels(evidence: list[dict]) -> dict[str, str]:
+    """Each image's name for people, by s3Key, numbered in the order gw_sales lists them: "weigh bill", "collection
+    photo 1", "unloading photo 2" (a number only when there are several of its kind)."""
+    keys = {kind: [] for kind in WORDS}
+    for item in evidence or []:
+        kind = KINDS.get(item.get("category"))
+        if kind and item.get("s3Key") and item["s3Key"] not in keys[kind]:
+            keys[kind].append(item["s3Key"])
+    labels = {}
+    for kind, found in keys.items():
+        for n, key in enumerate(found, 1):
+            labels.setdefault(key, WORDS[kind] + (f" {n}" if len(found) > 1 else ""))
+    return labels
+
+
+def analysis_labels(analysis: dict) -> dict[str, str]:
+    """The names of a checked disposal's images: as saved with its analysis, or, for one checked before names were
+    saved, numbered by kind in the order it was checked."""
+    if labels := analysis.get("labels"):
+        return labels
+    labels = {}
+    for kind, results in analysis["images"].items():
+        for n, r in enumerate(results, 1):
+            labels.setdefault(r["name"], WORDS.get(kind, kind) + (f" {n}" if len(results) > 1 else ""))
+    return labels
+
+
+class Namer:
+    """Names images in flag messages for people: this disposal's as "79171 collection photo 1", another's as
+    "collection photo 2" (the message says which disposal). An image it doesn't know keeps its s3Key."""
+
+    def __init__(self, disposal_id: int, labels: dict[str, str], others: list[compare_disposals.Other] = (),
+                 copies: list[Copy] = ()):
+        self.own = {key: f"{disposal_id} {label}" for key, label in labels.items()}
+        self.theirs = {o.disposal_id: analysis_labels(o.analysis) for o in others}
+        for c in copies:  # by its request's evidence; by kind alone when that isn't known
+            names = self.theirs.setdefault(c.disposal_id, {})
+            names.setdefault(c.name, image_labels(c.evidence or []).get(c.name) or WORDS.get(c.kind, "image"))
+
+    def __call__(self, key: str, disposal: int | None = None) -> str:
+        return self.own.get(key, key) if disposal is None else self.theirs.get(disposal, {}).get(key, key)
+
+    def text(self, message: str) -> str:
+        """This disposal's s3Keys in a message replaced by their names (another disposal's are named where the
+        message is made, `compare_disposals`)."""
+        for key in sorted(self.own, key=len, reverse=True):
+            message = message.replace(key, self.own[key])
+        return message
+
+
 def bad_plant_check(plant: tuple[float, float], unloading: list[dict]) -> dict:
     """The facility's location entered isn't in India, so no unloading photo could be checked against it."""
     return proof_check.check("unloading", "unloading_plant", "At the plant", "review",
@@ -114,7 +164,7 @@ def bad_plant_check(plant: tuple[float, float], unloading: list[dict]) -> dict:
 def unavailable_check(kind: str, found: list[tuple[str, str]], none_left: bool) -> dict:
     """The images of one kind the request lists that can't be checked, as (s3Key, why). When no image of the kind
     is left, it shares the missing kind's cause, so it leads one flag with the checks that leaves unsure."""
-    detail = " ".join(f"The {WORDS[kind]} {key} {why}." for key, why in found)
+    detail = " ".join(f"{key} {why}." for key, why in found)  # named for people later, e.g. "79171 weigh bill"
     stored = [key for key, why in found if why != JEV_COULDNT]
     them = "it" if len(stored) == 1 else "them"
     unread = "it" if len(found) - len(stored) == 1 else "them"
@@ -125,9 +175,10 @@ def unavailable_check(kind: str, found: list[tuple[str, str]], none_left: bool) 
                              cause=MISSING_KEY[kind] if none_left else None)
 
 
-def flags_of(checks: list[dict]) -> list[dict]:
+def flags_of(checks: list[dict], name: Namer | None = None) -> list[dict]:
     """One flag per cause: checks flagged for the same reason (proof_check's `cause`) together, led by a problem
-    if there is one, naming the others it affects. Problems first, then by severity."""
+    if there is one, naming the others it affects. Problems first, then by severity. `name` names the images in
+    the messages for people."""
     groups = []
     for c in checks:
         if c["status"] == "pass":
@@ -137,19 +188,23 @@ def flags_of(checks: list[dict]) -> list[dict]:
             same.append(c)
         else:
             groups.append([c])
-    made = [flag(g) for g in groups]
+    made = [flag(g, name) for g in groups]
     made.sort(key=lambda f: (f["kind"] != KIND["fail"], RANK[f["severity"]]))
     return made
 
 
-def flag(group: list[dict]) -> dict:
+def flag(group: list[dict], name: Namer | None = None) -> dict:
+    """One flag for checks flagged for the same reason. `title` is what it is about, for its heading in gw_sales."""
     lead = next((c for c in group if c["status"] == "fail"), group[0])
     also = [c for c in group if c is not lead]
     status = "fail" if any(c["status"] == "fail" for c in group) else "review"
     message = lead["detail"]
     if also:
         message += " It also affects: " + proof_check.and_list([c["label"] for c in also]) + "."
-    made = {"code": lead["key"], "severity": min((SEVERITY[c["part"], c["status"]] for c in group), key=RANK.get),
+    if name:
+        message = name.text(message)
+    made = {"code": lead["key"], "title": lead["label"],
+            "severity": min((SEVERITY[c["part"], c["status"]] for c in group), key=RANK.get),
             "kind": KIND[status], "message": message[:MAX_MESSAGE],
             "evidence": list(dict.fromkeys(i for c in [lead, *also] for i in c["images"])),
             "checks": [c["key"] for c in [lead, *also]]}
@@ -164,13 +219,15 @@ def flag(group: list[dict]) -> dict:
 
 
 def extractions(trip: dict, unavailable: list[str]) -> dict:
-    """What was read, for gw_sales to store and show: no weights (Jev only judges them against the entry)."""
+    """What was read, for gw_sales to store and show: no weights (Jev only judges them against the entry). Each
+    image carries its name for people (`label`)."""
     v = trip["verdict"]
+    labels = trip.get("labels", {})
     return {
         "parts": {p: part["status"] for p, part in v["parts"].items()},
         "timeline": v["timeline"],
         "weighingWindow": v["window"],
-        "images": {r["name"]: {"kind": kind, "readings": {x["key"]: {"value": x["value"], "confidence": round(x["min_confidence"], 3)}
+        "images": {r["name"]: {"kind": kind, "label": labels.get(r["name"], r["name"]), "readings": {x["key"]: {"value": x["value"], "confidence": round(x["min_confidence"], 3)}
                                                           for x in r["readings"]}}
                    for kind, results in trip["images"].items() for r in results},
         "unavailable": unavailable,
@@ -234,12 +291,15 @@ def check(request: dict, fetch: Callable[[str], bytes | None], client: TypeSafeC
     if d.bad_plant:
         checks.append(bad_plant_check(d.bad_plant, trip["images"]["unloading"]))
     checks += entry_checks.checks(request, trip["images"], std.collection_radius, d.day, other_logs)
+    labels = image_labels(request.get("evidence"))
+    trip["labels"] = labels  # kept with the analysis, so a later disposal names these images the same way
+    name = Namer(request["subject"]["id"], labels, list(others), copies)
     checks += compare_disposals.checks(d.vehicle_key, trip, list(others), std.limits.clock_slack, d.day, d.quantity_key,
-                                       copies)
+                                       copies, name)
     trip["verdict"] = {**trip["verdict"], **proof_check.decide_parts(checks)}
     for kind, key, why in unavailable:
         log.warning("%s: %s %s %s", request["requestId"], WORDS[kind], key, why)
-    made = flags_of(checks)
+    made = flags_of(checks, name)
     cost = sum(r["cost_usd"] for results in trip["images"].values() for r in results)
     found = {**extractions(trip, [key for _, key, _ in unavailable]),
              "collectedVsWeighed": entry_checks.collected_vs_weighed(request)}
