@@ -48,8 +48,11 @@ GROSS = "If `bill` prints a date and time for the gross (loaded) weight itself, 
 TARE = "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it,"
 TIME_IN = "If `bill` prints a Time In (the first weighment, often beside a Date In),"
 TIME_OUT = "If `bill` prints a Time Out (the second weighment, often beside a Date Out),"
-PRINTED = ("If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a "
-           "weight (the date may be labelled Bill Date or Date),")
+# Wayanad's slip (3 Nov 2026) prints its one time in a TIME box and its date out of its DATE box, over another label:
+# asked "at its top or in its heading", Jev put the time in the gross and Time In boxes, unsurely, and read no date.
+PRINTED = ("If `bill` prints one date and time for the whole slip rather than one beside each weight, wherever it is (at "
+           "its top, in its heading, or in a Time or Date & Time box; the date may be labelled Bill Date or Date, and "
+           "may be printed away from its label, even over another label or line),")
 NOT_CAMERA = "Ignore any timestamp on a camera picture printed on the slip."
 NO_BILL_TIME = "The bill prints no such time, or it can't be read."
 NO_BILL_DATE = "The bill prints no such date, or it can't be read."

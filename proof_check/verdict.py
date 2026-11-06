@@ -13,9 +13,10 @@ def timeline(images: dict[str, list[dict]], w: dict | None, checks: list[dict], 
     """The trip's events in time order, for the page: tare, loading, gross and unloading, marking those in a failed check."""
     failed = {c["key"] for c in checks if c["status"] == "fail"}
     events = []
-    if w:
-        events += [{"at": w["tare"], "what": "Tare", "bad": bool({"weigh_order", "weigh_gap", "weigh_day"} & failed)},
-                   {"at": w["gross"], "what": "Gross", "bad": bool({"weigh_order", "weigh_gap", "weigh_day"} & failed)}]
+    if w:  # a slip with one time has only the tare's or the gross', or a weighing not known to be either
+        weighed = {"Tare": w["tare"], "Gross": w["gross"]} if w["tare"] or w["gross"] else {"Weighing": w["second"]}
+        events += [{"at": m, "what": what, "bad": bool({"weigh_order", "weigh_gap", "weigh_day", "time_in_tare"} & failed)}
+                   for what, m in weighed.items() if m]
     for role, word in (("loading", "Loading photos"), ("unloading", "Unloading photos")):
         times = [m for _, m in photo_moments(images.get(role, []), around) if m]
         if times:

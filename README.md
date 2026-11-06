@@ -24,6 +24,7 @@ A trip runs one of two ways, worked out from which weighing came first on the fi
 - Gross first: were the weighings at least 10 minutes apart, every loading photo taken before the gross weighing, and every unloading photo between the gross and tare weighings?
 - Were both weighings on the same day? A tare from another day, more than 12 hours from the gross, is a stored one, not weighed on this trip; nearer, the trip ran across midnight.
 - Was every unloading photo taken on the same day as the gross weighing?
+- A final slip that prints only one time (Wayanad, Paradan, Riviera, Pockanchery) gives only the second weighing, so the gap and the tare's day can't be checked. Its time is the gross when the lighter weight was weighed first, and the tare when the heavier was (flagged, as on a Time In slip). Where the slip doesn't show which weight was first, loading photos must be before that time, and an unloading photo before it goes to a person, since the vehicle may have been weighed loaded first.
 
 A photo's clock may be off the weighbridge's by up to 5 minutes (the clock slack). The 60, 10 and 5 are defaults: you can change them for each run.
 
@@ -41,7 +42,7 @@ Only Verra project trips are checked for these, and Jev is only asked about them
 - Is the vehicle on two trips at the same time? This is checked when a whole day is run with `tools/check_trip_folders.py`. A trip's time is taken from its photos' GPS stamps, from the first collection photo to the last unloading photo; without a collection photo, from the gross weighing (the vehicle is loaded by then). The tare isn't used: most vehicles are weighed empty once in the morning, and that tare is printed on every slip of the day. Two trips must overlap by more than the clock slack.
 
 These checks fall into three parts, each with its own verdict:
-- **Trip is real:** did the trip happen as claimed? The plates in the photos and the number on every slip match the vehicle number you typed; the weighing order, the gap between weighings, the tare weighed on this trip and Time In with the tare; every photo's time; the photos and bills taken directly; unloading at the plant; and no image or trip a duplicate.
+- **Trip is real:** did the trip happen as claimed? The plates in the photos and the number on every slip match the vehicle number you typed; the weighing order, the gap between weighings, the tare weighed on this trip and the empty weighing first; every photo's time; the photos and bills taken directly; unloading at the plant; and no image or trip a duplicate.
 - **Documentation:** is the proof complete? Unloading photos and bills added; a vehicle and a GPS stamp in every photo; a final slip; its net weight the quantity you typed; and gross heavier than tare.
 - **Verra**, only for a Verra project trip: the material and the weighbridge's stamp.
 
@@ -100,7 +101,7 @@ Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`)
 | `tare_hour` … `tare_month` | choice | Date and time printed with the tare weight, or `not_shown` |
 | `in_hour` … `in_month` | choice | Time In and Date In (the first weighment), or `not_shown` |
 | `out_hour` … `out_month` | choice | Time Out and Date Out (the second weighment), or `not_shown` |
-| `printed_hour` … `printed_month` | choice | The one date and time printed at the top of the slip, not beside a weight, or `not_shown` |
+| `printed_hour` … `printed_month` | choice | The one date and time for the whole slip, not beside each weight, wherever it is (heading, Time or Date & Time box; its date may be printed away from its label), or `not_shown` |
 | `first_weight` | choice | Is the first weight (at Time In, or First Wt) the smaller or the larger: `tare` (smaller), `gross` (larger), `not_shown` |
 | `material` | choice | Is a material entered: `blank`, `empty_or_load` (only EMPTY or LOAD), `no_field` (no such label or Loaded with line), `filled`. Only for a Verra project trip. |
 | `weighbridge_seal` | yes/no | Is an ink stamp of the weighbridge on it, apart from our company's (`our_company`)? Only for a Verra project trip. |
@@ -108,7 +109,7 @@ Four decimals place the photo in a square about 11 m across (`11.4404, 75.9419`)
 
 A time like `03:09` is two questions: which hour and which minute. Code puts the parts together and does all the comparing. Jev is unreliable at comparing dates and times itself.
 
-Bills come in two layouts. Some print a date and time with each weight (the G W weighbridge); others print only a Time In and Time Out. Both sets of questions are asked at once, and `proof_check.weighings` uses whichever the final slip has. With Time In and Time Out, `first_weight` says which weight was taken first, by comparing the first weight with the second. That also reads slips that print First Wt and Second Wt with a date and time on each, such as Kuttiyadi's, which labels both times "Gross Wt. Date & Time". Some slips (Lakshmi's) print no time beside the weights, only one at the top of each slip: then the first slip (one weight) gives the first weighing's time and the final slip the second's, and `first_weight` says which was the tare. The surest layout that can be read is used. Only the day and month are read, so a trip that runs past midnight or across New Year still works.
+Bills come in two layouts. Some print a date and time with each weight (the G W weighbridge); others print only a Time In and Time Out. Both sets of questions are asked at once, and `proof_check.weighings` uses whichever the final slip has. With Time In and Time Out, `first_weight` says which weight was taken first, by comparing the first weight with the second. That also reads slips that print First Wt and Second Wt with a date and time on each, such as Kuttiyadi's, which labels both times "Gross Wt. Date & Time". Some slips (Lakshmi's, Wayanad's, Paradan's) print no time beside the weights, only one for each slip: then the first slip (one weight) gives the first weighing's time and the final slip the second's, and `first_weight` says which was the tare. That one time is read wherever Jev put it (`only_time`: Wayanad's was read as the gross time and Time In too), with the surest date read anywhere on the slip. The surest of these layouts that can be read is used: not the first in a fixed order, because Jev also fills in, unsurely, the times of a layout a slip doesn't have (Kuttiyadi labels both its times "Gross Wt. Date & Time"), which sent 14 trips read surely by Time In and Time Out to a person (6 Nov 2026). Only when none can be read, the final slip's one time alone is used: it is the second weighing (`one_time_checks`). Only the day and month are read, so a trip that runs past midnight or across New Year still works.
 
 Jev can lean towards the first option of a choice, so `same` is never listed first in the number, net weight and stamp questions.
 
@@ -131,7 +132,7 @@ All of this is in code (`proof_check.trip_checks`, `decide_parts`, `verdict`), n
 | Real | Loading / unloading plate matches | at least one photo of the kind clearly `same` | none clear, or no photos | any photo clearly `different` |
 | Real | Bills match | every slip `same` | any slip unclear, or no bills | any slip `different` |
 | Real | Weighing order | tare first or gross first, clearly | a time unreadable or unsure, both the same, or no bills | – |
-| Real | Time In is the empty weighing (In/Out slips) | the lighter weight at Time In | unsure which is heavier | the heavier weight at Time In: In and Out entered swapped, or weighed loaded first |
+| Real | The first weighing is the empty one (Time In/Out or First/Second Wt slips, including those with one time) | the lighter weight first | unsure which is heavier | the heavier weight first: the weights entered swapped, or weighed loaded first |
 | Real | Time between weighings (tare first) | at least 60 min apart | a time unsure | less |
 | Real | Time between weighings (gross first) | at least 10 min apart | a time unsure | less |
 | Real | Tare weighed on this trip | both weighings on one day, or on two days at most 12 h apart (across midnight) | a time unsure | on different days more than 12 h apart: a stored tare |
@@ -453,7 +454,7 @@ Jev charges **$0.042 per million input tokens**; output is free. Images count as
 - **A GPS stamp isn't proof.** GPS camera apps can be set to any place and time. With the plant's location given, an unloading photo's printed position must be near it, but a faked stamp can show any position.
 - **Reused images** are found only among the trips under `trips/` (or the folder `tools/check_trip_folders.py` is given). A copy that was cropped or edited may not be found.
 - **Net weight in kilograms.** The quantity is compared with the final slip's net weight as a number of kilograms.
-- **Other weighbridge layouts.** A Lakshmi-style trip (one print time per slip) needs both its first and final slip uploaded; with only the final slip, its times can't be read and it goes to a person. A layout not seen yet may not be read either.
+- **Other weighbridge layouts.** A Lakshmi-style trip (one time per slip) needs both its first and final slip for the gap between the weighings; with only the final slip, its one time is checked against the photos, but not the gap. Wayanad prints its date over another label, which Jev doesn't read surely (26/11 or 05/11 at 17-29% for 03/11, 6 Nov 2026), so those trips go to a person. A layout not seen yet may not be read either.
 - **Image size limits.** Jev takes PNG or JPEG, 280–1568 px on each side after scaling, at most 16 MiB per file. Every image is opened here and sent as JPEG, so real HEIC photos work (read with pillow-heif). A photo over 50 MP is read at 4000 px on its long side. One over 250 MP is refused from the size in its header, without being decoded, and like a cut-off file or a file that isn't an image it is flagged as unreadable.
 
 ## Files

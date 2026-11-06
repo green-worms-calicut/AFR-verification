@@ -311,40 +311,71 @@ def show(*moments: dict) -> list[str]:
     return [m["time"] if one_day else f"{m['time']} on {m['date']}" for m in moments]
 
 
-def weighings(bill: dict, first_slip: dict | None = None, around=None) -> dict | None:
-    """When the gross and tare weights were taken: {"gross": moment, "tare": moment, "certainty", "source", "slips"},
-    `slips` naming the bills the times were read from.
+TIME_PLACES = ("gross", "tare", "in", "out", "printed")  # where a bill's times are read (REPORT["bill"])
 
-    A bill prints a date and time with each weight, or only a Time In and Time Out (or a first and second
-    weighing time), with `first_weight` saying whether the first weight is the tare (lighter) or the gross
-    (heavier). Or, as Lakshmi's, only one time at the top of each slip: then the first weighing is when
-    `first_slip` (one weight) was printed, and the second when this final slip was. The surest layout that
-    can be read is used. None if none can be read.
+
+def only_time(bill: dict, around=None) -> dict | None:
+    """The one time a slip prints, as a moment, when Jev read a single time on it: the same value wherever it was
+    put (Wayanad's one TIME was read as both gross time and Time In, each unsurely), as sure as its surest reading.
+    Its date is the surest read anywhere on the slip, as one-time slips print one date, sometimes outside its box.
+    None without exactly one time read, or without a date."""
+    r = {x["key"]: x for x in bill["readings"]}
+    times = [r[f"{p}_time"] for p in TIME_PLACES if not r[f"{p}_time"]["missing"]]
+    dates = [r[f"{p}_date"] for p in TIME_PLACES if not r[f"{p}_date"]["missing"]]
+    if len({t["value"] for t in times}) != 1 or not dates:
+        return None
+    return moment(max(times, key=lambda t: t["min_confidence"]), max(dates, key=lambda d: d["min_confidence"]), around)
+
+
+def weighings(bill: dict, first_slip: dict | None = None, around=None) -> dict | None:
+    """When the gross and tare weights were taken: {"gross": moment, "tare": moment, "certainty", "source", "slips",
+    "layout"}, `slips` naming the bills the times were read from. None if no layout can be read.
+
+    The surest of the layouts with two times that can be read is used, and only without one the slip's one time.
+    Not the first that can be read, in a fixed order: Jev fills in the times of a layout a slip doesn't have, unsurely
+    (Kuttiyadi labels both its times "Gross Wt. Date & Time"), and on 3 Nov and 23 Oct 2026 that put 14 trips read
+    surely by Time In and Time Out to a person (6 Nov). The layouts:
+    - "each": a date and time printed with each weight.
+    - "in_out": a Time In and Time Out, or a time with the First and Second weight (Kuttiyadi, Metro), with
+      `first_weight` saying whether the first weight is the tare (lighter) or the gross (heavier).
+    - "two_slips": one time on each slip, as Lakshmi's: the first weighing is `first_slip`'s (one weight) and the
+      second this final slip's (`only_time`), `first_weight` saying which was the tare.
+    - "one_time": only this slip's one time, the second weighing, as Wayanad's, Paradan's and Riviera's. By
+      `first_weight` it is the gross (tare first) or the tare (gross first); when the slip doesn't show which weight
+      was first, both are None and "second" holds it.
     """
     r = {x["key"]: x for x in bill["readings"]}
+    first = bill["answers"]["first_weight"]
+    shown = first["choice"] != NOT_SHOWN
     found = []
     gross, tare = moment(r["gross_time"], r["gross_date"], around), moment(r["tare_time"], r["tare_date"], around)
     if gross and tare:
         found.append({"gross": gross, "tare": tare, "certainty": min(gross["certainty"], tare["certainty"]),
-                      "source": "the times printed with each weight", "slips": [bill["name"]]})
-    first = bill["answers"]["first_weight"]
+                      "source": "the times printed with each weight", "slips": [bill["name"]], "layout": "each"})
     time_in, time_out = moment(r["in_time"], r["in_date"], around), moment(r["out_time"], r["out_date"], around)
-    if time_in and time_out and first["choice"] != NOT_SHOWN:
+    if time_in and time_out and shown:
         gross, tare = (time_in, time_out) if first["choice"] == "gross" else (time_out, time_in)
         found.append({"gross": gross, "tare": tare,
                       "certainty": min(time_in["certainty"], time_out["certainty"], first["confidence"]),
-                      "source": f"Time In and Time Out, {first['choice']} first", "slips": [bill["name"]]})
-    if first_slip and first["choice"] != NOT_SHOWN:
-        before = {x["key"]: x for x in first_slip["readings"]}
-        earlier = moment(before["printed_time"], before["printed_date"], around)
-        later = moment(r["printed_time"], r["printed_date"], around)
-        if earlier and later:
-            gross, tare = (earlier, later) if first["choice"] == "gross" else (later, earlier)
-            found.append({"gross": gross, "tare": tare,
-                          "certainty": min(earlier["certainty"], later["certainty"], first["confidence"]),
-                          "source": f"the times printed at the top of the first and final slips, {first['choice']} first",
-                          "slips": [first_slip["name"], bill["name"]]})
-    return max(found, key=lambda w: w["certainty"], default=None)
+                      "source": f"Time In and Time Out, {first['choice']} first", "slips": [bill["name"]],
+                      "layout": "in_out"})
+    later = only_time(bill, around)
+    earlier = only_time(first_slip, around) if first_slip else None
+    if earlier and later and shown:
+        gross, tare = (earlier, later) if first["choice"] == "gross" else (later, earlier)
+        found.append({"gross": gross, "tare": tare,
+                      "certainty": min(earlier["certainty"], later["certainty"], first["confidence"]),
+                      "source": f"the one time on each of the first and final slips, {first['choice']} first",
+                      "slips": [first_slip["name"], bill["name"]], "layout": "two_slips"})
+    if found:
+        return max(found, key=lambda w: w["certainty"])
+    if later:
+        which = {"tare": "gross", "gross": "tare"}.get(first["choice"])  # the second weighing, when the order is shown
+        return {"gross": later if which == "gross" else None, "tare": later if which == "tare" else None,
+                "second": later, "certainty": min(later["certainty"], first["confidence"]) if shown else later["certainty"],
+                "source": "the one time on the slip" + (f", {first['choice']} first" if shown else ""),
+                "slips": [bill["name"]], "layout": "one_time"}
+    return None
 
 
 def trip_weighings(images: dict[str, list[dict]], around=None) -> dict | None:
@@ -771,8 +802,10 @@ def gross_start(images: dict[str, list[dict]], around=None) -> tuple[str, dict] 
     collection photo, or without the weighing times."""
     if images.get("loading") or not (w := trip_weighings(images, around)):
         return None
+    if not w["gross"]:  # a slip with one time, the tare's or of a weighing not known to be the gross: the vehicle
+        return w["slips"][-1], {**w["second"], "certainty": w["certainty"]}  # was out by then anyway
     # Read from the first and final slips, the earlier time is the first slip's.
-    slip = w["slips"][0] if len(w["slips"]) > 1 and w["gross"]["at"] < w["tare"]["at"] else w["slips"][-1]
+    slip = w["slips"][0] if len(w["slips"]) > 1 and w["tare"] and w["gross"]["at"] < w["tare"]["at"] else w["slips"][-1]
     return slip, {**w["gross"], "certainty": w["certainty"]}
 
 
@@ -811,30 +844,39 @@ def overlap_minutes(a: tuple[datetime, datetime], b: tuple[datetime, datetime]) 
     return (min(a[1], b[1]) - max(a[0], b[0])).total_seconds() / 60
 
 
-def photo_window(role: str, tare_first: bool) -> tuple[str | None, str | None]:
+def photo_window(role: str, tare_first: bool | None) -> tuple[str | None, str | None]:
     """Which weighings a loading or unloading photo must fall between: (after, before), None where open.
 
     Tare first, loading is between tare and gross and unloading after gross. Gross first, loading is
-    before gross and unloading between gross and tare.
+    before gross and unloading between gross and tare. With a slip's one time and the order unknown (None),
+    loading is before that second weighing and unloading after it, as for tare first.
     """
+    if tare_first is None:
+        return (None, "second") if role == "loading" else ("second", None)
     if role == "loading":
         return ("tare", "gross") if tare_first else (None, "gross")
     return ("gross", None) if tare_first else ("gross", "tare")
 
 
-def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_first: bool = True,
+def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_first: bool | None = True,
                  around=None) -> dict | None:
     """Every loading or unloading photo in its window of the weighings (`photo_window`), give or take the clock slack.
+    A weighing the slip prints no time for leaves its side open; None when both are.
 
-    Unsure only because the weighing times are, it shares the weighing order's `cause`, "weigh_times".
+    Unsure only because the weighing times are, it shares the weighing order's `cause`, "weigh_times". With a slip's
+    one time and the order unknown, an unloading photo before it asks a person: the vehicle may have been weighed
+    loaded first.
     """
-    if not results:
+    after, before = (side if side and w.get(side) else None for side in photo_window(role, tare_first))
+    if not results or not (after or before):
         return None
     slack = limits.clock_slack
     allowing = f" ({duration(slack)} clock difference allowed)" if slack else ""
-    after, before = photo_window(role, tare_first)
-    shown = dict(zip(("tare", "gross"), show(w["tare"], w["gross"])))
-    plain = {"tare": f"the tare (empty) weighing at {shown['tare']}", "gross": f"the gross (loaded) weighing at {shown['gross']}"}
+    known = [k for k in ("tare", "gross", "second") if w.get(k)]
+    shown = dict(zip(known, show(*(w[k] for k in known))))
+    plain = {"tare": f"the tare (empty) weighing at {shown.get('tare')}",
+             "gross": f"the gross (loaded) weighing at {shown.get('gross')}",
+             "second": f"the only weighing time on the slip, {shown.get('second')}"}
     word = "Loading" if role == "loading" else "Unloading"
     label = f"{word} photo times"
     taken = photo_moments(results, around)
@@ -849,9 +891,15 @@ def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_f
     weighed = w["certainty"] >= CONFIDENT
     unsure = [(r, m) for r, m in taken if m and m["certainty"] < CONFIDENT]
     sure_wrong = [x for x in wrong if weighed and x[1]["certainty"] >= CONFIDENT]
-    at = lambda m: show(m, w["tare"], w["gross"])[0]
+    at = lambda m: show(m, *(w[k] for k in known))[0]
     window = (f"between {plain[after]} and {plain[before]}" if after and before
               else f"after {plain[after]}" if after else f"before {plain[before]}")
+    if tare_first is None and role == "unloading" and wrong:
+        r, m, _ = wrong[0]
+        return check(role, f"{role}_timing", label, "review",
+                     f"{r['name']} was taken at {at(m)}, before {plain['second']}. That fits only if the vehicle was "
+                     "weighed loaded first, and the slip doesn't show which weight was first: check the order of the "
+                     "weighings.", min(m["certainty"], w["certainty"]), [x[0]["name"] for x in wrong])
     if sure_wrong:
         r, m, early = sure_wrong[0]
         side = after if early else before
@@ -874,13 +922,14 @@ def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_f
         return check(role, f"{role}_timing", label, "review",
                      f"The {part} on the GPS stamp of {names(photos)} was read as {read}, but only {c:.0%} sure. "
                      f"Check {plural(photos, 'it was', 'they were')} taken {window}.", c, named(photos), f"{role}_stamps")
-    short = (f"between {after} {shown[after]} and {before} {shown[before]}" if after and before
-             else f"after {after} {shown[after]}" if after else f"before {before} {shown[before]}")
+    term = {"tare": "tare", "gross": "gross", "second": "the slip's time"}
+    short = (f"between {term[after]} {shown[after]} and {term[before]} {shown[before]}" if after and before
+             else f"after {term[after]} {shown[after]}" if after else f"before {term[before]} {shown[before]}")
     if not weighed:
         if wrong:
             r, m, early = wrong[0]
             side = after if early else before
-            text = f"{r['name']} at {at(m)} is {'before' if early else 'after'} {side} {shown[side]}"
+            text = f"{r['name']} at {at(m)} is {'before' if early else 'after'} {term[side]} {shown[side]}"
         else:
             text = f"{word} {and_list(sorted({at(m) for _, m, _ in times}))} is {short}"
         return check(role, f"{role}_timing", label, "review", f"{text}, if the weighing times are right",
@@ -890,12 +939,19 @@ def photo_timing(role: str, results: list[dict], w: dict, limits: Limits, tare_f
                  min(min(m["certainty"] for _, m, _ in times), w["certainty"]))
 
 
+def gross_weighing(w: dict) -> dict | None:
+    """The gross weighing's moment, or a slip's one time when it isn't known to be the tare (`weighings`)."""
+    return w["gross"] or (w.get("second") if not w["tare"] else None)
+
+
 def same_day(results: list[dict], w: dict, around=None) -> dict | None:
     """Every unloading photo dated the same day as the gross weighing (by the calendar date, so a trip
-    weighed just before midnight and unloaded just after is flagged too)."""
-    if not results:
+    weighed just before midnight and unloaded just after is flagged too). With a slip's one time and the order
+    unknown, the day of that weighing; None when the slip has no time for the gross (its one time is the tare)."""
+    gross = gross_weighing(w)
+    if not results or not gross:
         return None
-    gross = w["gross"]
+    weighing = "the gross (loaded) weighing" if w["gross"] else "the weighing"
     label = "Unloading on the weighing day"
     taken = photo_moments(results, around)
     unread = [r for r, m in taken if not m]
@@ -905,31 +961,32 @@ def same_day(results: list[dict], w: dict, around=None) -> dict | None:
     if sure:
         r, m = sure[0]
         return check("unloading", "unloading_day", label, "fail",
-                     f"{r['name']} is dated {m['date']}, but the gross (loaded) weighing was on {gross['date']}. "
+                     f"{r['name']} is dated {m['date']}, but {weighing} was on {gross['date']}. "
                      "Unloading must be on the same day.", min(m["certainty"], w["certainty"]), [r["name"] for r, _ in sure])
     if doubtful:
         photos = [r for r, _ in doubtful]
         c = min(m["certainty"] for _, m in doubtful)
         return check("unloading", "unloading_day", label, "review",
                      f"The date on the GPS stamp of {names(photos)} was read as {doubtful[0][1]['date']}, but only {c:.0%} sure; "
-                     f"the gross (loaded) weighing was on {gross['date']}. Check the stamp date.", c, named(photos),
+                     f"{weighing} was on {gross['date']}. Check the stamp date.", c, named(photos),
                      "unloading_stamps")
     if other_day:
         r, m = other_day[0]
         return check("unloading", "unloading_day", label, "review",
-                     f"{r['name']} dated {m['date']}, gross on {gross['date']}, if the weighing date is right",
+                     f"{r['name']} dated {m['date']}, {'gross' if w['gross'] else 'weighing'} on {gross['date']}, "
+                     "if the weighing date is right",
                      w["certainty"], cause="weigh_times")
     if unread:
         return check("unloading", "unloading_day", label, "review",
                      f"The date on the GPS stamp of {names(unread)} couldn't be read. Check unloading was on {gross['date']}, "
-                     "the day of the gross (loaded) weighing.", images=named(unread))
+                     f"the day of {weighing}.", images=named(unread))
     if unsure_day := [(r, m) for r, m in taken if m and m["certainty"] < CONFIDENT]:
         # Read as the gross date, but unsure: the same reading leaves the unloading time unsure, so one flag with it.
         photos = [r for r, _ in unsure_day]
         c = min(m["certainty"] for _, m in unsure_day)
         return check("unloading", "unloading_day", label, "review",
-                     f"The date on the GPS stamp of {names(photos)} was read as {gross['date']}, the day of the gross "
-                     f"(loaded) weighing, but only {c:.0%} sure. Check the stamp date.", c, named(photos), "unloading_stamps")
+                     f"The date on the GPS stamp of {names(photos)} was read as {gross['date']}, the day of {weighing}, "
+                     f"but only {c:.0%} sure. Check the stamp date.", c, named(photos), "unloading_stamps")
     if w["certainty"] < CONFIDENT:
         # The gross date is as unsure as the weighing times: one cause with them, not a pass (27 Oct 2026).
         return check("unloading", "unloading_day", label, "review", f"All on {gross['date']}, if the weighing times are right",
@@ -977,7 +1034,6 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
 
     final = final_slip(bills)
     w = trip_weighings(images, around)
-    gap = minutes_between(w["tare"], w["gross"]) if w else None  # positive when the tare was taken first
     not_checked = "so the weighing order and photo times weren't checked"
     if not w:
         if final:
@@ -988,6 +1044,9 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
         checks.append(check("times", "weigh_order", "Weighing order", "review", detail, images=[final["name"]] if final else [],
                             cause=None if final else "no_final" if bills else "bill_missing"))
         return checks, None
+    if w["layout"] == "one_time":
+        return checks + one_time_checks(images, w, final, limits, around), w
+    gap = minutes_between(w["tare"], w["gross"])  # positive when the tare was taken first
     g, t = show(w["gross"], w["tare"])
     if gap == 0:
         checks.append(check("times", "weigh_order", "Weighing order", "review",
@@ -1005,27 +1064,8 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
         first = f"Tare first ({t}), then gross ({g})" if tare_first else f"Gross first ({g}), then tare ({t})"
         order = check("times", "weigh_order", "Weighing order", "pass", f"{first}, from {w['source']}", w["certainty"])
     checks.append({**order, "order": "tare_first" if tare_first else "gross_first"})
-    if w["source"].startswith("Time In"):
-        # Time In should be the tare (19 Oct 2026: on every In/Out slip). The heavier weight at Time In means the
-        # details were entered swapped, or the vehicle was weighed loaded first: either way a person looks.
-        first = final["answers"]["first_weight"]
-        label = "Time In is the empty weighing"
-        if first["choice"] == "gross":
-            swapped = (f"the heavier weight is at Time In ({g}). Either In and Out were entered swapped, "
-                       "or the vehicle was weighed loaded first")
-            if first["confidence"] >= CONFIDENT:
-                status, detail = "fail", f"{final['name']}: {swapped}."
-            else:
-                status, detail = "review", f"{final['name']}: {unsure(swapped, first['confidence'])}. Check which weight is at Time In."
-            checks.append(check("times", "time_in_tare", label, status, detail, first["confidence"], [final["name"]]))
-        elif first["confidence"] < CONFIDENT:
-            # The same unsure reading leaves the weighing times unsure: one flag with the weighing order.
-            checks.append(check("times", "time_in_tare", label, "review",
-                                f"{final['name']}: {unsure(f'the lighter weight is at Time In ({t})', first['confidence'])}. "
-                                "Check which weight is at Time In.", first["confidence"], [final["name"]], "weigh_times"))
-        else:
-            checks.append(check("times", "time_in_tare", label, "pass",
-                                f"{final['name']}: the lighter weight is at Time In ({t})", first["confidence"]))
+    if w["layout"] == "in_out":
+        checks.append(first_weighing(final, w))
     apart, least = abs(gap), limits.min_gap_tare_first if tare_first else limits.min_gap_gross_first
     between = "loading" if tare_first else "unloading"
     if cause:
@@ -1063,6 +1103,67 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     if c := same_day(images.get("unloading", []), w, around):
         checks.append(c)
     return checks, w
+
+
+def first_weighing(final: dict, w: dict) -> dict:
+    """The first weighing is the empty one, on a slip that prints the weighings in order (Time In and Time Out, or the
+    First and Second weight): most trips are weighed empty first (19 Oct and 3 Nov 2026: every such slip). The heavier
+    weight first means the weights were entered swapped, or the vehicle was weighed loaded first: a problem when Jev
+    is sure, else a person looks (the user, 6 Nov 2026, also for a slip with one time, such as Wayanad's)."""
+    first = final["answers"]["first_weight"]
+    label = "The first weighing is the empty one"
+    where = "Time In or First Wt"
+    if first["choice"] == "gross":
+        when = f" ({show(w['gross'])[0]})" if w["tare"] and w["gross"] else ""
+        swapped = (f"the heavier weight was weighed first{when}. Either the weights were entered swapped, or the "
+                   "vehicle was weighed loaded first")
+        if first["confidence"] >= CONFIDENT:
+            return check("times", "time_in_tare", label, "fail", f"{final['name']}: {swapped}.", first["confidence"],
+                         [final["name"]])
+        return check("times", "time_in_tare", label, "review",
+                     f"{final['name']}: {unsure(swapped, first['confidence'])}. Check which weight was weighed first "
+                     f"({where}).", first["confidence"], [final["name"]])
+    when = f" ({show(w['tare'])[0]})" if w["tare"] else ""
+    if first["confidence"] < CONFIDENT:
+        # The same unsure reading leaves the weighing times unsure: one flag with the weighing order.
+        return check("times", "time_in_tare", label, "review",
+                     f"{final['name']}: {unsure(f'the lighter weight was weighed first{when}', first['confidence'])}. "
+                     f"Check which weight was weighed first ({where}).", first["confidence"], [final["name"]], "weigh_times")
+    return check("times", "time_in_tare", label, "pass", f"{final['name']}: the lighter weight was weighed first{when}",
+                 first["confidence"])
+
+
+def one_time_checks(images: dict[str, list[dict]], w: dict, final: dict, limits: Limits, around=None) -> list[dict]:
+    """The checks a final slip with one time allows (`weighings`' "one_time"): that time is the second weighing, the
+    gross when the lighter weight was weighed first, the tare when the heavier was, and unknown when the slip doesn't
+    show the order. Loading is before it and unloading after it (or, gross first, before it); an unloading photo before
+    it with the order unknown asks a person. The time between the weighings and the tare's day can't be checked."""
+    slip, at = w["slips"][-1], show(w["second"])[0]
+    order = "gross_first" if w["tare"] else "tare_first" if w["gross"] else None
+    what = {"tare_first": "the gross (loaded) weighing, as the lighter weight was weighed first",
+            "gross_first": "the tare (empty) weighing, as the heavier weight was weighed first",
+            None: "the second weighing (the slip doesn't show which weight was first)"}[order]
+    cause = "weigh_times" if w["certainty"] < CONFIDENT else None
+    if cause:
+        # Say what was unclear: Wayanad's time is read surely, its date (printed over another label) isn't.
+        m = w["second"]
+        part = "date" if m["date_certainty"] < CONFIDENT <= m["time_certainty"] else "time"
+        order_check = check("times", "weigh_order", "Weighing order", "review",
+                            f"Check the {part} on {slip}: its only weighing time was read as {at} on {m['date']}, "
+                            f"{what}, but only {w['certainty']:.0%} sure.", w["certainty"], [slip], cause)
+    else:
+        order_check = check("times", "weigh_order", "Weighing order", "pass",
+                            f"One weighing time on the slip, {at}: {what}. The time between the weighings isn't printed.",
+                            w["certainty"])
+    made = [{**order_check, "order": order}]
+    if order:
+        made.append(first_weighing(final, w))
+    tare_first = {"tare_first": True, "gross_first": False, None: None}[order]
+    made += [c for role in ("loading", "unloading")
+             if (c := photo_timing(role, images.get(role, []), w, limits, tare_first, around))]
+    if c := same_day(images.get("unloading", []), w, around):
+        made.append(c)
+    return made
 
 
 def short_trip(trip: str) -> str:

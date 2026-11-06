@@ -20,7 +20,8 @@ from dataclasses import dataclass
 from datetime import date
 
 import proof_check
-from proof_check import CONFIDENT, Limits, and_list, busy_time, check, overlap_minutes, trip_weighings, unsure_stamps
+from proof_check import (CONFIDENT, Limits, and_list, busy_time, check, gross_weighing, overlap_minutes, trip_weighings,
+                         unsure_stamps)
 from verifier.database import Copy
 
 SAME_WEIGHING = 2  # minutes between the gross weighings on two disposals' slips that make them one weighing
@@ -139,27 +140,26 @@ def same_weighing(images: dict[str, list[dict]], quantity: str | None, others: l
     already `flagged` by `reused`: a problem when Jev was sure of both times, else it asks a person. The tare isn't
     compared, as one morning tare is printed on every slip of the day. None without a gross weighing to compare."""
     w = trip_weighings(images, around)
-    if not w:
+    if not w or not (here := gross_weighing(w)):
         return None
-    here = w["gross"]
     found = []
     for o in others:
-        if o.disposal_id in flagged or not (theirs := trip_weighings(o.analysis["images"], around)):
+        theirs = trip_weighings(o.analysis["images"], around)
+        if o.disposal_id in flagged or not theirs or not (there := gross_weighing(theirs)):
             continue
-        there = theirs["gross"]
         if here["date"] == there["date"] and abs((here["at"] - there["at"]).total_seconds()) <= SAME_WEIGHING * 60:
             found.append((o, theirs))
     label = "Weighing not in another disposal"
     if not found:
         return check("trips", "same_weighing", label, "pass", "No other disposal of this vehicle with the same gross weighing")
-    sure_enough = lambda t: here["certainty"] >= CONFIDENT and t["gross"]["certainty"] >= CONFIDENT
+    sure_enough = lambda t: here["certainty"] >= CONFIDENT and gross_weighing(t)["certainty"] >= CONFIDENT
     sure = [(o, t) for o, t in found if sure_enough(t)]
     doubtful = [(o, t) for o, t in found if not sure_enough(t)]
     ours = w["slips"][-1]
     final = proof_check.final_slip(images["bill"])
     parts = []
     for o, t in sure or found:
-        part = (f"{name(ours)} shows the gross weighing at {here['time']} on {here['date']}, the same as "
+        part = (f"{name(ours)} shows the {'gross ' if w['gross'] else ''}weighing at {here['time']} on {here['date']}, the same as "
                 f"{disposals([o.disposal_id])}'s {name(t['slips'][-1], o.disposal_id)}")
         theirs_final = proof_check.final_slip(o.analysis["images"]["bill"])
         net = lambda slip: slip["answers"].get("net_weight", {}).get("choice")  # asked only of a quantity in kg
@@ -175,7 +175,7 @@ def same_weighing(images: dict[str, list[dict]], quantity: str | None, others: l
                      f"{detail}. One weighing can't be proof for two disposals.{also}",
                      images=list(dict.fromkeys([ours, *(t["slips"][-1] for _, t in sure)])))
     else:
-        unclear = [(ours, here, None)] + [(t["slips"][-1], t["gross"], o.disposal_id) for o, t in found]
+        unclear = [(ours, here, None)] + [(t["slips"][-1], gross_weighing(t), o.disposal_id) for o, t in found]
         read = "; ".join(f"{name(key, i)}{f' in disposal {i}' if i else ''} was read as {m['time']} on {m['date']}, "
                          f"but only {m['certainty']:.0%} sure" for key, m, i in unclear if m["certainty"] < CONFIDENT)
         made = check("trips", "same_weighing", label, "review",

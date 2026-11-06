@@ -1193,13 +1193,13 @@ class TripTests(unittest.TestCase):
     def test_times_printed_at_the_top_of_the_first_and_final_slips(self):
         v = run_trip(bill=(LAKSHMI_FIRST, LAKSHMI_FINAL))[0]["verdict"]
         self.assertEqual(v["status"], "pass", v["flags"])
-        self.assertEqual(by_key(v["checks"])["weigh_order"]["detail"], "Tare first (02:00), then gross (03:30), from the times "
-                                                                       "printed at the top of the first and final slips, tare first")
-        # Without the first slip there's no first weighing time.
+        self.assertEqual(by_key(v["checks"])["weigh_order"]["detail"], "Tare first (02:00), then gross (03:30), from the one "
+                                                                       "time on each of the first and final slips, tare first")
+        # Without the first slip, the final slip's one time is the second weighing: the gross, tare first.
         v = run_trip(bill=(LAKSHMI_FINAL,))[0]["verdict"]
         self.assertEqual(by_key(v["checks"])["weigh_order"]["detail"],
-                         "The tare (empty) and gross (loaded) times on weighbill1.jpg couldn't be read, so the weighing "
-                         "order and photo times weren't checked. Read the times on the slip.")
+                         "One weighing time on the slip, 03:30: the gross (loaded) weighing, as the lighter weight was "
+                         "weighed first. The time between the weighings isn't printed.")
         # The first weight heavier: weighed loaded first, so the first slip's time is the gross.
         v = run_trip(bill=(LAKSHMI_FIRST, {**LAKSHMI_FINAL, "first_weight": ("gross", 0.9)}))[0]["verdict"]
         self.assertTrue(by_key(v["checks"])["weigh_order"]["detail"].startswith("Gross first (02:00), then tare (03:30)"))
@@ -1209,13 +1209,75 @@ class TripTests(unittest.TestCase):
         v = run_trip(bill=({**IN_OUT_FINAL, "first_weight": ("gross", 0.9)},))[0]["verdict"]
         c = by_key(v["checks"])["time_in_tare"]
         self.assertEqual((c["status"], c["detail"]),
-                         ("fail", "weighbill1.jpg: the heavier weight is at Time In (02:00). Either In and Out were entered "
-                                  "swapped, or the vehicle was weighed loaded first."))
+                         ("fail", "weighbill1.jpg: the heavier weight was weighed first (02:00). Either the weights were "
+                                  "entered swapped, or the vehicle was weighed loaded first."))
         self.assertEqual(v["status"], "problem")
         c = by_key(run_trip(bill=({**IN_OUT_FINAL, "first_weight": ("gross", 0.6)},))[0]["verdict"]["checks"])["time_in_tare"]
         self.assertEqual(c["status"], "review")
         # Slips with a time beside each weight aren't In/Out slips, so this isn't checked.
         self.assertNotIn("time_in_tare", by_key(run_trip()[0]["verdict"]["checks"]))
+
+    def test_a_slip_with_one_time_is_its_second_weighing(self):
+        # Wayanad (3 Nov 2026): First and Second weight, one TIME, read as both gross time and Time In, each unsurely.
+        wayanad = {**FINAL, **not_printed("tare", "out", "printed"), **at("gross", "03:30", confidence=0.6),
+                   **at("in", "03:30", confidence=0.85), "first_weight": ("tare", 0.98)}
+        v = run_trip(bill=(wayanad,))[0]["verdict"]
+        checks = by_key(v["checks"])
+        self.assertEqual(v["status"], "pass", v["flags"])
+        self.assertEqual(checks["weigh_order"]["detail"], "One weighing time on the slip, 03:30: the gross (loaded) weighing, "
+                                                           "as the lighter weight was weighed first. The time between the "
+                                                           "weighings isn't printed.")
+        self.assertEqual(checks["time_in_tare"]["detail"], "weighbill1.jpg: the lighter weight was weighed first")
+        self.assertEqual(checks["unloading_timing"]["detail"], "Unloading 04:09 is after gross 03:30")
+        self.assertTrue(checks["loading_timing"]["detail"].startswith("Loading 02:40 is before gross 03:30"))
+        self.assertFalse({"weigh_gap", "weigh_day"} & set(checks), "one time: no gap, no tare day")
+        # Unloading before the gross is a problem, as on any tare-first slip.
+        early = by_key(run_trip(bill=({**wayanad, **at("gross", "05:00"), **at("in", "05:00")},))[0]["verdict"]["checks"])
+        self.assertEqual(early["unloading_timing"]["status"], "fail")
+        # The heavier weight first: flagged as on a Time In slip (the user, 6 Nov 2026), and the time is the tare.
+        v = run_trip(bill=({**wayanad, "first_weight": ("gross", 0.95)},))[0]["verdict"]
+        checks = by_key(v["checks"])
+        self.assertEqual(checks["time_in_tare"]["status"], "fail")
+        self.assertIn("the tare (empty) weighing, as the heavier weight was weighed first", checks["weigh_order"]["detail"])
+
+    def test_the_surest_two_time_layout_is_used_not_the_first(self):
+        # Kuttiyadi (3 Nov 2026) labels both times "Gross Wt. Date & Time": Jev also put them in the gross and tare
+        # boxes, unsurely, while reading Time In and Time Out surely. A fixed order would send these to a person.
+        kuttiyadi = {**IN_OUT_FINAL, **at("gross", "03:30", confidence=0.45), **at("tare", "02:00", confidence=0.45),
+                     "first_weight": ("tare", 1.0)}
+        v = run_trip(bill=(kuttiyadi,))[0]["verdict"]
+        self.assertEqual(v["status"], "pass", v["flags"])
+        self.assertTrue(by_key(v["checks"])["weigh_order"]["detail"].endswith("from Time In and Time Out, tare first"))
+
+    def test_a_slip_with_one_time_and_no_order_asks_only_about_unloading_before_it(self):
+        # Paradan, Riviera: gross and tare labelled, one time, which weight was first not shown.
+        riviera = {**FINAL, **not_printed("tare", "in", "out", "printed"), **at("gross", "03:30"),
+                   "first_weight": ("not_shown", 0.9)}
+        v = run_trip(bill=(riviera,))[0]["verdict"]
+        self.assertEqual(v["status"], "pass", v["flags"])
+        self.assertIn("the second weighing (the slip doesn't show which weight was first)",
+                      by_key(v["checks"])["weigh_order"]["detail"])
+        self.assertNotIn("time_in_tare", by_key(v["checks"]))
+        c = by_key(run_trip(bill=({**riviera, **at("gross", "05:00")},))[0]["verdict"]["checks"])["unloading_timing"]
+        self.assertEqual(c["status"], "review", "may have been weighed loaded first")
+        self.assertEqual(c["detail"], "unloading1.jpg was taken at 04:09, before the only weighing time on the slip, 05:00. "
+                                      "That fits only if the vehicle was weighed loaded first, and the slip doesn't show which "
+                                      "weight was first: check the order of the weighings.")
+        late = by_key(run_trip(bill=({**riviera, **at("gross", "02:00")},))[0]["verdict"]["checks"])["loading_timing"]
+        self.assertEqual(late["status"], "fail", "loading 02:40 after the second weighing at 02:00, whichever order")
+
+    def test_a_one_time_takes_its_date_from_anywhere_on_the_slip(self):
+        # Wayanad's date is printed outside its box: read as the print date, it dates the one time.
+        no_date = {**FINAL, **not_printed("tare", "out", "printed", "in"), **at("gross", "03:30"),
+                   "gross_day": ("not_shown", 0.6), "gross_month": ("not_shown", 0.6), "first_weight": ("tare", 0.95)}
+        v = run_trip(bill=(no_date,))[0]["verdict"]
+        self.assertIn("couldn't be read", by_key(v["checks"])["weigh_order"]["detail"])
+        dated = {**no_date, **at("printed", "03:30"), "printed_hour": ("not_shown", 0.9), "printed_minute": ("not_shown", 0.9),
+                 "printed_ampm": ("not_shown", 0.9)}
+        self.assertEqual(run_trip(bill=(dated,))[0]["verdict"]["status"], "pass")
+        # Two different times read is no one-time slip.
+        two = {**no_date, **at("gross", "03:30"), **at("in", "02:00")}
+        self.assertIn("couldn't be read", by_key(run_trip(bill=(two,))[0]["verdict"]["checks"])["weigh_order"]["detail"])
 
     def test_an_unsure_lighter_weight_at_time_in_asks_a_person(self):
         v = run_trip(bill=({**IN_OUT_FINAL, "first_weight": ("tare", 0.3)},))[0]["verdict"]

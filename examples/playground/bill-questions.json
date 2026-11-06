@@ -723,7 +723,7 @@
   },
   "printed_hour": {
     "type": "choice",
-    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what hour is that time, exactly as printed? If AM or PM is printed after it, give the hour as printed, from 01 to 12. Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints one date and time for the whole slip rather than one beside each weight, wherever it is (at its top, in its heading, or in a Time or Date & Time box; the date may be labelled Bill Date or Date, and may be printed away from its label, even over another label or line), what hour is that time, exactly as printed? If AM or PM is printed after it, give the hour as printed, from 01 to 12. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "00": null,
       "01": null,
@@ -754,7 +754,7 @@
   },
   "printed_minute": {
     "type": "choice",
-    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what minute is that time: the two digits right after the hour? If seconds are printed too, as in 07:02:14, the minute is the middle pair (02), not the last (14). Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints one date and time for the whole slip rather than one beside each weight, wherever it is (at its top, in its heading, or in a Time or Date & Time box; the date may be labelled Bill Date or Date, and may be printed away from its label, even over another label or line), what minute is that time: the two digits right after the hour? If seconds are printed too, as in 07:02:14, the minute is the middle pair (02), not the last (14). Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "00": null,
       "01": null,
@@ -821,7 +821,7 @@
   },
   "printed_ampm": {
     "type": "choice",
-    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), is AM or PM printed after that time? Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints one date and time for the whole slip rather than one beside each weight, wherever it is (at its top, in its heading, or in a Time or Date & Time box; the date may be labelled Bill Date or Date, and may be printed away from its label, even over another label or line), is AM or PM printed after that time? Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "none": "Neither: the time is on a 24-hour clock, such as 15:06.",
       "am": "AM is printed after the time.",
@@ -831,7 +831,7 @@
   },
   "printed_day": {
     "type": "choice",
-    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what day of the month is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints one date and time for the whole slip rather than one beside each weight, wherever it is (at its top, in its heading, or in a Time or Date & Time box; the date may be labelled Bill Date or Date, and may be printed away from its label, even over another label or line), what day of the month is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
@@ -869,7 +869,7 @@
   },
   "printed_month": {
     "type": "choice",
-    "instructions": "If `bill` prints one date and time for the whole slip, at its top or in its heading rather than beside a weight (the date may be labelled Bill Date or Date), what month (01 to 12) is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
+    "instructions": "If `bill` prints one date and time for the whole slip rather than one beside each weight, wherever it is (at its top, in its heading, or in a Time or Date & Time box; the date may be labelled Bill Date or Date, and may be printed away from its label, even over another label or line), what month (01 to 12) is its date? Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March. Ignore any timestamp on a camera picture printed on the slip.",
     "criteria": {
       "01": null,
       "02": null,
