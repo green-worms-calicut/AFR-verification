@@ -149,9 +149,9 @@ class RiskyPassTests(unittest.TestCase):
         yes = {"key": "gps_stamp", "status": "pass", "certainty": 0.85, "measure": "yes"}
         self.assertEqual(report.close_call(yes, "photo", 0.1), "yes, 0.85 sure, needs 0.80")
         self.assertIsNone(report.close_call({**yes, "certainty": 0.99}, "photo", 0.1))
-        screen = {"key": "screen_photo", "status": "pass", "measure": "yes"}  # passes on no: below 0.6 for a photo
-        self.assertEqual(report.close_call({**screen, "certainty": 0.55}, "photo", 0.1), "no, 0.45 sure, needs 0.40")
-        self.assertIsNone(report.close_call({**screen, "certainty": 0.1}, "photo", 0.1))
+        screen = {"key": "screen_photo", "status": "pass", "measure": "yes"}  # passes on no: flagged only from 0.8
+        self.assertEqual(report.close_call({**screen, "certainty": 0.75}, "photo", 0.1), "no, 0.25 sure, needs 0.20")
+        self.assertIsNone(report.close_call({**screen, "certainty": 0.55}, "photo", 0.1))
 
     def card(self, i, outcome="passed", risky=()):
         return {"id": i, "outcome": outcome, "risky": [{"sure": s} for s in risky]}

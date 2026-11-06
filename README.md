@@ -127,8 +127,8 @@ All of this is in code (`proof_check.trip_checks`, `decide_parts`, `verdict`), n
 
 | Part | Check | Pass | Needs a person | Problem |
 |-|-|-|-|-|
-| Real | Taken directly | every photo of the kind: screen yes ≤ 0.6 | any photo unsure | any photo clearly of a screen |
-| Real | Bill taken directly | every bill: screen yes ≤ 0.6 | any bill unsure | any bill clearly of a screen |
+| Real | Taken directly | every photo of the kind: screen yes below 0.8 | never (only a sure screen is flagged) | any photo clearly of a screen (yes 0.8 or more) |
+| Real | Bill taken directly | every bill: screen yes below 0.8 | never (only a sure screen is flagged) | any bill clearly of a screen (yes 0.8 or more), such as 172913's slip on the weighbridge's computer |
 | Real | Loading / unloading plate matches | at least one photo of the kind clearly `same` | none clear, or no photos | any photo clearly `different` |
 | Real | Bills match | every slip `same` | any slip unclear, or no bills | any slip `different` |
 | Real | Weighing order | tare first or gross first, clearly | a time unreadable or unsure, both the same, or no bills | – |

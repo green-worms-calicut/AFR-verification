@@ -638,7 +638,7 @@ class AnalyzeTests(unittest.TestCase):
     def test_photo_of_a_screen_fails_its_check(self):
         checks = by_key(analyze("photo", {**PHOTO, "screen_photo": 0.92})[0]["checks"])
         self.assertEqual((checks["screen_photo"]["status"], checks["screen_photo"]["detail"]), ("fail", "A photo of a screen"))
-        self.assertEqual(by_key(analyze("photo", {**PHOTO, "screen_photo": 0.7})[0]["checks"])["screen_photo"]["status"], "review")
+        self.assertEqual(by_key(analyze("photo", {**PHOTO, "screen_photo": 0.7})[0]["checks"])["screen_photo"]["status"], "pass")
         self.assertEqual(by_key(analyze("photo", {**PHOTO, "screen_photo": 0.4})[0]["checks"])["screen_photo"]["status"], "pass")
 
     def test_yes_no_thresholds(self):
@@ -646,14 +646,15 @@ class AnalyzeTests(unittest.TestCase):
             with self.subTest(yes=yes):
                 self.assertEqual(by_key(analyze("photo", {**PHOTO, "gps_stamp": yes})[0]["checks"])["gps_stamp"]["status"], status)
 
-    def test_screen_photo_limits_by_kind_of_image(self):
-        # Bills: none of the 180 saved bills of 19 and 23 Oct 2026 scored above 0.33, so 0.4 is their "no" limit.
-        for picks, status in [(0.60, "review"), (0.33, "pass")]:
+    def test_a_screen_is_only_flagged_when_jev_is_sure(self):
+        # The user, 6 Nov 2026: 79241's G W slip scored 0.45 and confused people; 172913's screen scored 0.97.
+        for picks, status in [(0.97, "fail"), (0.8, "fail"), (0.79, "pass"), (0.45, "pass"), (0.33, "pass")]:
             with self.subTest(bill=picks):
                 v = run_trip(bill=(FIRST, {**FINAL, "screen_photo": picks}))[0]["verdict"]
                 self.assertEqual(by_key(v["checks"])["bill_direct"]["status"], status)
-        v = run_trip(loading=({**LOADING, "screen_photo": 0.60},) * 2)[0]["verdict"]
-        self.assertEqual(by_key(v["checks"])["loading_direct"]["status"], "pass", "photos keep their measured 0.6")
+            with self.subTest(photo=picks):
+                v = run_trip(loading=({**LOADING, "screen_photo": picks},) * 2)[0]["verdict"]
+                self.assertEqual(by_key(v["checks"])["loading_direct"]["status"], status)
 
     def test_first_slip_leaves_out_the_final_slip_questions(self):
         checks = by_key(analyze("bill", FIRST)[0]["checks"])
@@ -1045,7 +1046,7 @@ class TripTests(unittest.TestCase):
         self.assertEqual((v["status"], c["part"], c["status"], c["images"]), ("problem", "real", "fail", ["weighbill2.jpg"]))
         self.assertEqual(c["detail"], "Photographed off a screen, not taken directly: weighbill2.jpg.")
         c = by_key(run_trip(bill=(FIRST, {**FINAL, "screen_photo": 0.7}))[0]["verdict"]["checks"])["bill_direct"]
-        self.assertEqual(c["status"], "review")
+        self.assertEqual(c["status"], "pass", "only flagged when Jev is sure")
         c = by_key(run_trip()[0]["verdict"]["checks"])["bill_direct"]
         self.assertEqual((c["status"], c["detail"]), ("pass", "2 of 2 photos"))
 
@@ -1078,13 +1079,15 @@ class TripTests(unittest.TestCase):
         self.assertEqual(trip["verdict"]["status"], "pass")
 
     def test_missing_answers_ask_a_person(self):
-        for dropped, key in (("plate_number", "loading_plate"), ("screen_photo", "loading_direct")):
+        # A photo of a screen is only flagged when Jev is sure, and a missing answer isn't sure.
+        for dropped, key, status in (("plate_number", "loading_plate", "review"), ("shows_vehicle", "loading_vehicle", "review"),
+                                     ("screen_photo", "loading_direct", "pass")):
             uploads, jev = make_trip()
             jev.drop = {dropped}
             with jev.client() as client:
                 trip, _ = proof_check.analyze_trip(client, uploads, NUMBER, "jev-latest", QUANTITY)
             with self.subTest(dropped=dropped):
-                self.assertEqual(by_key(trip["verdict"]["checks"])[key]["status"], "review")
+                self.assertEqual(by_key(trip["verdict"]["checks"])[key]["status"], status)
 
     def test_answers_with_one_left_out_are_not_saved(self):
         uploads, jev = make_trip()
@@ -1178,7 +1181,7 @@ class TripTests(unittest.TestCase):
         self.assertAlmostEqual(proof_check.same_hour(hour, "pm")["confidence"], 0.98)
 
     def test_photo_of_a_screen_has_its_own_measured_thresholds(self):
-        for yes, status in [(0.43, "pass"), (0.7, "review"), (0.99, "fail")]:
+        for yes, status in [(0.43, "pass"), (0.7, "pass"), (0.99, "fail")]:
             with self.subTest(yes=yes):
                 c = by_key(run_trip(unloading=({**UNLOADING, "screen_photo": yes},))[0]["verdict"]["checks"])
                 self.assertEqual(c["unloading_direct"]["status"], status)

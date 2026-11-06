@@ -21,8 +21,10 @@ LEANS = 0.5  # an unsure answer at least this likely still asks a person where s
 # Thresholds measured for one question of one slot: (yes at or above, no at or below). In the 19 Oct 2026 run of
 # 42 real trips, every photo taken directly scored 0.05-0.43 for screen_photo, and every photo of a screen 0.99.
 # The bill's screen_photo is another question: on the 180 saved bills of 19 and 23 Oct 2026, all taken directly,
-# it scored at most 0.33 (no bill photographed off a screen was seen yet, so its yes limit stays YES).
-NOUL_THRESHOLDS = {("photo", "screen_photo"): (0.8, 0.6), ("bill", "screen_photo"): (0.8, 0.4)}
+# it scored at most 0.33, and the one slip photographed off a screen (172913) 0.97. A photo of a screen is only flagged
+# when Jev is sure (the user, 6 Nov 2026): an unsure one confused people (79241's G W slip, with the weighbridge's
+# camera pictures printed on it, 0.45 on 3 Nov), so screen_photo has no unsure band, its yes and no limits the same.
+NOUL_THRESHOLDS = {("photo", "screen_photo"): (YES, YES), ("bill", "screen_photo"): (YES, YES)}
 
 
 @dataclass(frozen=True)
@@ -214,9 +216,10 @@ def unsure(detail: str, certainty: float) -> str:
 
 
 def unsure_yes(slot: str, qid: str) -> float:
-    """A yes probability every check reads as unsure for this question: halfway between its yes and no limits."""
+    """A yes probability every check reads as unsure for this question: halfway between its yes and no limits. A
+    question with no unsure band (screen_photo, flagged only when sure) reads it as no: a missing answer isn't sure."""
     high, low = NOUL_THRESHOLDS.get((slot, qid), (YES, NO))
-    return (high + low) / 2
+    return (high + low) / 2 if high > low else 0.0
 
 
 def noul_status(yes: float, pass_when_yes: bool = True, qid: str | None = None, slot: str | None = None) -> str:
