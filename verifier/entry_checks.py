@@ -1,5 +1,10 @@
-"""Checks of what was entered in gw_sales against the photos: every collection photo was taken on its pickup day and near its collection point, no unloading photo long after the end time, and
-the collections before the disposal's arrival. Also what was collected by hand scale against the net weight entered: recorded, not flagged.
+"""Checks of what was entered in gw_sales against the photos: every collection photo was taken on its pickup day and
+near its collection point, and no unloading photo long after the end time. Also what was collected by hand scale
+against the net weight entered: recorded, not flagged.
+
+A log's `collectionDate` is its pickup date, but its time can't be relied on as the pickup's (on 3 Nov 2026 it was
+often hours after the collection photos, when the log was saved at the plant): only its day is used, and no pickup
+time is compared with the arrival entered (dropped by the user, 6 Nov).
 
 gw_sales sends times in UTC and the photos' GPS stamps show the phone's time, IST, so every time entered is turned
 into IST first (`standards.ist_time`). A stamp is read as a day and month without a year, so dates are compared by
@@ -13,7 +18,6 @@ from proof_check import and_list, check, photo_moments
 from verifier import compare_disposals, standards
 
 LATE_AFTER_END = timedelta(hours=1, minutes=30)  # how long after the end time entered an unloading photo may be
-MANUAL = "MANUAL_TRIP_ENTRY"  # entered after the fact: its times can be hours or days off, so only its dates count
 
 
 def logs(request: dict) -> list[dict]:
@@ -34,7 +38,8 @@ def owners(request: dict) -> dict[str, list[int | None]]:
 
 
 def pickup(entry: dict) -> datetime | None:
-    """A collection log's pickup (its collectionDate) in IST."""
+    """A collection log's pickup (its collectionDate) in IST. Only its day is used: its time can be hours after the
+    pickup."""
     return standards.ist_time(entry.get("collectionDate"))
 
 
@@ -173,29 +178,6 @@ def too_late(request: dict, images: dict[str, list[dict]], around=None) -> dict 
                  images=[name for name, _ in late])
 
 
-def after_collections(request: dict) -> dict | None:
-    """The disposal's arrival entered after every log's pickup; by date only for a manual entry (the disposal's or
-    the log's). None without an arrival time or a pickup."""
-    arrival = standards.ist_time((request.get("claims") or {}).get("arrivalTime"))
-    entries = [(e, at) for e in logs(request) if (at := pickup(e))]
-    if not arrival or not entries:
-        return None
-    manual_disposal = (request.get("subject") or {}).get("createdVia") == MANUAL
-    late = []
-    for e, at in entries:
-        manual = manual_disposal or e.get("createdVia") == MANUAL
-        if (at.date() > arrival.date()) if manual else at > arrival:
-            late.append(f"{log_name(e)} was picked up on {at:%d/%m}" if manual else
-                        f"{log_name(e)} was picked up at {at:%H:%M} on {at:%d/%m}")
-    label = "Collections before the disposal"
-    if not late:
-        return check("collection", "disposal_after_collections", label, "pass",
-                     f"All {len(entries)} pickups before the arrival entered, {arrival:%H:%M} on {arrival:%d/%m}")
-    return check("collection", "disposal_after_collections", label, "review",
-                 f"{'; '.join(late)}: after the disposal's arrival entered, {arrival:%H:%M} on {arrival:%d/%m}. The waste "
-                 "is collected before it is disposed of: check the times entered.")
-
-
 def point_of(entry: dict) -> tuple[float, float] | None:
     """A collection log's collection point, as (latitude, longitude), if gw_sales knows it (in India or not)."""
     where = (entry.get("collectionPoint") or {}).get("location") or {}
@@ -319,8 +301,7 @@ def checks(request: dict, images: dict[str, list[dict]], radius: float = 500, ar
     other disposals (`database.other_logs`)."""
     return [*log_same_photo(request, images), *log_reused(request, other_logs),
             *log_repeated(request, other_logs),
-            *(c for c in (photo_date(request, images, around), too_late(request, images, around),
-                          after_collections(request)) if c),
+            *(c for c in (photo_date(request, images, around), too_late(request, images, around)) if c),
             *collection_points(request, images, radius)]
 
 

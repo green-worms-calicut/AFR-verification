@@ -587,23 +587,11 @@ class EntryCheckTests(unittest.TestCase):
         self.jev = make_trip()[1]
         self.assertIsNone(self.check_of(self.checked(), "unloading_too_late"), "no end time: not checked")
 
-    def test_a_pickup_after_the_arrival_asks_a_person(self):
-        # Arrival 15 Oct 03:00 UTC = 08:30 IST; this log was picked up at 09:30 IST.
-        checked = self.checked(logs=[log(picked_up="2026-10-15T04:00:00.000Z")])
-        c = self.check_of(checked, "disposal_after_collections")
-        self.assertEqual((c["status"], c["part"]), ("review", "docs"))
-        self.assertIn("picked up at 09:30 on 15/10: after the disposal's arrival entered, 08:30 on 15/10", c["detail"])
-
-    def test_a_manual_entry_is_compared_by_date_only(self):
-        uploads, self.jev = make_trip()
-        later_same_day = log(picked_up="2026-10-15T04:00:00.000Z", createdVia="MANUAL_TRIP_ENTRY")
-        self.assertEqual(self.check_of(self.checked(disposal(uploads, logs=[later_same_day]), uploads),
-                                       "disposal_after_collections")["status"], "pass")
-        self.jev = make_trip()[1]
-        next_day = log(picked_up="2026-10-15T20:00:00.000Z", createdVia="MANUAL_TRIP_ENTRY")  # 16 Oct IST
-        c = self.check_of(self.checked(disposal(uploads, logs=[next_day]), uploads), "disposal_after_collections")
-        self.assertEqual(c["status"], "review")
-        self.assertIn("was picked up on 16/10", c["detail"])
+    def test_no_pickup_time_is_compared_with_the_arrival(self):
+        # collectionDate's time can be hours after the pickup (3 Nov 2026, logs saved at the plant): the user dropped it.
+        checked = self.checked(logs=[log(picked_up="2026-10-15T04:00:00.000Z")])  # an hour after the arrival
+        self.assertIsNone(self.check_of(checked, "disposal_after_collections"))
+        self.assertEqual(checked.flags, [])
 
     def test_collected_against_weighed_is_recorded_not_flagged(self):
         materials = [{"materialName": "PET", "quantity": 2000, "unit": "kg"}, {"materialName": "Mixed", "quantity": 12, "unit": "bags"}]
@@ -673,8 +661,7 @@ class EntryCheckTests(unittest.TestCase):
 
     def test_without_logs_or_times_nothing_new_is_checked(self):
         keys = {c["key"] for c in self.checked().analysis["verdict"]["checks"]}
-        self.assertFalse(keys & {"collection_has_photos", "collection_photo_date", "unloading_too_late",
-                                 "disposal_after_collections"})
+        self.assertFalse(keys & {"collection_photo_date", "unloading_too_late"})
 
 
 class CompareTests(unittest.TestCase):

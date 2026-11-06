@@ -129,10 +129,10 @@ PART_OF = {
     "image_unavailable": "docs", "same_file": "real", "same_moment": "real", "not_compared": "real",
     # Any trip: an image Jev couldn't answer for after its retries (the others' checks still run).
     "image_unanswered": "docs",
-    # The verifier, from what was entered in gw_sales: every collection photo was taken on its pickup day, no unloading
-    # photo long after the end time, and the collections before the arrival.
+    # The verifier, from what was entered in gw_sales: every collection photo was taken on its pickup day, and no
+    # unloading photo long after the end time.
     "collection_photo_date": "real", "unloading_too_late": "real",
-    "disposal_after_collections": "docs", "weighbridge_matches": "docs", "collection_point": "real",
+    "weighbridge_matches": "docs", "collection_point": "real",
     "log_same_photo": "real", "log_reused": "real", "log_repeated": "real",
 }
 
