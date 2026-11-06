@@ -1252,6 +1252,36 @@ class TripTests(unittest.TestCase):
         self.assertEqual(v["status"], "pass", v["flags"])
         self.assertTrue(by_key(v["checks"])["weigh_order"]["detail"].endswith("from Time In and Time Out, tare first"))
 
+    def test_unsure_times_pass_when_every_likely_reading_is_in_order(self):
+        # 79350 (3 Nov 2026): read right at 72%. A fallback only for the unsure (the user, 6 Nov 2026).
+        unsure = {**FINAL, "tare_minute": ("00", 0.7),
+                  "gross_minute": ("30", 0.7, {"not_shown": 0.25})}  # not shown is left out: the time is printed
+        v = run_trip(bill=(FIRST, unsure))[0]["verdict"]
+        checks = by_key(v["checks"])
+        self.assertEqual(v["status"], "pass", v["flags"])
+        self.assertTrue(checks["weigh_order"]["detail"].startswith(
+            "Tare first (02:00), then gross (03:30), from the times printed with each weight (70% sure of the times, but"))
+        self.assertIn("likely in order however the slip is read", checks["unloading_timing"]["detail"])
+        self.assertNotIn("if the weighing times are right", checks["weigh_gap"]["detail"])
+
+    def test_unsure_times_stay_with_a_person_when_a_likely_reading_breaks_the_order(self):
+        # Every part at 70%, as AM or PM and the month too: 14:00 or another month is likely enough to keep it.
+        v = run_trip(bill=(FIRST, {**FINAL, **at("tare", "02:00", confidence=0.7)}))[0]["verdict"]
+        self.assertEqual(by_key(v["checks"])["weigh_order"]["status"], "review")
+        # The tare's hour 02 at 60%, or 04 at 35%: weighed empty after the gross at 03:30.
+        split = {**FINAL, "tare_hour": ("02", 0.6, {"04": 0.35})}
+        v = run_trip(bill=(FIRST, split))[0]["verdict"]
+        self.assertEqual(by_key(v["checks"])["weigh_order"]["status"], "review")
+        # Read unsurely and out of order with the photos (as 79171): never settled, whatever the other readings.
+        late = {**FINAL, **at("gross", "02:30"), "gross_hour": ("02", 0.7)}
+        v = run_trip(bill=(FIRST, late))[0]["verdict"]
+        self.assertEqual((by_key(v["checks"])["weigh_order"]["status"], v["status"]), ("review", "review"))
+        # Unsure which weight was first on a Time In and Time Out slip: a heavier first would be flagged.
+        v = run_trip(bill=({**IN_OUT_FINAL, "first_weight": ("tare", 0.7, {"gross": 0.25})},))[0]["verdict"]
+        self.assertEqual(by_key(v["checks"])["weigh_order"]["status"], "review")
+        v = run_trip(bill=({**IN_OUT_FINAL, "in_minute": ("00", 0.7), "first_weight": ("tare", 0.97)},))[0]["verdict"]
+        self.assertEqual(v["status"], "pass", v["flags"])
+
     def test_a_slip_with_one_time_and_no_order_asks_only_about_unloading_before_it(self):
         # Paradan, Riviera: gross and tare labelled, one time, which weight was first not shown.
         riviera = {**FINAL, **not_printed("tare", "in", "out", "printed"), **at("gross", "03:30"),

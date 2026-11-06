@@ -91,7 +91,8 @@ from proof_check.trip_rules import (
     final_slip, LOOK_FOR, choice_check, seal_checks, verra_checks, bill_checks, weighbridge_check, photo_moments,
     gross_start, busy_time,
     overlap_minutes, photo_window,
-    photo_timing, gross_weighing, same_day, first_weighing, one_time_checks, trip_checks, short_trip, and_list, reuse_check, overlap_checks
+    photo_timing, gross_weighing, same_day, first_weighing, one_time_checks, reading_options, in_order, chance_in_order,
+    settle_unsure_times, trip_checks, short_trip, and_list, reuse_check, overlap_checks
 )
 from proof_check.inputs import in_india, normalize_vehicle_number, parse_limits, parse_quantity, parse_plant, parse_switch
 from proof_check.verdict import TITLES, timeline, decide, decide_parts, verdict, add_checks

@@ -354,14 +354,16 @@ def weighings(bill: dict, first_slip: dict | None = None, around=None) -> dict |
     gross, tare = moment(r["gross_time"], r["gross_date"], around), moment(r["tare_time"], r["tare_date"], around)
     if gross and tare:
         found.append({"gross": gross, "tare": tare, "certainty": min(gross["certainty"], tare["certainty"]),
-                      "source": "the times printed with each weight", "slips": [bill["name"]], "layout": "each"})
+                      "source": "the times printed with each weight", "slips": [bill["name"]], "layout": "each",
+                      "read": {"gross": (r["gross_time"], r["gross_date"]), "tare": (r["tare_time"], r["tare_date"])}})
     time_in, time_out = moment(r["in_time"], r["in_date"], around), moment(r["out_time"], r["out_date"], around)
     if time_in and time_out and shown:
         gross, tare = (time_in, time_out) if first["choice"] == "gross" else (time_out, time_in)
         found.append({"gross": gross, "tare": tare,
                       "certainty": min(time_in["certainty"], time_out["certainty"], first["confidence"]),
                       "source": f"Time In and Time Out, {first['choice']} first", "slips": [bill["name"]],
-                      "layout": "in_out"})
+                      "layout": "in_out", "read": {"in": (r["in_time"], r["in_date"]), "out": (r["out_time"], r["out_date"]),
+                                                   "first": first}})
     later = only_time(bill, around)
     earlier = only_time(first_slip, around) if first_slip else None
     if earlier and later and shown:
@@ -1108,6 +1110,8 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
             checks.append(c)
     if c := same_day(images.get("unloading", []), w, around):
         checks.append(c)
+    if cause:
+        checks = settle_unsure_times(checks, images, w, final, limits, around)
     return checks, w
 
 
@@ -1170,6 +1174,99 @@ def one_time_checks(images: dict[str, list[dict]], w: dict, final: dict, limits:
     if c := same_day(images.get("unloading", []), w, around):
         made.append(c)
     return made
+
+
+def reading_options(time: dict, date: dict, around=None, keep: int = 25) -> list[tuple[dict, float]]:
+    """The moments a slip's time and date reading may be, likeliest first, with their chances, from Jev's candidates
+    for each part (hour, minute, AM or PM, day, month), taken as independent; readings giving the same moment add up
+    (02 PM and 14 are 14:00). For a reading Jev made, "not shown" is left out and the other candidates share its
+    chance: the slip's layout already shows the time is printed (79350's minute, 06 at 72% and not shown at 21%, read
+    right; the user, 6 Nov 2026)."""
+    def options(part: dict) -> list[tuple[str, float]]:
+        shown = [(o, q) for o, q in part.get("top") or [(part["choice"], part["confidence"])] if o != NOT_SHOWN and q > 0]
+        total = sum(q for _, q in shown)
+        return [(o, q / total) for o, q in shown]
+
+    found: dict[datetime, list] = {}
+    for (h, ph), (mi, pmi), (ap, pap), (d, pd), (mo, pmo) in itertools.product(
+            *(options(part) for part in time["parts"]), *(options(part) for part in date["parts"])):
+        chance = ph * pmi * pap * pd * pmo
+        if chance < 0.001:
+            continue
+        m = moment({"value": to_24h(f"{h}:{mi}", ap), "missing": False, "min_confidence": 1.0},
+                   {"value": f"{d}/{mo}", "missing": False, "min_confidence": 1.0}, around)
+        if m:
+            found.setdefault(m["at"], [m, 0.0])[1] += chance
+    return sorted(((m, q) for m, q in found.values()), key=lambda x: -x[1])[:keep]
+
+
+def in_order(tare: dict, gross: dict, images: dict[str, list[dict]], limits: Limits, around=None) -> bool:
+    """Whether a trip weighed empty at `tare` and loaded at `gross` passes every timing rule `trip_checks` applies:
+    the gap for its order, the tare on this trip, every read photo stamp in its window, give or take the clock slack,
+    and unloading on the gross weighing's day. Photos whose stamp wasn't read are their own checks' to flag."""
+    gap = minutes_between(tare, gross)
+    if gap == 0:
+        return False
+    tare_first = gap > 0
+    if abs(gap) < (limits.min_gap_tare_first if tare_first else limits.min_gap_gross_first):
+        return False
+    if tare["date"] != gross["date"] and abs(gap) > limits.max_overnight_gap:
+        return False
+    weighed = {"tare": tare, "gross": gross}
+    for role in ("loading", "unloading"):
+        after, before = photo_window(role, tare_first)
+        for _, m in photo_moments(images.get(role, []), around):
+            if m and ((after and minutes_between(weighed[after], m) < -limits.clock_slack)
+                      or (before and minutes_between(m, weighed[before]) < -limits.clock_slack)
+                      or (role == "unloading" and m["date"] != gross["date"])):
+                return False
+    return True
+
+
+def chance_in_order(images: dict[str, list[dict]], w: dict, limits: Limits, around=None) -> float:
+    """How likely a trip with two weighing times is in order (`in_order`), over every likely reading of those times
+    and, on a Time In and Time Out slip, of which weight was first: a heavier weight first counts as out of order, as
+    `first_weighing` flags it, and so does that weight read as not shown. Timing only: the photos' stamps as read."""
+    read = w["read"]
+    if w["layout"] == "each":
+        return sum(pt * pg for (tare, pt), (gross, pg) in itertools.product(
+            reading_options(*read["tare"], around), reading_options(*read["gross"], around))
+            if in_order(tare, gross, images, limits, around))
+    first = read["first"]
+    tare_first = dict(first.get("top") or [(first["choice"], first["confidence"])]).get("tare", 0.0)
+    return tare_first * sum(pi * po for (time_in, pi), (time_out, po) in itertools.product(
+        reading_options(*read["in"], around), reading_options(*read["out"], around))
+        if in_order(time_in, time_out, images, limits, around))
+
+
+def settle_unsure_times(checks: list[dict], images: dict[str, list[dict]], w: dict, final: dict, limits: Limits,
+                        around=None) -> list[dict]:
+    """Weighing times read unsurely, on a slip with two times, pass when the trip is in order however the slip is
+    likely read (`chance_in_order` at least YES) and as read: a fallback only for the unsure, which never makes a
+    problem (the user, 6 Nov 2026). Otherwise the checks they leave unsure ("weigh_times") stay for a person."""
+    if w["layout"] not in ("each", "in_out") or not in_order(w["tare"], w["gross"], images, limits, around):
+        return checks
+    if w["layout"] == "in_out" and final["answers"]["first_weight"]["choice"] != "tare":
+        return checks
+    chance = chance_in_order(images, w, limits, around)
+    if chance < YES:
+        return checks
+    note = f" ({w['certainty']:.0%} sure of the times, but {chance:.0%} likely in order however the slip is read)"
+    settled = []
+    for c in checks:
+        if c["cause"] == "weigh_times" and c["status"] == "review":
+            detail = c["detail"].replace(", if the weighing times are right", "").replace(" if those times are right", "") \
+                .replace(", if the weighing date is right", "")
+            if c["key"] == "weigh_order":
+                g, t = show(w["gross"], w["tare"])
+                first = f"Tare first ({t}), then gross ({g})" if minutes_between(w["tare"], w["gross"]) > 0 \
+                    else f"Gross first ({g}), then tare ({t})"
+                detail = f"{first}, from {w['source']}"
+            elif c["key"] == "time_in_tare":
+                detail = f"{final['name']}: the lighter weight was weighed first ({show(w['tare'])[0]})"
+            c = {**c, "status": "pass", "cause": None, "detail": detail + note, "certainty": chance}
+        settled.append(c)
+    return settled
 
 
 def short_trip(trip: str) -> str:
