@@ -822,7 +822,10 @@ def busy_time(images: dict[str, list[dict]], sure_only: bool = False, around=Non
                 if m and (not sure_only or m["certainty"] >= CONFIDENT)]
 
     loading, unloading = times("loading"), times("unloading")
-    if (start := gross_start(images, around)) and (not sure_only or start[1]["certainty"] >= CONFIDENT):
+    # The vehicle is loaded before it unloads: a slip time after the unloading photos (a gross-first slip's one time,
+    # or a misread date, 06/11 for 03/11 on 79452 on 3 Nov 2026) would stretch the trip over days, so it starts none.
+    if ((start := gross_start(images, around)) and (not sure_only or start[1]["certainty"] >= CONFIDENT)
+            and unloading and start[1]["at"] <= min(unloading)):
         loading = [start[1]["at"]]
     if not loading or not unloading:
         return None

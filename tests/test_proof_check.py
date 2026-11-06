@@ -1509,6 +1509,11 @@ class CrossTripTests(unittest.TestCase):
         self.assertEqual((trip["verdict"]["window"][0], trip["verdict"]["sure_window"]), (f"{proof_check.YEAR}-10-15T03:30:00", None))
         self.assertEqual([(name, m["time"]) for name, m in proof_check.unsure_stamps(trip["images"])], [("weighbill2.jpg", "03:30")])
 
+    def test_a_slip_time_after_unloading_starts_no_trip(self):
+        # 79452 (3 Nov 2026): no collection photo, and its slip's date misread as 06/11 for 03/11.
+        trip = run_trip(loading=(), bill=(FIRST, {**FINAL, **at("gross", "03:30", "18/10")}))[0]
+        self.assertIsNone(trip["verdict"]["window"])
+
     def test_trips_without_collection_photos_still_overlap(self):
         first = run_trip(loading=())[0]
         second = run_trip(loading=(), unloading=({**PHOTO, **stamp("04:30")},) * 2,
