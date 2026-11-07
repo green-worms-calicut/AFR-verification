@@ -8,7 +8,7 @@ Without one, the hand-read vehicle number and final-slip net weight from truth.j
 given or a parent) stand in for it, so the run checks Jev against the images themselves. The plant's
 location comes from --plant for every trip, unless a trip.json gives its own. "verra": true marks a Verra
 project trip, whose final slip must have a material entered and carry the weighbridge's stamp. "weighbridge" is the
-weighbridge entered, whose name the final slip must show.
+weighbridge entered, whose name a Verra project trip's final slip must show.
 
 Each trip is reported by part (real, docs, verra: see proof_check.PARTS) and as a whole.
 

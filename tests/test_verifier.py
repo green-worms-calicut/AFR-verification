@@ -35,7 +35,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 import proof_check  # noqa: E402
 from proof_check import Upload  # noqa: E402
 from test_proof_check import (AT_PLANT, COLOURS, FINAL, FIRST, LOADING, NUMBER, PLANT, PULATH, QUANTITY,  # noqa: E402
-                              UNLOADING, FakeJev, at, coloured, make_trip, sent, stamp)
+                              STAMPED, UNLOADING, FakeJev, at, coloured, make_trip, sent, stamp)
 from verifier import (api, compare_disposals, database, disposal_check, entry_checks, logs, migrate, s3_photos,  # noqa: E402
                       signatures, standards, tasks)
 from verifier.settings import Settings  # noqa: E402
@@ -392,12 +392,12 @@ MATERIALS = [{"materialName": "PET", "quantity": 120, "unit": "kg"}]
 class EntryCheckTests(unittest.TestCase):
     """What was entered in gw_sales (collection logs, times) against the photos, every time turned from UTC to IST."""
 
-    def checked(self, request=None, uploads=None, other_logs=(), **kw):
+    def checked(self, request=None, uploads=None, other_logs=(), verra_project=None, **kw):
         if uploads is None:
             uploads, self.jev = make_trip()
         request = request or disposal(uploads, **kw)
         with self.jev.client() as client:
-            return disposal_check.check(request, files(uploads).get, client, other_logs=list(other_logs))
+            return disposal_check.check(request, files(uploads).get, client, verra_project, other_logs=list(other_logs))
 
     def check_of(self, checked, key):
         return next((c for c in checked.analysis["verdict"]["checks"] if c["key"] == key), None)
@@ -559,13 +559,21 @@ class EntryCheckTests(unittest.TestCase):
                          {"logs": 1, "collectedKg": 2000, "collectedBags": 12, "netEnteredKg": float(QUANTITY), "differenceKg": 570.0})
         self.assertEqual(checked.flags, [])
 
-    def test_the_slip_must_be_from_the_weighbridge_entered(self):
-        uploads, self.jev = make_trip(bill=(FIRST, {**FINAL, "weighbridge_entered": ("different", 0.9)}))
-        checked = self.checked(disposal(uploads, weighbridge={"id": 5, "name": "ABC Weighbridge"}), uploads)
+    def test_a_verra_project_slip_must_be_from_the_weighbridge_entered(self):
+        uploads, self.jev = make_trip(bill=(FIRST, {**FINAL, **STAMPED, "weighbridge_entered": ("different", 0.9)}))
+        verra = [log(client={"name": "ABC Hotel", "defaultProject": {"code": "VERRA"}})]
+        checked = self.checked(disposal(uploads, logs=verra, weighbridge={"id": 5, "name": "ABC Weighbridge"}), uploads,
+                               verra_project="VERRA")
         self.assertTrue(any(b"ABC Weighbridge" in sent(r) for r in self.jev.requests), "the name entered is sent")
         [flag] = [f for f in checked.flags if f["code"] == "weighbridge_matches"]
-        self.assertEqual((flag["kind"], flag["severity"]), ("please check", "recheck"))
+        self.assertEqual((flag["kind"], flag["severity"]), ("please check", "info"))
         self.assertIn("from another weighbridge than ABC Weighbridge, the one entered", flag["message"])
+
+    def test_the_weighbridge_entered_is_not_checked_off_the_verra_project(self):
+        uploads, self.jev = make_trip()
+        checked = self.checked(disposal(uploads, weighbridge={"id": 5, "name": "ABC Weighbridge"}), uploads)
+        self.assertFalse(any(b"weighbridge_entered" in sent(r) for r in self.jev.requests))
+        self.assertIsNone(self.check_of(checked, "weighbridge_matches"))
 
     def test_no_weighbridge_entered_asks_nothing_about_it(self):
         checked = self.checked()

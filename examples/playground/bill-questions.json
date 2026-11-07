@@ -934,7 +934,7 @@
   },
   "weighbridge_entered": {
     "type": "choice",
-    "instructions": "Is `bill` a slip from the weighbridge named in `weighbridge`? A slip prints its weighbridge's name in its heading, sometimes also in an ink stamp. The same weighbridge's name is often written differently: shortened, with or without spaces or 'Electronic', with or without its place.",
+    "instructions": "Is `bill` a slip from the weighbridge named in `weighbridge`? A slip prints its weighbridge's name in its heading, sometimes also in an ink stamp. The same weighbridge's name is often written differently: shortened, with or without spaces or 'Electronic', with or without its place, or spelt differently or wrongly, in `weighbridge` or on the slip.",
     "criteria": {
       "different": "The slip's heading names another weighbridge, not the one in `weighbridge`.",
       "same": "The slip's heading names the weighbridge in `weighbridge`, even if written differently.",

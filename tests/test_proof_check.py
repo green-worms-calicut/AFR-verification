@@ -1372,18 +1372,26 @@ class TripTests(unittest.TestCase):
 
 
 class WeighbridgeTests(unittest.TestCase):
-    """The final slip is from the weighbridge entered (the verifier sends gw_sales' claims.weighbridge.name)."""
+    """A Verra project trip's final slip is from the weighbridge entered (the verifier sends gw_sales'
+    claims.weighbridge.name)."""
 
     NAME = "S N Automatic Weigh Bridge"
 
     def test_asked_only_when_a_weighbridge_is_entered(self):
-        _, jev = run_trip()
+        _, jev = run_trip(verra=True)
         self.assertFalse(any(b"weighbridge_entered" in sent(r) for r in jev.requests))
-        _, jev = run_trip(weighbridge=self.NAME)
+        _, jev = run_trip(weighbridge=self.NAME, verra=True)
         bills = [sent(r) for r in jev.requests if b"weigh_bill" in sent(r)]
         self.assertTrue(bills and all(b"weighbridge_entered" in b and self.NAME.encode() in b for b in bills))
         photos = [sent(r) for r in jev.requests if b"shows_vehicle" in sent(r)]
         self.assertFalse(any(b"weighbridge_entered" in b for b in photos), "only bills are asked")
+
+    def test_only_on_a_verra_project_trip(self):
+        trip, jev = run_trip(weighbridge=self.NAME)
+        self.assertFalse(any(b"weighbridge_entered" in sent(r) or self.NAME.encode() in sent(r) for r in jev.requests))
+        self.assertNotIn("weighbridge_matches", by_key(trip["verdict"]["checks"]))
+        trip, _ = run_trip(weighbridge=self.NAME, bill=())
+        self.assertNotIn("weighbridge_matches", by_key(trip["verdict"]["checks"]), "nor when the bills are missing")
 
     def test_saved_answers_keep_their_keys_without_a_weighbridge(self):
         prints = {"md5": "abc"}
@@ -1396,12 +1404,12 @@ class WeighbridgeTests(unittest.TestCase):
         self.assertNotEqual(plain.split("|")[2], named.split("|")[2])
 
     def outcome(self, answer):
-        trip, _ = run_trip(weighbridge=self.NAME, bill=(FIRST, {**FINAL, "weighbridge_entered": answer}))
+        trip, _ = run_trip(weighbridge=self.NAME, verra=True, bill=(FIRST, {**FINAL, "weighbridge_entered": answer}))
         return by_key(trip["verdict"]["checks"])["weighbridge_matches"]
 
     def test_same_passes_different_or_unsure_asks(self):
         same = self.outcome(("same", 0.9))
-        self.assertEqual((same["status"], same["part"], same["detail"]), ("pass", "docs", f"weighbill2.jpg is from {self.NAME}"))
+        self.assertEqual((same["status"], same["part"], same["detail"]), ("pass", "verra", f"weighbill2.jpg is from {self.NAME}"))
         different = self.outcome(("different", 0.9))
         self.assertEqual(different["status"], "review", "even a sure mismatch may only be the wrong weighbridge entered")
         self.assertIn(f"from another weighbridge than {self.NAME}, the one entered", different["detail"])
@@ -1412,7 +1420,7 @@ class WeighbridgeTests(unittest.TestCase):
         self.assertEqual(self.outcome(("not_shown", 0.9))["status"], "review")
 
     def test_no_bills_asks_a_person_with_the_missing_bills(self):
-        trip, _ = run_trip(weighbridge=self.NAME, bill=())
+        trip, _ = run_trip(weighbridge=self.NAME, verra=True, bill=())
         c = by_key(trip["verdict"]["checks"])["weighbridge_matches"]
         self.assertEqual((c["status"], c["cause"]), ("review", "bill_missing"))
 

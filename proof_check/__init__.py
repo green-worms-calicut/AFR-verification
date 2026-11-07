@@ -26,7 +26,8 @@ within `plant_radius` of the plant; any clearly farther is flagged. Each run can
 
 Verra, for a Verra project trip (`--verra`): the final slip must have a material entered and carry the
 weighbridge's own ink stamp. Our company's name (`OUR_COMPANY`) is sent so that our company's stamp, often on
-the slip too, isn't taken for it. These questions are only asked on a Verra project trip.
+the slip too, isn't taken for it. With a weighbridge entered, the final slip must also be from it (its name allowed
+to be written or spelt differently). These questions are only asked on a Verra project trip.
 
 Across trips: an
 image already used in another trip is flagged (`ImageIndex`), and so is a vehicle on two trips at once
@@ -38,7 +39,8 @@ The checks fall into three parts (`PARTS`, `PART_OF`), each decided on its own:
     was at the plant, and no image or trip is a duplicate;
   - docs: is the proof complete? Unloading photos and bills added, a vehicle and a GPS stamp in every photo,
     a final slip, its net weight the typed quantity, and gross heavier than tare;
-  - verra: what a Verra project trip also needs: the material and the weighbridge's stamp.
+  - verra: what a Verra project trip also needs: the material, the weighbridge's stamp, and the slip from the
+    weighbridge entered.
 
 Nothing is rejected here. A check that finds a problem flags its part, and the trip, an unsure one asks
 a person to look, and the person accepts or rejects each part.

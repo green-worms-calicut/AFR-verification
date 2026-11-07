@@ -132,7 +132,7 @@ PART_OF = {
     # The verifier, from what was entered in gw_sales: every collection photo was taken on its pickup day, and no
     # unloading photo long after the end time.
     "collection_photo_date": "real", "unloading_too_late": "real",
-    "weighbridge_matches": "docs", "collection_point": "real",
+    "weighbridge_matches": "verra", "collection_point": "real",
     "log_same_photo": "real", "log_reused": "real",
 }
 
@@ -757,14 +757,14 @@ def verra_checks(final: dict | None) -> list[dict]:
 def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, verra: bool = False,
                 weighbridge: str | None = None) -> list[dict]:
     """A weighbridge slip, the final slip, the vehicle number on every slip, the final slip's net weight and labels,
-    for a Verra project trip, its material and stamp, and with `weighbridge`, that it is from that weighbridge.
+    for a Verra project trip, its material and stamp, and with `weighbridge` too, that it is from that weighbridge.
     """
     if not bills:
         return [check("bill", "bill_missing", "Weigh bills", "review", "No weigh bills added.", cause="bill_missing"),
                 check("bill", "bill_number", f"Bills match {vehicle_number}", "review",
                       f"No weigh bills to compare with {vehicle_number}.", cause="bill_missing"),
                 *(verra_checks(None) if verra else []),
-                *([weighbridge_check(None, weighbridge, cause="bill_missing")] if weighbridge else [])]
+                *([weighbridge_check(None, weighbridge, cause="bill_missing")] if verra and weighbridge else [])]
     slips = [b for b in bills if b["answers"]["weigh_bill"]["yes"] >= 0.5]
     ignored = [b for b in bills if b not in slips]
     note = f" (ignored as not a slip: {names(ignored)})" if ignored else ""
@@ -823,7 +823,7 @@ def bill_checks(bills: list[dict], vehicle_number: str, quantity: str | None, ve
             weights["confidence"] >= CONFIDENT or weights["choice"] == "tare_heavier" and weights["confidence"] >= LEANS):
         checks.append(choice_check("bill", "gross_vs_tare", "gross_vs_tare", final["answers"]["gross_vs_tare"],
                                    vehicle_number, quantity, final))
-    if weighbridge:
+    if verra and weighbridge:
         checks.append(weighbridge_check(final, weighbridge))
     return checks + (verra_checks(final) if verra else [])
 
@@ -1088,8 +1088,8 @@ def trip_checks(images: dict[str, list[dict]], vehicle_number: str, quantity: st
     `min_gap_gross_first` apart, loading photos fall before gross and unloading photos between them.
     Photos may be off by `clock_slack`, and unloading must be on the same day as the gross weighing.
     With `plant`, unloading must be stamped within `plant_radius` of it. With `verra` (a Verra project
-    trip), the final slip must have a material entered and carry the weighbridge's stamp. With `weighbridge`
-    (the one entered), the final slip must be from it.
+    trip), the final slip must have a material entered and carry the weighbridge's stamp, and with `weighbridge`
+    (the one entered) be from it.
     """
     checks = photo_checks("loading", images.get("loading", []), vehicle_number)
     checks += photo_checks("unloading", images.get("unloading", []), vehicle_number)

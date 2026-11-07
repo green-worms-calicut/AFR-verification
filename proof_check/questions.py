@@ -344,7 +344,8 @@ QUESTIONS = {
         "weighbridge_entered": Choice(
             instructions="Is `bill` a slip from the weighbridge named in `weighbridge`? A slip prints its weighbridge's "
                          "name in its heading, sometimes also in an ink stamp. The same weighbridge's name is often "
-                         "written differently: shortened, with or without spaces or 'Electronic', with or without its place.",
+                         "written differently: shortened, with or without spaces or 'Electronic', with or without its place, "
+                         "or spelt differently or wrongly, in `weighbridge` or on the slip.",
             criteria={
                 "different": "The slip's heading names another weighbridge, not the one in `weighbridge`.",
                 "same": "The slip's heading names the weighbridge in `weighbridge`, even if written differently.",
@@ -362,7 +363,8 @@ SEAL = ("weighbridge_seal", "weighbridge_name")
 # The bill questions asked only on a Verra project trip: the material, and the stamp.
 VERRA = ("material", *SEAL)
 OUR_COMPANY = "Green Worms Eco Solutions LLP, West Hill, Calicut"
-# The bill question asked only when the weighbridge was entered (the verifier: gw_sales' claims.weighbridge.name).
+# The bill question asked only on a Verra project trip with the weighbridge entered (the verifier: gw_sales'
+# claims.weighbridge.name).
 WEIGHBRIDGE = ("weighbridge_entered",)
 
 # Which readings to report for each slot, as (key, label, [question ids joined by the separator], separator).
@@ -391,7 +393,7 @@ def questions_for(slot: str, quantity: str | None, place: bool = False, verra: b
     """The questions asked about one image: the net weight only when a quantity was typed, where
     the photo was taken only with `place` (an unloading photo, when the plant's location is given),
     the material and the weighbridge's stamp only with `verra` (a bill of a Verra project trip), and whether the
-    bill is from the weighbridge entered only with `weighbridge`.
+    bill is from the weighbridge entered only with `weighbridge` (a Verra project trip's bill too).
     """
     return {q: v for q, v in QUESTIONS[slot].items()
             if (quantity or q != "net_weight") and (place or q not in PLACE) and (verra or q not in VERRA)

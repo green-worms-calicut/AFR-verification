@@ -34,6 +34,7 @@ A photo's clock may be off the weighbridge's by up to 5 minutes (the clock slack
 **Verra**, for a Verra project trip
 - Is a material entered on the final slip (Material, Product, Item, or "Loaded with …")? A blank field, only Nil or a dash, or only EMPTY or LOAD, is a problem; a slip with no material field goes to a person. Which material it is isn't checked.
 - Does the final slip carry the weighbridge's own ink stamp? No stamp is a problem, and so is a stamp clearly naming a different weighbridge from the slip's heading. Our company's own stamp, often on the slip too, doesn't count.
+- When a weighbridge is entered (the verifier, or `"weighbridge"` in `trip.json`), is the final slip from it? See the verifier's checks below.
 
 Only Verra project trips are checked for these, and Jev is only asked about them then: tick **Verra project** on the page, give `--verra`, or put `"verra": true` in `trip.json`.
 
@@ -44,7 +45,7 @@ Only Verra project trips are checked for these, and Jev is only asked about them
 These checks fall into three parts, each with its own verdict:
 - **Trip is real:** did the trip happen as claimed? The plates in the photos and the number on every slip match the vehicle number you typed; the weighing order, the gap between weighings, the tare weighed on this trip and the empty weighing first; every photo's time; the photos and bills taken directly; unloading at the plant; and no image or trip a duplicate.
 - **Documentation:** is the proof complete? Unloading photos and bills added; a vehicle and a GPS stamp in every photo; a final slip; its net weight the quantity you typed; and gross heavier than tare.
-- **Verra**, only for a Verra project trip: the material and the weighbridge's stamp.
+- **Verra**, only for a Verra project trip: the material, the weighbridge's stamp, and the slip from the weighbridge entered.
 
 A missing unloading photo or bill is a gap in the documentation, but it also leaves nothing to show the trip is real, so the real part asks a person too (such as "Unloading plate matches: no unloading photos to compare"). A missing collection (loading) photo isn't flagged: the trip's order is still checked from the weighings and the unloading photos (every unloading photo after gross, or between gross and tare). Without one, its plate, its time, its pickup day and its collection point just aren't checked. A collection photo that was added but can't be read or found still asks a person.
 
@@ -322,7 +323,7 @@ What was entered in gw_sales is also checked against the photos (`verifier/entry
 - No unloading photo is stamped more than 1 h 30 min after the end time entered. This is skipped without an end time (`unloading_too_late`, real).
 - No pickup time is compared with the arrival entered: a log's `collectionDate` gives the pickup's day, but its time can be hours after the collection photos (on 3 Nov 2026 often when the log was saved at the plant), so only its day is used (dropped 6 Nov 2026, after 5 wrong flags on 3 Nov).
 - For a log whose collection point's location gw_sales knows, at least one of its photos must be stamped within 4 km of it (`collection_point`, real; `collection_radius` in the standard). A clearly farther photo is a problem. Its photos' positions are read to four decimals, the same way as unloading photos at the plant: the plant check and this one share `proof_check.near_check`. This costs about $0.0005 more per collection photo, and only for logs with a known point.
-- The final slip is from the weighbridge entered (`claims.weighbridge.name`). Bills are asked whether their heading names it, allowing for the name written differently (`weighbridge_matches`, docs). Another weighbridge asks a person, even when Jev is sure, since it may only be the wrong weighbridge entered; so does unsure. The question (`weighbridge_entered`) is only asked when a weighbridge is entered, so saved answers without one stay valid. `trip.json` can give one as `"weighbridge"`.
+- On a Verra project trip, the final slip is from the weighbridge entered (`claims.weighbridge.name`; `weighbridge_matches`, verra, since 7 Nov 2026: it was docs, on every trip). Bills are asked whether their heading names it. Jev can't read the name out, so it judges whether the two names mean the same weighbridge rather than comparing letters: the question allows for the name shortened, with or without spaces, "Electronic" or the place, and spelt differently or wrongly, in gw_sales or on the slip. A name spelt so differently that Jev says another weighbridge, or is unsure, never rejects: another weighbridge asks a person, even when Jev is sure, since it may only be the wrong weighbridge entered or a misspelling; so does unsure. The question (`weighbridge_entered`) is only asked on a Verra project trip with a weighbridge entered, so saved answers without one stay valid. `trip.json` can give one as `"weighbridge"`, used with `"verra": true`.
 
 What the logs weighed by hand scale (kg, with bags counted apart) is recorded against the net weight entered, in `extractions.collectedVsWeighed`. It isn't flagged, so a tolerance can be chosen from real numbers.
 

@@ -269,7 +269,7 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
     plant's (latitude, longitude), unloading photos are read for where they were taken and checked
     against it. With `verra` (a Verra project trip), bills are checked for the material and the weighbridge's stamp.
     `box_model` answers the Box questions (finding the slip and the stamp's position line). With `weighbridge`, the
-    weighbridge entered, bills are asked whether they are from it. `place_also` names other images to read where
+    weighbridge entered, a Verra project trip's bills are asked whether they are from it. `place_also` names other images to read where
     they were taken (the verifier: collection photos whose collection point is known). `around`, the trip's date,
     gives the stamps and slips, which print no year, the year nearest it.
     """
@@ -292,7 +292,7 @@ def analyze_trip(client: TypeSafeClient | None, uploads: dict[str, list[Upload]]
         role, u, img, prints = job
         slot, place = SLOT_OF[role], prints["md5"] in placed
         asked = verra and slot == "bill"  # the Verra questions are only for bills
-        bridge = weighbridge if slot == "bill" else None
+        bridge = weighbridge if asked else None  # the weighbridge entered is a Verra check too
         try:
             return analyze(client, slot, img, vehicle_number, model, quantity, cache,
                            answer_key(prints, slot, vehicle_number, quantity, model, place, asked, bridge), place, asked,
