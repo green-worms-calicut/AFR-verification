@@ -411,14 +411,13 @@ class EntryCheckTests(unittest.TestCase):
         self.assertIn("is also on disposal 1000. One pickup can't be counted in two disposals.", flag["message"])
         self.assertRegex(flag["message"], r"\(.*, picked up \d\d/\d\d\) is also on")
         self.assertNotIn(") (picked up", flag["message"])
-        self.assertNotIn("log_repeated", {f["code"] for f in checked.flags}, "the same id is reused's, not also repeated")
 
-    def test_the_same_pickup_under_another_id_asks_a_person(self):
-        checked = self.checked(logs=[log(45001, materials=MATERIALS)], other_logs=[(1000, log(46001, materials=MATERIALS))])
-        flag = next(f for f in checked.flags if f["code"] == "log_repeated")
-        self.assertEqual(flag["kind"], "please check")
-        self.assertIn("46001", flag["message"])
-        self.assertEqual(flag["related"], [{"type": "disposal_log", "id": 1000}])
+    def test_logs_matching_another_pickup_by_entered_data_are_not_flagged(self):
+        # Log weights are placeholders (1 kg) or estimates (4 Nov 2026: 16 wrong "same pickup" flags), so a pickup is
+        # only a duplicate by its evidence: the same log id, photo, slip, weighing or vehicle time (the user, 6 Nov).
+        checked = self.checked(logs=[log(45001, materials=MATERIALS), log(45002, materials=MATERIALS)],
+                               other_logs=[(1000, log(46001, materials=MATERIALS))])
+        self.assertEqual([f["code"] for f in checked.flags], [])
 
     def test_three_shared_logs_are_one_flag_for_the_other_disposal(self):
         mine = [log(45001, materials=MATERIALS), log(45002, materials=MATERIALS), log(45003, materials=MATERIALS)]
@@ -436,16 +435,6 @@ class EntryCheckTests(unittest.TestCase):
         self.assertEqual([f["related"][0]["id"] for f in flags], [1000, 1001])
         self.assertTrue(all(f["target"]["type"] == "collection_log" for f in flags))
 
-    def test_several_repeated_pickups_on_one_disposal_are_one_flag(self):
-        hdpe = [{"materialName": "HDPE", "quantity": 40, "unit": "kg"}]
-        mine = [log(45001, materials=MATERIALS), log(45002, materials=hdpe)]
-        theirs = [log(46001, materials=MATERIALS), log(46002, materials=hdpe)]
-        checked = self.checked(logs=mine, other_logs=[(1000, e) for e in theirs])
-        [flag] = [f for f in checked.flags if f["code"] == "log_repeated"]
-        self.assertIn("46001", flag["message"])
-        self.assertIn("46002", flag["message"])
-        self.assertNotIn("target", flag)
-
     def test_the_same_pair_in_one_log_and_under_two_logs_is_one_photo_flag(self):
         uploads, self.jev = make_trip(same=(("loading", 0, "loading", 1),))
         request = self.two_logs(uploads)
@@ -454,36 +443,6 @@ class EntryCheckTests(unittest.TestCase):
         flags = [f for f in self.checked(request, uploads).flags if f["code"] == "log_same_photo"]
         self.assertEqual(len(flags), 1)
         self.assertEqual(flags[0]["kind"], "problem found")
-
-    def test_the_same_pickup_twice_in_one_disposal_asks_a_person(self):
-        checked = self.checked(logs=[log(45001, materials=MATERIALS), log(45002, materials=MATERIALS)])
-        flag = next(f for f in checked.flags if f["code"] == "log_repeated")
-        self.assertIn("collection log 45002 (on this disposal)", flag["message"])
-
-    def test_two_pickups_the_same_day_with_other_weights_pass(self):
-        other = log(46001, materials=[{"materialName": "PET", "quantity": 95, "unit": "kg"}])
-        checked = self.checked(logs=[log(45001, materials=MATERIALS)], other_logs=[(1000, other)])
-        self.assertNotIn("log_repeated", {f["code"] for f in checked.flags})
-
-    def test_a_log_without_a_pickup_date_is_not_matched(self):
-        bare = log(46001, collectionDate=None, materials=MATERIALS)
-        checked = self.checked(logs=[log(45001, materials=MATERIALS)], other_logs=[(1000, bare)])
-        self.assertNotIn("log_repeated", {f["code"] for f in checked.flags})
-
-    def test_a_log_without_materials_is_not_matched(self):
-        checked = self.checked(logs=[log(45001)], other_logs=[(1000, log(46002))])
-        self.assertNotIn("log_repeated", {f["code"] for f in checked.flags})
-        self.assertNotIn("log_reused", {f["code"] for f in checked.flags})
-
-    def test_a_reused_log_does_not_hide_another_logs_repeat_on_the_same_disposal(self):
-        hdpe = [{"materialName": "HDPE", "quantity": 40, "unit": "kg"}]
-        checked = self.checked(logs=[log(45001, materials=MATERIALS), log(45002, materials=hdpe)],
-                               other_logs=[(1000, log(45001, materials=MATERIALS)), (1000, log(46002, materials=hdpe))])
-        codes = [f["code"] for f in checked.flags]
-        self.assertEqual(codes.count("log_reused"), 1)
-        repeated = next(f for f in checked.flags if f["code"] == "log_repeated")
-        self.assertIn("Collection log 45002", repeated["message"])
-        self.assertIn("collection log 46002 (on disposal 1000)", repeated["message"])
 
     def test_pickup_in_utc_is_compared_as_ist(self):
         checked = self.checked(logs=[log()])  # 14 Oct 21:00 UTC = 15 Oct IST, the photos' day

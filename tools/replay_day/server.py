@@ -49,13 +49,15 @@ class Report:
         self.run(checking.save_mark(self.pool, disposal_id, key, about, mark, str(body.get("note") or "")[:2000]))
         return None
 
-    def image(self, disposal_id: str, name: str, small: bool) -> bytes | None:
+    def image(self, disposal_id: str, name: str, small: bool, turn: int = 0) -> bytes | None:
         if not disposal_id.isdigit() or int(disposal_id) not in self.ids or "/" in name or name.startswith("."):
             return None
         path = files.day_folder(self.day, self.trips) / disposal_id / name
         if not path.is_file():
             return None
-        return report.thumbnail(path) if small else path.read_bytes()
+        if small:
+            return report.thumbnail(path, turn=turn)
+        return report.thumbnail(path, 2400, turn) if turn else path.read_bytes()  # turned as Jev read it
 
     def close(self) -> None:
         self.run(self.pool.close())
@@ -83,11 +85,13 @@ def handler(source: Report) -> type[BaseHTTPRequestHandler]:
                 self.send_json(200, source.data())
             elif parts.path.startswith(("/thumb/", "/image/")):
                 _, what, disposal_id, name = (parts.path.split("/", 3) + [""] * 4)[:4]
-                data = source.image(disposal_id, unquote(name), what == "thumb" or "small" in parse_qs(parts.query))
+                query = parse_qs(parts.query)
+                turn = int(query["turn"][0]) if query.get("turn", [""])[0] in {str(t) for t in report.TURNS} else 0
+                data = source.image(disposal_id, unquote(name), what == "thumb" or "small" in query, turn)
                 if data is None:
                     self.send(404, b"not found", "text/plain")
                 else:
-                    self.send(200, data, "image/jpeg" if what == "thumb" or not data.startswith(b"\x89PNG") else "image/png")
+                    self.send(200, data, "image/png" if data.startswith(b"\x89PNG") else "image/jpeg")
             else:
                 self.send(404, b"not found", "text/plain")
 

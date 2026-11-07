@@ -77,6 +77,32 @@ def image_list(body: dict) -> list[dict]:
             for item in body.get("evidence") or [] if item.get("s3Key")]
 
 
+PLATE = {"same": "plate matches", "different": "plate differs", "cannot_tell": "plate not readable"}
+
+
+def image_reading(slot: str, result: dict) -> str:
+    """What Jev read from one image, for its caption: a photo's stamp time and date and its plate, a bill's slip and
+    weighing times, each with how sure Jev was when under CONFIDENT."""
+    rd = {x["key"]: x for x in result.get("readings") or []}
+    sure = lambda *keys: min(rd[k]["min_confidence"] for k in keys)
+    note = lambda *keys: f" ({sure(*keys):.0%} sure)" if sure(*keys) < CONFIDENT else ""
+    answers = result.get("answers") or {}
+    if slot == "photo":
+        said = [f"stamp {rd['photo_time']['value']} on {rd['photo_date']['value']}{note('photo_time', 'photo_date')}"
+                if not (rd["photo_time"]["missing"] or rd["photo_date"]["missing"]) else "stamp not read"]
+        plate = answers.get("plate_number") or {}
+        if plate.get("choice") in PLATE:
+            said.append(PLATE[plate["choice"]] + (f" ({plate['confidence']:.0%} sure)" if plate["confidence"] < CONFIDENT else ""))
+        return ", ".join(said)
+    if (answers.get("weigh_bill") or {}).get("yes", 1) < 0.5:
+        return "not a weighbridge slip"
+    kind = {"one_weight": "first slip", "both_weights": "final slip"}.get((answers.get("slip_kind") or {}).get("choice"), "slip")
+    words = {"gross": "gross", "tare": "tare", "in": "in", "out": "out", "printed": "printed"}
+    times = [f"{word} {rd[f'{p}_time']['value']} on {rd[f'{p}_date']['value']}{note(f'{p}_time', f'{p}_date')}"
+             for p, word in words.items() if not (rd[f"{p}_time"]["missing"] or rd[f"{p}_date"]["missing"])]
+    return f"{kind}: {', '.join(times)}" if times else f"{kind}, no time read"
+
+
 def ist(text: str | None) -> str | None:
     at = standards.ist_time(text)
     return f"{at:%d %b %H:%M}" if at else None
@@ -135,6 +161,10 @@ def build(day: date, bodies: list[dict], saved: dict[int, dict], marks: dict[tup
                                        "certainty": c.get("certainty"), "part": c.get("part"), "about": about,
                                        **(marks.get((disposal_id, c["key"], about), {}) if c["status"] == "pass" else {})})
             card["risky"] = close_calls(analysis, names, margin)
+            read = {r["name"]: (image_reading(r.get("slot") or ("bill" if kind == "bill" else "photo"), r), r.get("rotated") or 0)
+                    for kind, results in analysis["images"].items() for r in results}
+            for image in card["images"]:
+                image["read"], image["turn"] = read.get(image["key"], (None, 0))
             if disposal_id in truth:
                 d = disposal_check.disposal(body)
                 card["truth"] = truth_items(truth[disposal_id], analysis, d.vehicle_number,
@@ -244,12 +274,17 @@ def duplicates(cards: list[dict]) -> list[dict]:
             for c in cards for f in c["flags"] if f.get("related")]
 
 
-def thumbnail(path: Path, longest: int = 480) -> bytes | None:
-    """A saved image made small and upright, as JPEG; None if it can't be read."""
+TURNS = (0, 90, 180, 270)  # how an image may be turned, as `analyze` turned it before Jev read it
+
+
+def thumbnail(path: Path, longest: int = 480, turn: int = 0) -> bytes | None:
+    """A saved image made small and upright, as JPEG, turned `turn` degrees as Jev read it; None if it can't be read."""
     try:
         img = proof_check.load_bytes(path.read_bytes())
     except (OSError, *proof_check.UNREADABLE):
         return None
+    if turn in TURNS[1:]:
+        img = img.rotate(turn, expand=True)
     img.thumbnail((longest, longest))
     buffer = io.BytesIO()
     img.convert("RGB").save(buffer, "JPEG", quality=72)
@@ -261,7 +296,7 @@ def embed_images(report: dict, day: date, trips: Path = files.TRIPS) -> None:
     folder = files.day_folder(day, trips)
     for card in report["disposals"]:
         for image in card["images"]:
-            small = thumbnail(folder / str(card["id"]) / image["file"], 360)
+            small = thumbnail(folder / str(card["id"]) / image["file"], 360, image.get("turn") or 0)
             image["data"] = "data:image/jpeg;base64," + base64.b64encode(small).decode("ascii") if small else None
 
 

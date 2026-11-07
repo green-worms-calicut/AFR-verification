@@ -246,61 +246,12 @@ def log_reused(request: dict, other_logs: list[tuple[int, dict]]) -> list[dict]:
     return made
 
 
-def pickup_key(entry: dict) -> tuple | None:
-    """What makes two collection logs one pickup: client, collection point, IST day and every material with its
-    quantity and unit. None if any is missing, so a log isn't matched on blanks."""
-    client = ((entry.get("client") or {}).get("name") or "").strip().lower()
-    point = ((entry.get("collectionPoint") or {}).get("name") or "").strip().lower()
-    day = standards.ist_day(entry.get("collectionDate"))
-    try:
-        materials = frozenset((m["materialName"].strip().lower(), float(m["quantity"]), m["unit"].strip().lower())
-                              for m in entry.get("materials") or [])
-    except (KeyError, TypeError, ValueError, AttributeError):
-        return None
-    return (client, point, day, materials) if client and point and day and materials else None
-
-
-def log_repeated(request: dict, other_logs: list[tuple[int, dict]]) -> list[dict]:
-    """The same pickup entered twice under different ids (same client, collection point, IST day and materials with
-    quantities): one check per pair, this disposal's logs pairwise and against `other_logs`, asking a person. A pair
-    with a log that `log_reused` flagged for that disposal is its, not this one's."""
-    entries = [e for e in logs(request) if pickup_key(e)]
-    label = "No collection log repeats another pickup"
-    shared = {i: {o["id"] for j, o in other_logs if j == i} & {e["id"] for e in logs(request)} for i, _ in other_logs}
-    pairs = [(a, b, None) for n, a in enumerate(entries) for b in entries[n + 1:]]
-    pairs += [(a, b, i) for a in entries for i, b in other_logs if pickup_key(b)]
-    found: dict[int | None, list[tuple[dict, dict]]] = {}
-    for a, b, i in pairs:
-        if a["id"] == b["id"] or pickup_key(a) != pickup_key(b) or (i is not None and {a["id"], b["id"]} & shared[i]):
-            continue
-        found.setdefault(i, []).append((a, b))
-    made = []
-    for i, matched in found.items():
-        where = "on this disposal" if i is None else f"on disposal {i}"
-        said = []
-        for a, b in matched:
-            name = log_name(a)
-            said.append(f"{name[0].upper()}{name[1:]} and collection log {b['id']} ({where}) are the same pickup: same "
-                        f"client, collection point, day {pickup(a):%d/%m} and weights.")
-        ours = {a["id"] for a, _ in matched}
-        c = check("collection", "log_repeated", label, "review",
-                  f"{' '.join(said)} Check {'it wasn' if len(matched) == 1 else 'they weren'}'t entered twice.",
-                  images=[k for k, owned in owners(request).items() if ours & set(owned)])
-        if len(matched) == 1:
-            c["target"] = {"type": "collection_log", "id": matched[0][0]["id"]}
-        if i is not None:
-            c["related"] = compare_disposals.related([i])
-        made.append(c)
-    return made
-
-
 def checks(request: dict, images: dict[str, list[dict]], radius: float = 500, around=None,
            other_logs: list[tuple[int, dict]] = ()) -> list[dict]:
     """Every check of what was entered, for one disposal's request and its checked images; `radius` is how far from
     its collection point a collection photo may be, `around` the trip's date, and `other_logs` the collection logs of
     other disposals (`database.other_logs`)."""
     return [*log_same_photo(request, images), *log_reused(request, other_logs),
-            *log_repeated(request, other_logs),
             *(c for c in (photo_date(request, images, around), too_late(request, images, around)) if c),
             *collection_points(request, images, radius)]
 

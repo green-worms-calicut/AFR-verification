@@ -153,6 +153,17 @@ class RiskyPassTests(unittest.TestCase):
         self.assertEqual(report.close_call({**screen, "certainty": 0.75}, "photo", 0.1), "no, 0.25 sure, needs 0.20")
         self.assertIsNone(report.close_call({**screen, "certainty": 0.55}, "photo", 0.1))
 
+    def test_each_image_says_what_jev_read_from_it(self):
+        read = lambda key, value, sure=0.95: {"key": key, "value": value, "missing": value is None, "min_confidence": sure}
+        photo = {"readings": [read("photo_time", "08:11"), read("photo_date", "04/11", 0.6)],
+                 "answers": {"plate_number": {"choice": "same", "confidence": 0.9}}}
+        self.assertEqual(report.image_reading("photo", photo), "stamp 08:11 on 04/11 (60% sure), plate matches")
+        times = {p: (None, None) for p in ("gross", "tare", "in", "out", "printed")} | {"gross": ("06:17", "04/11"), "tare": ("08:55", "04/11")}
+        bill = {"readings": [r for p, (t, d) in times.items() for r in (read(f"{p}_time", t), read(f"{p}_date", d))],
+                "answers": {"weigh_bill": {"yes": 0.99}, "slip_kind": {"choice": "both_weights", "confidence": 0.9}}}
+        self.assertEqual(report.image_reading("bill", bill), "final slip: gross 06:17 on 04/11, tare 08:55 on 04/11")
+        self.assertEqual(report.image_reading("bill", {**bill, "answers": {"weigh_bill": {"yes": 0.1}}}), "not a weighbridge slip")
+
     def card(self, i, outcome="passed", risky=()):
         return {"id": i, "outcome": outcome, "risky": [{"sure": s} for s in risky]}
 

@@ -85,13 +85,14 @@ from proof_check.images import (
 from proof_check.trip_rules import (
     CONFIDENT, YES, NO, LEANS, NOUL_THRESHOLDS, Limits, LIMIT_NAMES, LIMIT_UNITS, NOUL_CHECKS, CHOICE_CHECKS, FINAL_ONLY,
     GROUPS, PARTS, PART_OF, readings_for, position, to_24h, same_hour, lower_first, unsure, unsure_yes, noul_status, checks_for, unanswered_check,
-    YEAR, moment, minutes_between, duration, show, TIME_PLACES, only_time, weighings, trip_weighings, first_slip, check, names, named, plural, EACH_PHOTO,
+    YEAR, moment, minutes_between, duration, show, TIME_PLACES, DATE_WINDOW, MIN_CANDIDATE, part_options, near_trip, date_options,
+    plausible, only_time, weighings, trip_weighings, first_slip, check, names, named, plural, EACH_PHOTO,
     unsure_stamps, same_file, stamp_year,
     each_photo, plate_check, photo_checks, metres_between, distance, from_square, to_square, positions, chance_within, placed, plant_check, near_check,
     final_slip, LOOK_FOR, choice_check, seal_checks, verra_checks, bill_checks, weighbridge_check, photo_moments,
     gross_start, busy_time,
     overlap_minutes, photo_window,
-    photo_timing, gross_weighing, same_day, first_weighing, one_time_checks, reading_options, in_order, chance_in_order,
+    photo_timing, gross_weighing, same_day, one_time_checks, reading_options, in_order, chance_in_order,
     settle_unsure_times, trip_checks, short_trip, and_list, reuse_check, overlap_checks
 )
 from proof_check.inputs import in_india, normalize_vehicle_number, parse_limits, parse_quantity, parse_plant, parse_switch

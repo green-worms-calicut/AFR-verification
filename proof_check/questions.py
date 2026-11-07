@@ -43,6 +43,12 @@ NO_STAMP_DATE = "There is no GPS stamp with a date, or its date can't be read."
 # On 3 Nov 2026 the stamp month of 10 of 88 photos was unsure (0.52-0.75), every time between 11 and 03: Jev wondered
 # whether 03/11 was 11 March. In October (days 19 and 23, which can't be months) it never was. Our dates are day first.
 DAY_FIRST = "Dates are written day first, then month, then year (dd/mm/yy or dd/mm/yyyy): 03/11/2026 is 3 November, not 11 March."
+# On 2-4 Nov 2026 the month was the unsure part of 14 of 19 G W slips, which print 04-11-2026-05:24:33 AM: Jev weighed
+# 04 (the day) against 11 for the month. On 19 and 23 Oct the day couldn't be a month, so it never did. Bills only, so
+# photos aren't asked again.
+BILL_DAY_FIRST = ("Dates are written day first, then month, then year (dd/mm/yyyy, dd/mm/yy, dd-mm-yyyy, dd-mm-yy or "
+                  "dd-Mon-yyyy): 03/11/2026, 03/11/26 and 04-11-2026 are 3, 3 and 4 November, not 11 March or 11 April. "
+                  "A time may follow straight after the date, as in 04-11-2026-05:24:33 AM.")
 # The two bill layouts: a date and time printed with each weight, or only a Time In and Time Out.
 GROSS = "If `bill` prints a date and time for the gross (loaded) weight itself, next to or under it,"
 TARE = "If `bill` prints a date and time for the tare (empty) weight itself, next to or under it,"
@@ -82,9 +88,9 @@ def bill_time(prefix: str, premise: str) -> dict:
                                  criteria={"none": "Neither: the time is on a 24-hour clock, such as 15:06.",
                                            "am": "AM is printed after the time.", "pm": "PM is printed after the time.",
                                            NOT_SHOWN: NO_BILL_TIME}),
-        f"{prefix}_day": Choice(instructions=f"{premise} what day of the month is its date? {DAY_FIRST} {NOT_CAMERA}",
+        f"{prefix}_day": Choice(instructions=f"{premise} what day of the month is its date? {BILL_DAY_FIRST} {NOT_CAMERA}",
                                 criteria=options(DAYS, NO_BILL_DATE)),
-        f"{prefix}_month": Choice(instructions=f"{premise} what month (01 to 12) is its date? {DAY_FIRST} {NOT_CAMERA}",
+        f"{prefix}_month": Choice(instructions=f"{premise} what month (01 to 12) is its date? {BILL_DAY_FIRST} {NOT_CAMERA}",
                                   criteria=options(MONTHS, NO_BILL_DATE)),
     }
 
@@ -227,6 +233,21 @@ QUESTIONS = {
                 "one_weight": "Only one weight, from the first weighing; the other weight and the net weight are blank or zero.",
                 "both_weights": "Both weights (gross and tare, loaded and empty, or first and second), and the net weight.",
                 NOT_SHOWN: "It isn't a weighbridge slip, or its weights can't be read.",
+            },
+        ),
+        # Which kind of slip decides which time is the tare (the user, 7 Nov 2026): on a Time In / Date In / First Wt
+        # slip the first; beside each labelled weight, the label. Jev's time answers can't tell them apart: it gave
+        # G W's slip (times under Gross Weight and Tare Weight) a Time In, 93% sure (79537, 4 Nov).
+        "time_layout": Choice(
+            instructions="How does `bill` show when the vehicle was weighed? Look at the words printed beside its times.",
+            criteria={
+                "in_out": "By when each weighing was made: a Time In and Time Out, a Date In and Date Out, a Date & Time "
+                          "In and Out, or a First Wt and Second Wt each with its own time (even if both times are "
+                          "labelled Gross Wt. Date & Time).",
+                "per_weight": "By weight: a date and time printed beside or under a weight labelled gross or tare, "
+                              "or load or empty weight.",
+                "one_time": "Only one date and time for the whole slip.",
+                NOT_SHOWN: "No weighing time is printed, or it isn't a weighbridge slip.",
             },
         ),
         "bill_number": Choice(

@@ -15,7 +15,7 @@ def timeline(images: dict[str, list[dict]], w: dict | None, checks: list[dict], 
     events = []
     if w:  # a slip with one time has only the tare's or the gross', or a weighing not known to be either
         weighed = {"Tare": w["tare"], "Gross": w["gross"]} if w["tare"] or w["gross"] else {"Weighing": w["second"]}
-        events += [{"at": m, "what": what, "bad": bool({"weigh_order", "weigh_gap", "weigh_day", "time_in_tare"} & failed)}
+        events += [{"at": m, "what": what, "bad": bool({"weigh_order", "weigh_gap", "weigh_day"} & failed)}
                    for what, m in weighed.items() if m]
     for role, word in (("loading", "Loading photos"), ("unloading", "Unloading photos")):
         times = [m for _, m in photo_moments(images.get(role, []), around) if m]
